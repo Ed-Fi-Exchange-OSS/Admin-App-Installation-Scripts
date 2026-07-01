@@ -1,6 +1,6 @@
-# {Insert Repository Name Here}
+# Admin App Installation Scripts
 
-{Insert project information here}
+This repository contains scripts to help make installing the Ed-Fi Admin App (v4 and above) easier to install
 
 ## Legal Information
 
