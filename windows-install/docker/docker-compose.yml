@@ -1,0 +1,66 @@
+name: edfiadminapp-db
+
+services:
+  cert-init:
+    # Generates a self-signed SSL cert into the shared cert volume on first
+    # boot. Idempotent: skips if /certs/server.crt already exists.
+    image: alpine:3.20
+    container_name: edfiadminapp-cert-init
+    volumes:
+      - vol-edfiadminapp-certs:/certs
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -f /certs/server.crt ]; then
+          apk add --no-cache openssl
+          openssl req -new -x509 -days 3650 -nodes -text \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:edfiadminapp-postgres" \
+            -out /certs/server.crt \
+            -keyout /certs/server.key
+          chmod 600 /certs/server.key
+          chown 70:70 /certs/server.crt /certs/server.key
+          echo "Generated self-signed SSL certificate (CN=localhost)."
+        else
+          echo "Existing SSL certificate found; skipping generation."
+        fi
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: edfiadminapp-postgres
+    restart: unless-stopped
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+    ports:
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT_EXPOSED:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${ADMIN_APP_DB_NAME:-sbaa}
+      ADMIN_APP_DB_USER: ${ADMIN_APP_DB_USER:-edfiadminapp}
+      ADMIN_APP_DB_PASSWORD: ${ADMIN_APP_DB_PASSWORD:?ADMIN_APP_DB_PASSWORD is required}
+    volumes:
+      - vol-edfiadminapp-db:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - vol-edfiadminapp-certs:/etc/postgresql/certs:ro
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql/certs/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql/certs/server.key
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${ADMIN_APP_DB_NAME:-sbaa}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  vol-edfiadminapp-db:
+    name: vol-edfiadminapp-db
+  vol-edfiadminapp-certs:
+    name: vol-edfiadminapp-certs
