@@ -43,8 +43,8 @@ Use uninstall-keycloak.ps1 for that.
 Does NOT touch:
   - Node.js, JDK, SQL Server, IIS engine installs.
   - URL Rewrite Module, httpPlatform handler (system-level MSIs).
-  - The cloned source repo (wherever this script lives — the repo root is the
-    parent of windows-install\).
+  - The Admin App source checkout (a separate repo, e.g. C:\Ed-Fi\Ed-Fi-AdminApp)
+    that install-all.ps1 clones or that you pass via -SourcePath.
   - install-summary.txt next to the repo (run with -RemoveSummary to delete).
 
 Prompts for confirmation by default. Pass -Force for non-interactive runs.

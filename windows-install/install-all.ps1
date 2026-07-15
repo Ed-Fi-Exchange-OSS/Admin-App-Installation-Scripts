@@ -93,9 +93,20 @@ first start. Subsequent runs ignore it — make sure it matches an existing admi
 (keycloak mode only) Password for the seeded test user that Keycloak creates.
 
 .PARAMETER SourcePath
-Path to the cloned Ed-Fi-AdminApp repo. Defaults to the parent of the script
-directory — i.e., the scripts live in <repo>\windows-install\ and the repo
-root is one level up. Override only if your layout differs.
+Path to an existing Ed-Fi-AdminApp checkout. Optional: when omitted, the Admin
+App source is resolved automatically — a co-located checkout (scripts inside
+<AdminApp>\windows-install\) is honored, otherwise the Admin App is cloned as a
+sibling of this scripts repo (e.g. C:\Ed-Fi\Ed-Fi-AdminApp). Pass this to point
+at a checkout you manage yourself.
+
+.PARAMETER AdminAppRef
+Git ref to clone when auto-fetching the Admin App source. Default 'latest'
+resolves the newest stable (non-prerelease) GitHub release; pass a specific tag
+(e.g. v4.0.1) or branch to pin. Ignored when a checkout already exists.
+
+.PARAMETER AdminAppRepoUrl
+Admin App Git repository to clone from. Defaults to the official
+Ed-Fi-Alliance-OSS repository.
 
 .PARAMETER DatabaseName
 SQL Server database name. Default: sbaa. Propagated to 02 (creates the DB) and
@@ -230,7 +241,9 @@ param(
     [SecureString]$KeycloakAdminPassword,
     [SecureString]$TestUserPassword,
 
-    [string]$SourcePath = (Split-Path $PSScriptRoot -Parent),
+    [string]$SourcePath,
+    [string]$AdminAppRef = 'latest',
+    [string]$AdminAppRepoUrl = 'https://github.com/Ed-Fi-Alliance-OSS/Ed-Fi-AdminApp.git',
     [string]$DatabaseName = "sbaa",
     [string]$AdminUsername = "admin@example.com",
     [string]$JdkDownloadUrl,
@@ -389,12 +402,57 @@ function Write-Phase {
     Write-Host ("=" * 70) -ForegroundColor Cyan
 }
 
-# Sanity-check that $SourcePath looks like an AdminApp repo before we try to
-# build / deploy from it. The user got the scripts by cloning (or unzipping)
-# the repo, so this should always pass on the default; only fires if someone
-# overrode -SourcePath to a wrong directory.
-if (-not (Test-Path "$SourcePath\package.json")) {
-    throw "Expected AdminApp repo at '$SourcePath' but no package.json found. Pass -SourcePath if the repo is elsewhere."
+# Resolve the newest stable Admin App release tag when auto-fetching. An explicit
+# tag/branch in -AdminAppRef wins; 'latest' queries the GitHub releases API (which
+# returns the newest non-prerelease, non-draft release) and falls back to a known
+# tag if the API is unreachable.
+function Resolve-AdminAppRef {
+    param([string]$Ref)
+    if ($Ref -and $Ref -ne 'latest') { return $Ref }
+    $fallback = 'v4.0.1'
+    try {
+        $rel = Invoke-RestMethod -TimeoutSec 15 -Headers @{ 'User-Agent' = 'edfi-adminapp-installer' } `
+            -Uri 'https://api.github.com/repos/Ed-Fi-Alliance-OSS/Ed-Fi-AdminApp/releases/latest'
+        if (-not $rel.tag_name) { throw "no tag_name in response" }
+        Write-Host "Resolved latest stable Admin App release to $($rel.tag_name)."
+        return $rel.tag_name
+    } catch {
+        Write-Warning "Could not resolve the latest Admin App release from GitHub ($($_.Exception.Message)); falling back to $fallback. Pass -AdminAppRef to pin a specific tag."
+        return $fallback
+    }
+}
+
+# Resolve the Admin App source, cloning it if needed. -SourcePath wins when supplied.
+# Otherwise honor a legacy co-located checkout (scripts inside <AdminApp>\windows-install\),
+# and failing that clone the Admin App at the resolved release ref as a sibling of this
+# scripts repo. Build/deploy need the full source tree + package.json, and the Node phase
+# below reads engines.node from it, so this must run first.
+if (-not $SourcePath) {
+    $colocated = Split-Path $scriptDir -Parent
+    if (Test-Path "$colocated\package.json") {
+        $SourcePath = $colocated
+        Write-Host "Using the Admin App source co-located with the scripts: $SourcePath"
+    } else {
+        $SourcePath = Join-Path (Split-Path $colocated -Parent) 'Ed-Fi-AdminApp'
+    }
+}
+
+if (Test-Path "$SourcePath\package.json") {
+    Write-Host "Admin App source found at $SourcePath."
+} elseif (Test-Path $SourcePath) {
+    throw "'$SourcePath' exists but has no package.json, so it is not an Admin App checkout. Remove it or pass -SourcePath to an existing Admin App repo."
+} else {
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "git is required to fetch the Admin App source but was not found on PATH. Install it (winget install --id Git.Git -e) or clone Ed-Fi-AdminApp yourself and pass -SourcePath."
+    }
+    $resolvedRef = Resolve-AdminAppRef -Ref $AdminAppRef
+    Write-Phase "Admin App source ($resolvedRef)"
+    Write-Host "Cloning $AdminAppRepoUrl ($resolvedRef) into $SourcePath..."
+    & git clone --branch $resolvedRef --depth 1 $AdminAppRepoUrl $SourcePath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$SourcePath\package.json")) {
+        throw "Failed to clone the Admin App source ($AdminAppRepoUrl at $resolvedRef) into '$SourcePath'. Check network access and that the ref exists."
+    }
+    Write-Host "Admin App source ready at $SourcePath."
 }
 
 # Node runtime: install Node (or remediate a too-old version via nvm) and set the

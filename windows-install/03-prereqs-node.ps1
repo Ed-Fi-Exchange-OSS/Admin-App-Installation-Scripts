@@ -20,9 +20,10 @@ The npm cache override the App Pool needs is configured by
 05-deploy-api.ps1 (scoped to the App Pool), not here.
 
 .PARAMETER SourcePath
-The cloned AdminApp repo. When package.json exists there, engines.node is parsed
-and used as the floor + nvm install target. Defaults to the parent of the script
-directory (this script lives in <repo>\windows-install\).
+The Ed-Fi-AdminApp checkout. When package.json exists there, engines.node is parsed
+and used as the floor + nvm install target. Defaults to a co-located checkout (this
+script inside <AdminApp>\windows-install\) or a sibling Ed-Fi-AdminApp folder next
+to this scripts repo (e.g. C:\Ed-Fi\Ed-Fi-AdminApp).
 
 .PARAMETER MinNodeMajor
 Floor enforced when package.json detection fails. Default: 22.
@@ -42,7 +43,10 @@ non-interactive runs (CI, install-all -AutoUpgradeNode).
 #>
 
 param(
-    [string]$SourcePath = (Split-Path $PSScriptRoot -Parent),
+    [string]$SourcePath = $(
+        $c = Split-Path $PSScriptRoot -Parent
+        if (Test-Path "$c\package.json") { $c } else { Join-Path (Split-Path $c -Parent) 'Ed-Fi-AdminApp' }
+    ),
     [int]$MinNodeMajor = 22,
     [string]$NodeLtsVersion = "22",
     [switch]$AssumeYes

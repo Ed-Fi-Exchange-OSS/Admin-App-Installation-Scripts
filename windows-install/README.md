@@ -8,12 +8,14 @@ TLS is on by default. The API and frontend deploy as two independent IIS sites o
 
 ## Getting the scripts onto the VM
 
-The scripts live in this repo. On a fresh VM, get the source there first by either:
+These scripts live in this repository (`Admin-App-Installation-Scripts`). On a fresh VM, get them there first by either:
 
-- `git clone https://github.com/Ed-Fi-Alliance-OSS/Ed-Fi-AdminApp.git C:\Ed-Fi\Ed-Fi-AdminApp` (needs Git — install manually with `winget install --id Git.Git -e`, or use the ZIP option below), **or**
-- Download the repo as a ZIP from GitHub and extract to `C:\Ed-Fi\Ed-Fi-AdminApp`. `setup-vm-prereqs.ps1` will install Git for you afterwards.
+- `git clone https://github.com/Ed-Fi-Exchange-OSS/Admin-App-Installation-Scripts.git C:\Ed-Fi\Admin-App-Installation-Scripts` (needs Git — install manually with `winget install --id Git.Git -e`, or use the ZIP option below), **or**
+- Download this repo as a ZIP from GitHub and extract to `C:\Ed-Fi\Admin-App-Installation-Scripts`. `setup-vm-prereqs.ps1` will install Git for you afterwards.
 
-Then open an **elevated PowerShell** and `cd C:\Ed-Fi\Ed-Fi-AdminApp\windows-install`.
+Then open an **elevated PowerShell** and `cd C:\Ed-Fi\Admin-App-Installation-Scripts\windows-install`.
+
+You do **not** need to clone the Admin App application repo yourself: `install-all.ps1` fetches the Admin App source automatically (the latest stable release by default), cloning it as a sibling folder (e.g. `C:\Ed-Fi\Ed-Fi-AdminApp`). To use a checkout you already have, pass `-SourcePath`; to pin a specific version, pass `-AdminAppRef <tag>`.
 
 ## Before you start
 
@@ -271,7 +273,8 @@ Restart-WebAppPool -Name "EdFi-AdminApp-API"
 | Parameter | Default |
 | --- | --- |
 | `-DbEngine` | `mssql` |
-| `-SourcePath` | Parent of `windows-install\` (typically `C:\Ed-Fi\Ed-Fi-AdminApp`) |
+| `-SourcePath` | Auto-resolved: an existing co-located/sibling checkout, else `install-all.ps1` clones `Ed-Fi-AdminApp` to a sibling (e.g. `C:\Ed-Fi\Ed-Fi-AdminApp`) |
+| `-AdminAppRef` | `latest` (newest stable `Ed-Fi-AdminApp` release; pass a tag such as `v4.0.1` to pin) |
 | `-DatabaseName` | `sbaa` |
 | `-AdminUsername` | `admin@example.com` |
 | `-PostgresHost` / `-PostgresPort` / `-PostgresAppUser` | `localhost` / `5432` / `edfiadminapp` *(pgsql only)* |

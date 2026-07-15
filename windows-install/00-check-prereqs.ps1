@@ -15,8 +15,9 @@ Output uses [PASS] / [FAIL] / [INFO] markers. Run this once before kicking off
 install-all.ps1 to see what's already in place and what needs attention.
 
 .PARAMETER SourcePath
-Path to the cloned Ed-Fi-AdminApp repo. Defaults to the parent of the script
-directory (this script lives in <repo>\windows-install\).
+Path to the Ed-Fi-AdminApp checkout. Defaults to a co-located checkout (this
+script inside <AdminApp>\windows-install\) or a sibling Ed-Fi-AdminApp folder
+next to this scripts repo (e.g. C:\Ed-Fi\Ed-Fi-AdminApp).
 
 .PARAMETER DatabaseName
 Default: sbaa.
@@ -27,7 +28,10 @@ Default: sbaa.
 #>
 
 param(
-    [string]$SourcePath = (Split-Path $PSScriptRoot -Parent),
+    [string]$SourcePath = $(
+        $c = Split-Path $PSScriptRoot -Parent
+        if (Test-Path "$c\package.json") { $c } else { Join-Path (Split-Path $c -Parent) 'Ed-Fi-AdminApp' }
+    ),
     [string]$DatabaseName = "sbaa",
     # Which DB engine the install will target. 'mssql' enables the SQL Server
     # checks below; 'pgsql' replaces them with a docker-availability check.
@@ -212,7 +216,7 @@ if ($git) {
 if (Test-Path "$SourcePath\package.json") {
     Write-Check PASS "Source repo cloned" "$SourcePath"
 } else {
-    Write-Check FAIL "Source repo not found at $SourcePath" "Clone before running install scripts"
+    Write-Check FAIL "Source repo not found at $SourcePath" "install-all.ps1 fetches it automatically; or clone Ed-Fi-AdminApp and pass -SourcePath"
 }
 
 # ============================================================

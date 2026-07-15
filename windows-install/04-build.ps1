@@ -16,8 +16,9 @@ Does NOT require elevation, but does require Node + npm on PATH. If you just
 installed Node via script 03, open a fresh PowerShell window before running this.
 
 .PARAMETER SourcePath
-The cloned Ed-Fi-AdminApp repo. Defaults to the parent of the script
-directory (this script lives in <repo>\windows-install\).
+The Ed-Fi-AdminApp checkout. Defaults to a co-located checkout (this script
+inside <AdminApp>\windows-install\) or a sibling Ed-Fi-AdminApp folder next to
+this scripts repo (e.g. C:\Ed-Fi\Ed-Fi-AdminApp).
 
 .PARAMETER SkipInstall
 Switch — skip `npm ci`. Useful if node_modules is already populated and you
@@ -49,7 +50,10 @@ http://localhost:8080/realms/edfi/account/.
 #>
 
 param(
-    [string]$SourcePath = (Split-Path $PSScriptRoot -Parent),
+    [string]$SourcePath = $(
+        $c = Split-Path $PSScriptRoot -Parent
+        if (Test-Path "$c\package.json") { $c } else { Join-Path (Split-Path $c -Parent) 'Ed-Fi-AdminApp' }
+    ),
     [switch]$SkipInstall,
     [switch]$Force,
     [string]$ViteApiUrl = "http://localhost:3333",
