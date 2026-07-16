@@ -4,7 +4,8 @@
   Tears down everything the quick start created in the Admin App application
   database: the environment (with its ownership, ODS instances, Ed-Orgs, and
   tenant), the team and its memberships, and the machine user seeded by
-  bootstrap.ps1. The human bootstrap user is left in place.
+  bootstrap.ps1 -- plus the claimset copies made by copy-claimsets.ps1 in the
+  EdFi_Security database. The human bootstrap user is left in place.
 
 .DESCRIPTION
   Runs against the Admin App application database (default "sbaa") -- NOT
@@ -14,6 +15,16 @@
   Deletes, in order: ownership rows (by environment / tenant / ods / edorg /
   team), edorg, ods, edfi_tenant, sb_environment, user_team_membership, team,
   and finally the machine user (guarded by userType = 'machine').
+
+  Then removes the claimset copies made by copy-claimsets.ps1 from the
+  EdFi_Security database: every non-preset claimset starting with the prefix
+  (default 'AA ') or, when -ClaimSetNames / CLAIMSET_NAMES is set, only those
+  prefixed names. The connection reuses the SA_PASSWORD / POSTGRES_* values
+  (like run.ps1); only the server, database name, and container are separate.
+  Only non-preset claimsets are ever deleted, so the built-in originals are
+  safe. Skip this phase with -SkipClaimsets (or COPY_CLAIMSETS=false in .env)
+  -- for example when EdFi_Security is not reachable from this machine, or when
+  an application still uses a copy (delete that application first).
 
 .EXAMPLE
   # Interactive: shows what will be deleted and asks for confirmation.
@@ -26,6 +37,10 @@
 .EXAMPLE
   # Override .env values per-parameter:
   ./cleanup.ps1 -DbEngine pgsql -PostgresAppPassword 'edfi' -EnvironmentName 'Ed-Fi ODS/API v7.3'
+
+.EXAMPLE
+  # Leave the claimset copies in place:
+  ./cleanup.ps1 -SkipClaimsets
 #>
 param(
     # Path to the .env file supplying defaults (optional).
@@ -45,6 +60,16 @@ param(
     [string]$EnvironmentName,
     [string]$TeamName,
     [string]$MachineUsername,
+
+    # Claimset copies to remove from EdFi_Security (mirrors copy-claimsets.ps1).
+    # Empty (the default) = every non-preset claimset starting with the prefix.
+    # The connection reuses the database parameters above; only the mssql server
+    # hosting EdFi_Security is separate (everything else comes from .env).
+    [string[]]$ClaimSetNames,
+    [string]$ClaimSetPrefix,
+    [string]$SecuritySqlServer,
+    # Skip removing the claimset copies from EdFi_Security.
+    [switch]$SkipClaimsets,
 
     # Skip the confirmation prompt.
     [switch]$Force
@@ -76,6 +101,27 @@ if (-not $PSBoundParameters.ContainsKey('EnvironmentName')) { $EnvironmentName =
 if (-not $PSBoundParameters.ContainsKey('TeamName')) { $TeamName = Get-EnvValue 'TEAM_NAME' 'Quick Start' }
 if (-not $PSBoundParameters.ContainsKey('MachineUsername')) { $MachineUsername = Get-EnvValue 'MACHINE_USERNAME' 'quick-start-machine' }
 
+# Claimset-copy removal (connection reuses SaPassword / PostgresApp*, like run.ps1).
+$removeClaimsets = -not $SkipClaimsets -and (Get-EnvValue 'COPY_CLAIMSETS' 'true') -in @('true', 'True', 'TRUE', '1', 'yes')
+if (-not $PSBoundParameters.ContainsKey('ClaimSetNames'))
+{
+    $ClaimSetNames = @((Get-EnvValue 'CLAIMSET_NAMES') -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+if (-not $PSBoundParameters.ContainsKey('ClaimSetPrefix')) { $ClaimSetPrefix = Get-EnvValue 'CLAIMSET_PREFIX' 'AA ' }
+if (-not $PSBoundParameters.ContainsKey('SecuritySqlServer')) { $SecuritySqlServer = Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433' }
+$securityDatabaseName = Get-EnvValue 'SECURITY_DATABASE_NAME' 'EdFi_Security'
+$securityUseIntegratedSecurity = (Get-EnvValue 'SECURITY_USE_INTEGRATED_SECURITY') -in @('true', 'True', 'TRUE', '1', 'yes')
+$securityPostgresContainer = Get-EnvValue 'SECURITY_POSTGRES_CONTAINER' 'ed-fi-db-admin'
+$claimsetTargets = @($ClaimSetNames | ForEach-Object { "$ClaimSetPrefix$_" })
+$claimsetSkipReason = if ($SkipClaimsets) { '-SkipClaimsets' } else { 'COPY_CLAIMSETS=false' }
+# No names = remove every non-preset claimset starting with the prefix -- but
+# never with an empty prefix, which would match every custom claimset.
+if ($claimsetTargets.Count -eq 0 -and -not $ClaimSetPrefix)
+{
+    $removeClaimsets = $false
+    $claimsetSkipReason = 'no claimset names and an empty prefix'
+}
+
 if ($DbEngine -eq 'mssql' -and -not $SaPassword) { throw "-SaPassword (or SA_PASSWORD in .env) is required when the engine is 'mssql'." }
 if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppPassword (or POSTGRES_APP_PASSWORD in .env) is required when the engine is 'pgsql'." }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when the engine is 'pgsql'." }
@@ -84,6 +130,12 @@ Write-Host "About to delete from the '$DatabaseName' ($DbEngine) Admin App datab
 Write-Host "  * environment '$EnvironmentName' (with its ownership, ODS instances, Ed-Orgs, and tenants)"
 Write-Host "  * team '$TeamName' (with its memberships and ownerships)"
 Write-Host "  * machine user '$MachineUsername'"
+if ($removeClaimsets)
+{
+    Write-Host "And from the '$securityDatabaseName' database:" -ForegroundColor Yellow
+    $targetDisplay = if ($claimsetTargets.Count -gt 0) { $claimsetTargets -join ', ' } else { "every claimset copy starting with '$ClaimSetPrefix'" }
+    Write-Host "  * claimset copies: $targetDisplay (make sure no application still uses them)"
+}
 Write-Host "The human bootstrap user is NOT touched."
 if (-not $Force)
 {
@@ -165,6 +217,86 @@ DELETE FROM "user"
         $cleanupSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
     }
     if ($LASTEXITCODE -ne 0) { throw "psql failed (exit $LASTEXITCODE). Check -PostgresAppPassword / -PostgresHost / -PostgresPort / -PostgresAppUser / -DatabaseName." }
+}
+
+# ---- Claimset copies (EdFi_Security) ------------------------------------------
+if (-not $removeClaimsets)
+{
+    Write-Host "Skipping claimset-copy removal ($claimsetSkipReason)." -ForegroundColor Yellow
+}
+elseif ($DbEngine -eq 'mssql')
+{
+    # IsEdfiPreset = 0 guards the built-in originals even if the prefix is
+    # misconfigured; delete order is child tables first (see copy-claimsets.ps1).
+    if ($claimsetTargets.Count -gt 0)
+    {
+        $targetList = ($claimsetTargets | ForEach-Object { "N'" + $_.Replace("'", "''") + "'" }) -join ', '
+        $claimsetFilter = "cs.ClaimSetName IN ($targetList)"
+    }
+    else
+    {
+        # Escape LIKE wildcards in the prefix, then quote it for the literal.
+        $prefixLike = $ClaimSetPrefix.Replace('\', '\\').Replace('%', '\%').Replace('_', '\_').Replace('[', '\[').Replace("'", "''")
+        $claimsetFilter = "cs.ClaimSetName LIKE N'$prefixLike%' ESCAPE '\'"
+    }
+    $claimsetSql = @"
+DELETE ov
+FROM dbo.ClaimSetResourceClaimActionAuthorizationStrategyOverrides ov
+    INNER JOIN dbo.ClaimSetResourceClaimActions a
+        ON a.ClaimSetResourceClaimActionId = ov.ClaimSetResourceClaimActionId
+    INNER JOIN dbo.ClaimSets cs ON cs.ClaimSetId = a.ClaimSetId
+WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
+DELETE a
+FROM dbo.ClaimSetResourceClaimActions a
+    INNER JOIN dbo.ClaimSets cs ON cs.ClaimSetId = a.ClaimSetId
+WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
+DELETE cs
+FROM dbo.ClaimSets cs
+WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
+"@
+    # @(...) wrap is load-bearing: a one-element if-expression result is a scalar
+    # string, and splatting a scalar garbles the native argument list.
+    $secAuthArgs = @(if ($securityUseIntegratedSecurity) { '-E' } else { '-U', 'sa', '-P', $SaPassword })
+    & sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -b -Q $claimsetSql
+    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed removing the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SaPassword / SECURITY_DATABASE_NAME." }
+    Write-Host "Claimset copies removed from '$securityDatabaseName'." -ForegroundColor Green
+}
+else
+{
+    if ($claimsetTargets.Count -gt 0)
+    {
+        $targetList = ($claimsetTargets | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ', '
+        $claimsetFilter = "cs.claimsetname IN ($targetList)"
+    }
+    else
+    {
+        $prefixLike = $ClaimSetPrefix.Replace('\', '\\').Replace('%', '\%').Replace('_', '\_').Replace("'", "''")
+        $claimsetFilter = "cs.claimsetname LIKE '$prefixLike%'"
+    }
+    $claimsetSql = @"
+DELETE FROM dbo.claimsetresourceclaimactionauthorizationstrategyoverrides ov
+USING dbo.claimsetresourceclaimactions a, dbo.claimsets cs
+WHERE ov.claimsetresourceclaimactionid = a.claimsetresourceclaimactionid
+  AND a.claimsetid = cs.claimsetid
+  AND $claimsetFilter AND cs.isedfipreset = FALSE;
+DELETE FROM dbo.claimsetresourceclaimactions a
+USING dbo.claimsets cs
+WHERE a.claimsetid = cs.claimsetid
+  AND $claimsetFilter AND cs.isedfipreset = FALSE;
+DELETE FROM dbo.claimsets cs
+WHERE $claimsetFilter AND cs.isedfipreset = FALSE;
+"@
+    if ($UsePostgresDocker)
+    {
+        $claimsetSql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" $securityPostgresContainer psql -U $PostgresAppUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+    }
+    else
+    {
+        $env:PGPASSWORD = $PostgresAppPassword
+        $claimsetSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+    }
+    if ($LASTEXITCODE -ne 0) { throw "psql failed removing the claimset copies (exit $LASTEXITCODE). Check -PostgresAppPassword / -PostgresHost / -PostgresPort / -PostgresAppUser / SECURITY_DATABASE_NAME." }
+    Write-Host "Claimset copies removed from '$securityDatabaseName'." -ForegroundColor Green
 }
 
 Write-Host "Cleanup complete." -ForegroundColor Green
