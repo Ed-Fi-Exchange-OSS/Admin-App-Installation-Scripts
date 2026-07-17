@@ -13,7 +13,7 @@ example IdP.
 
 Steps (each idempotent):
   1. JDK: reuse an existing Java >= 17 already on PATH, otherwise install
-     Microsoft OpenJDK 21 (Keycloak 26 requires Java 17 or 21) and set
+     Microsoft OpenJDK 21 (Keycloak 26.6 supports Java 17, 21, or 25) and set
      JAVA_HOME / PATH. -JdkDownloadUrl forces an offline zip install instead.
   2. Download + extract Keycloak to -KeycloakInstallPath.
   3. Start Keycloak by delegating to idp-keycloak-start.ps1 (bootstraps the
@@ -223,7 +223,7 @@ $AdminPasswordPlain = [System.Net.NetworkCredential]::new('', $AdminPassword).Pa
 $ClientSecretPlain     = [System.Net.NetworkCredential]::new('', $ClientSecret).Password
 $TestUserPasswordPlain = [System.Net.NetworkCredential]::new('', $TestUserPassword).Password
 
-# JDK -- Keycloak 26 officially requires Java 17 or 21. Behavior in order:
+# JDK -- Keycloak 26.6 officially supports Java 17, 21, or 25. Behavior in order:
 #   1. If `java` >=17 is already on PATH, USE IT. Skip the OpenJDK 21 install
 #      and the PATH/JAVA_HOME overrides -- respects users who keep a newer JDK
 #      (25, 26, ...) for other dev work. Keycloak runs at JVM level, so any
