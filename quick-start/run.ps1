@@ -78,7 +78,7 @@ foreach ($name in 'MACHINE_CLIENT_SECRET', 'TOKEN_URL')
 if (-not $SkipBootstrap)
 {
     if ($provider -eq 'keycloak' -and -not (Get-EnvValue 'KEYCLOAK_ADMIN_PASSWORD')) { $missing += 'KEYCLOAK_ADMIN_PASSWORD' }
-    if ($dbEngine -eq 'mssql' -and -not (Get-EnvValue 'SA_PASSWORD')) { $missing += 'SA_PASSWORD' }
+    if ($dbEngine -eq 'mssql' -and -not (Get-EnvValue 'APP_DB_PASSWORD')) { $missing += 'APP_DB_PASSWORD' }
     if ($dbEngine -eq 'pgsql' -and -not (Get-EnvValue 'POSTGRES_APP_PASSWORD')) { $missing += 'POSTGRES_APP_PASSWORD' }
 }
 if ($copyClaimsets)
@@ -118,7 +118,9 @@ else
     }
     if ($dbEngine -eq 'mssql')
     {
-        $bootstrapArgs.SaPassword = Get-EnvValue 'SA_PASSWORD'
+        # The least-privilege app login; 'sa' is deliberately not used (EDFI-2776).
+        $bootstrapArgs.AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfiadminapp'
+        $bootstrapArgs.AppDbPassword = Get-EnvValue 'APP_DB_PASSWORD'
     }
     else
     {
@@ -147,6 +149,7 @@ $quickStartArgs = @{
     AdminApiUrl          = Get-EnvValue 'ADMIN_API_URL' 'https://localhost/AdminApi'
     OdsApiDiscoveryUrl   = Get-EnvValue 'ODS_API_DISCOVERY_URL' 'https://localhost/WebApi'
     TenantName           = Get-EnvValue 'TENANT_NAME' 'default'
+    AdminUsername        = Get-EnvValue 'ADMIN_USERNAME'
     SkipCertificateCheck = Test-EnvTrue 'SKIP_CERTIFICATE_CHECK'
 }
 if ($odss.Count -gt 0)

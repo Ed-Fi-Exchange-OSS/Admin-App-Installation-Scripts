@@ -46,10 +46,13 @@ param(
     # Path to the .env file supplying defaults (optional).
     [string]$EnvFile = "$PSScriptRoot/.env",
 
-    # Database connection (mirrors bootstrap.ps1).
+    # Database connection (mirrors bootstrap.ps1). For mssql this is the
+    # least-privilege app login created by windows-install/install-all.ps1;
+    # 'sa' is deliberately not used (EDFI-2776).
     [ValidateSet('mssql', 'pgsql')][string]$DbEngine,
     [string]$DatabaseName,
-    [string]$SaPassword,
+    [string]$AppDbUsername,
+    [string]$AppDbPassword,
     [string]$PostgresAppPassword,
     [string]$PostgresHost,
     [int]$PostgresPort,
@@ -91,7 +94,8 @@ function Get-EnvValue
 # Explicit parameters win; otherwise fall back to .env, then to the defaults.
 if (-not $PSBoundParameters.ContainsKey('DbEngine')) { $DbEngine = Get-EnvValue 'DB_ENGINE' 'mssql' }
 if (-not $PSBoundParameters.ContainsKey('DatabaseName')) { $DatabaseName = Get-EnvValue 'DATABASE_NAME' 'sbaa' }
-if (-not $PSBoundParameters.ContainsKey('SaPassword')) { $SaPassword = Get-EnvValue 'SA_PASSWORD' }
+if (-not $PSBoundParameters.ContainsKey('AppDbUsername')) { $AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfiadminapp' }
+if (-not $PSBoundParameters.ContainsKey('AppDbPassword')) { $AppDbPassword = Get-EnvValue 'APP_DB_PASSWORD' }
 if (-not $PSBoundParameters.ContainsKey('PostgresAppPassword')) { $PostgresAppPassword = Get-EnvValue 'POSTGRES_APP_PASSWORD' }
 if (-not $PSBoundParameters.ContainsKey('PostgresHost')) { $PostgresHost = Get-EnvValue 'POSTGRES_HOST' 'localhost' }
 if (-not $PSBoundParameters.ContainsKey('PostgresPort')) { $PostgresPort = [int](Get-EnvValue 'POSTGRES_PORT' '5432') }
@@ -101,7 +105,7 @@ if (-not $PSBoundParameters.ContainsKey('EnvironmentName')) { $EnvironmentName =
 if (-not $PSBoundParameters.ContainsKey('TeamName')) { $TeamName = Get-EnvValue 'TEAM_NAME' 'Quick Start' }
 if (-not $PSBoundParameters.ContainsKey('MachineUsername')) { $MachineUsername = Get-EnvValue 'MACHINE_USERNAME' 'quick-start-machine' }
 
-# Claimset-copy removal (connection reuses SaPassword / PostgresApp*, like run.ps1).
+# Claimset-copy removal (connection reuses AppDbPassword / PostgresApp*, like run.ps1).
 $removeClaimsets = -not $SkipClaimsets -and (Get-EnvValue 'COPY_CLAIMSETS' 'true') -in @('true', 'True', 'TRUE', '1', 'yes')
 if (-not $PSBoundParameters.ContainsKey('ClaimSetNames'))
 {
@@ -122,7 +126,7 @@ if ($claimsetTargets.Count -eq 0 -and -not $ClaimSetPrefix)
     $claimsetSkipReason = 'no claimset names and an empty prefix'
 }
 
-if ($DbEngine -eq 'mssql' -and -not $SaPassword) { throw "-SaPassword (or SA_PASSWORD in .env) is required when the engine is 'mssql'." }
+if ($DbEngine -eq 'mssql' -and -not $AppDbPassword) { throw "-AppDbPassword (or APP_DB_PASSWORD in .env) is required when the engine is 'mssql'." }
 if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppPassword (or POSTGRES_APP_PASSWORD in .env) is required when the engine is 'pgsql'." }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when the engine is 'pgsql'." }
 
@@ -177,8 +181,8 @@ DELETE FROM [team] WHERE [name] = N'$teamNameSql';
 DELETE FROM [user]
  WHERE [username] = N'$machineUser' AND [userType] = N'machine';
 "@
-    & sqlcmd -S "tcp:localhost,1433" -U sa -P $SaPassword -d $DatabaseName -Q $cleanupSql
-    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE). Check -SaPassword / -DatabaseName." }
+    & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -Q $cleanupSql
+    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername'. Check -AppDbUsername / -AppDbPassword / -DatabaseName." }
 }
 else
 {

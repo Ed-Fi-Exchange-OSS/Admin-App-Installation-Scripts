@@ -15,9 +15,9 @@ troubleshooting): [Global Admin Quick Start on docs.ed-fi.org](https://docs.ed-f
 | --- | --- |
 | `run.ps1` | One-step entry point: loads `.env` and runs `bootstrap.ps1`, `quick-start.ps1`, and `copy-claimsets.ps1`. |
 | `bootstrap.ps1` | Provisions the IdP machine client (Keycloak) or, for Entra ID, skips provider calls; seeds the matching machine user row in the Admin App database. Idempotent. |
-| `quick-start.ps1` | Provisions the team, environment, tenant, ODS instances, and ownerships through the Admin App REST API. Idempotent. |
+| `quick-start.ps1` | Provisions the team, environment, tenant, ODS instances, and ownerships through the Admin App REST API, and adds the machine user — plus the human bootstrap admin when `ADMIN_USERNAME` is set — to the team. Idempotent. |
 | `copy-claimsets.ps1` | Copies every built-in claimset under an `AA` prefix in the ODS/API's EdFi_Security database so they can be assigned to applications in the Admin App (or only the ones in `CLAIMSET_NAMES`). Idempotent. |
-| `cleanup.ps1` | Tears down everything the quick start created (environment, team, machine user, claimset copies). The human bootstrap user is left in place. |
+| `cleanup.ps1` | Tears down everything the quick start created (environment, team, machine user). The human bootstrap user is left in place. |
 | `load-dotenv.ps1` | Shared `.env` parser dot-sourced by `run.ps1` and `cleanup.ps1`. |
 
 ## Usage
@@ -95,3 +95,9 @@ Server (`DB_ENGINE=mssql`) and PostgreSQL (`DB_ENGINE=pgsql`, optionally
 `USE_POSTGRES_DOCKER=true`). Also removes the claimset copies from
 EdFi_Security (via the `SECURITY_*` values) — pass `-SkipClaimsets` to leave
 them in place, e.g. when an application still uses one.
+`USE_POSTGRES_DOCKER=true`).
+
+Cleanup is scoped to the Admin App database. The Keycloak artifacts
+`bootstrap.ps1` created (the machine client, the `login:app` client scope, and
+its mappers) are deliberately left in the realm so re-runs reuse them; remove
+them manually in the Keycloak admin console if they are no longer wanted.

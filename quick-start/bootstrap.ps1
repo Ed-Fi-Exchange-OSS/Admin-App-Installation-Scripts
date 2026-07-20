@@ -41,9 +41,10 @@
   (and, for Entra, -Scope '<resource>/.default').
 
 .EXAMPLE
-  # Keycloak (default). Default engine is mssql; -SaPassword connects to
-  # localhost,1433 as 'sa'.
-  ./bootstrap.ps1 -AdminPassword 'admin' -SaPassword 'EdFi-Local!2026'
+  # Keycloak (default). Default engine is mssql; -AppDbPassword connects to
+  # localhost,1433 as the least-privilege app login created by
+  # windows-install/install-all.ps1 (default name 'edfiadminapp').
+  ./bootstrap.ps1 -AdminPassword 'admin' -AppDbPassword 'EdFi-App!2026'
 
 .EXAMPLE
   # Keycloak against Postgres instead:
@@ -55,7 +56,7 @@
   # Entra machine client app's Application (client) ID GUID (= token 'azp'/'appid').
   ./bootstrap.ps1 -Provider entra `
     -MachineClientId '00000000-0000-0000-0000-000000000000' `
-    -SaPassword 'EdFi-Local!2026'
+    -AppDbPassword 'EdFi-App!2026'
 
   # Then fetch a token with the resource's .default scope (NOT 'login:app'):
   #   POST https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token
@@ -89,7 +90,12 @@ param(
     # human admin). Connection parameters mirror windows-install/install-all.ps1.
     [ValidateSet('mssql', 'pgsql')][string]$DbEngine = 'mssql',
     [switch]$UsePostgresDocker,
-    [string]$SaPassword,                         # required for -DbEngine mssql
+    # mssql login: the dedicated least-privilege app login created by
+    # windows-install/install-all.ps1 (-AppDbPassword there). It is db_owner on
+    # the app database, which is all this seed needs -- 'sa' is deliberately
+    # not used (EDFI-2776).
+    [string]$AppDbUsername = 'edfiadminapp',
+    [string]$AppDbPassword,                      # required for -DbEngine mssql
     [string]$PostgresAppPassword,                # required for -DbEngine pgsql
     [string]$PostgresHost = "localhost",
     [int]$PostgresPort = 5432,
@@ -107,7 +113,7 @@ if ($Provider -eq 'keycloak' -and -not $AdminPassword) { throw "-AdminPassword i
 if ($Provider -eq 'entra' -and $MachineClientId -eq 'edfiadminapp-machine') { throw "-MachineClientId must be the Entra machine app's Application (client) ID GUID when -Provider is 'entra' (it must match the token's azp/appid claim)." }
 
 # Engine-specific required-arg validation (mirrors install-all.ps1).
-if ($DbEngine -eq 'mssql' -and -not $SaPassword) { throw "-SaPassword is required when -DbEngine is 'mssql' (the default)." }
+if ($DbEngine -eq 'mssql' -and -not $AppDbPassword) { throw "-AppDbPassword (the install-all.ps1 app login's password) is required when -DbEngine is 'mssql' (the default)." }
 if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppPassword is required when -DbEngine is 'pgsql'." }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'." }
 
@@ -269,20 +275,26 @@ else
 #   keycloak -> client_id ; Entra v2 -> azp ; Entra v1 -> appid
 # For both providers this is the value passed in -MachineClientId.
 Write-Host "`nSeeding Admin App machine user '$AdminAppUsername' (clientId='$MachineClientId', roleId=$AdminAppRoleId) in $DbEngine db '$DatabaseName'..."
+
+# Escape single quotes for safe embedding in the SQL literals (mirrors cleanup.ps1).
+$userNameSql = $AdminAppUsername.Replace("'", "''")
+$clientIdSql = $MachineClientId.Replace("'", "''")
+$descriptionSql = $AdminAppUserDescription.Replace("'", "''")
+
 if ($DbEngine -eq 'mssql')
 {
     # QUOTED_IDENTIFIER must be ON for writes to [user] (it has a filtered unique
     # index on clientId); sqlcmd defaults it OFF, so set it for this batch.
     $userSql = @"
 SET QUOTED_IDENTIFIER ON;
-IF NOT EXISTS (SELECT 1 FROM [user] WHERE username = '$AdminAppUsername' OR clientId = '$MachineClientId')
+IF NOT EXISTS (SELECT 1 FROM [user] WHERE username = '$userNameSql' OR clientId = '$clientIdSql')
     INSERT INTO [user] (username, clientId, userType, description, roleId, isActive)
-    VALUES ('$AdminAppUsername', '$MachineClientId', 'machine', '$AdminAppUserDescription', $AdminAppRoleId, 1);
-UPDATE [user] SET roleId = $AdminAppRoleId, isActive = 1, userType = 'machine', clientId = '$MachineClientId'
-    WHERE username = '$AdminAppUsername';
+    VALUES ('$userNameSql', '$clientIdSql', 'machine', '$descriptionSql', $AdminAppRoleId, 1);
+UPDATE [user] SET roleId = $AdminAppRoleId, isActive = 1, userType = 'machine', clientId = '$clientIdSql'
+    WHERE username = '$userNameSql';
 "@
-    & sqlcmd -S "tcp:localhost,1433" -U sa -P $SaPassword -d $DatabaseName -Q $userSql
-    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE). Check -SaPassword / -DatabaseName." }
+    & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -Q $userSql
+    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername'. Check -AppDbUsername / -AppDbPassword / -DatabaseName." }
 }
 else
 {
@@ -290,10 +302,10 @@ else
     # everything stays double-quoted; pipe via stdin so the quotes survive.
     $userSql = @"
 INSERT INTO "user" (username, "clientId", "userType", description, "roleId", "isActive")
-    VALUES ('$AdminAppUsername', '$MachineClientId', 'machine', '$AdminAppUserDescription', $AdminAppRoleId, true)
+    VALUES ('$userNameSql', '$clientIdSql', 'machine', '$descriptionSql', $AdminAppRoleId, true)
     ON CONFLICT (username) DO NOTHING;
-UPDATE "user" SET "roleId" = $AdminAppRoleId, "isActive" = true, "userType" = 'machine', "clientId" = '$MachineClientId'
-    WHERE username = '$AdminAppUsername';
+UPDATE "user" SET "roleId" = $AdminAppRoleId, "isActive" = true, "userType" = 'machine', "clientId" = '$clientIdSql'
+    WHERE username = '$userNameSql';
 "@
     if ($UsePostgresDocker)
     {

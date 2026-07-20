@@ -54,7 +54,8 @@ currently a documented feature of the Admin App.
   (connected) or only list seeded rows (offline).
 - Minimize new authentication surface area and ongoing maintenance.
 - Remain provider-agnostic: the reference stack ships Keycloak, but some deployments use
-  Microsoft Entra ID or Auth0.
+  Microsoft Entra ID or Google Workspace (the provider validated for human login; its M2M
+  limitation is covered under Consequences).
 
 ## Considered options
 
@@ -95,7 +96,7 @@ currently a documented feature of the Admin App.
   `client_credentials` M2M token.
 - The `AuthenticatedGuard` was made **provider-tolerant** — it reads the caller id from
   `client_id` / `azp` / `appid` and the `login:app` grant from `scope` / `scp` / `roles`, so
-  the same path works with Keycloak, Auth0, and Entra ID. The change is backward-compatible
+  the same path works with Keycloak and Entra ID. The change is backward-compatible
   with the existing Keycloak flow and covered by a unit test.
 
 **Open question for reviewers:** is a connected Quick Start valuable enough to justify
