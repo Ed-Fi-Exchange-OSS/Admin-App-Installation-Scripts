@@ -24,7 +24,7 @@
   This script authenticates with an OAuth2 service-account (machine-to-machine)
   token: it fetches one via the client_credentials grant from -TokenUrl using
   -OAuthClientId / -OAuthClientSecret, and sends it as a Bearer token. This works
-  against ANY supported provider configured in the Admin App (Keycloak, Auth0,
+  against ANY supported provider configured in the Admin App (Keycloak,
   Entra ID), because the API only checks the configured ISSUER / MACHINE_AUDIENCE
   and that the token grants "login:app" -- not a specific vendor. It requires a
   matching "machine" user in the Admin App (see the guide's Prerequisites).
@@ -32,7 +32,7 @@
   The provider differences are entirely in the token request, which -Scope
   absorbs (Google Workspace M2M is NOT supported -- its tokens cannot carry
   "login:app"):
-    * Keycloak / Auth0 -- request -Scope 'login:app' (the default); the grant
+    * Keycloak -- request -Scope 'login:app' (the default); the grant
       arrives in the token's `scope` claim.
     * Entra ID -- request -Scope '<resource>/.default' (NOT 'login:app'); the
       `login:app` app role is granted via admin consent and arrives in the
@@ -81,7 +81,7 @@ param(
 
     # Auth: fetch a service-account token via the OAuth2 client_credentials grant
     # from the provider's token endpoint. The token must carry aud =
-    # MACHINE_AUDIENCE and grant "login:app" (Keycloak/Auth0: in `scope`; Entra:
+    # MACHINE_AUDIENCE and grant "login:app" (Keycloak: in `scope`; Entra:
     # in `roles`), and its caller id must match a "machine" user in the Admin App.
     # Local Keycloak defaults are shown in the examples.
     [Parameter(Mandatory = $true)]
@@ -90,12 +90,20 @@ param(
     [string]$OAuthClientId,                 # e.g. edfiadminapp-machine (Entra: the app client-id GUID)
     [Parameter(Mandatory = $true)]
     [string]$OAuthClientSecret,             # e.g. edfi-machine-secret-456
-    # Keycloak/Auth0: 'login:app' (default). Entra: '<resource>/.default'.
+    # Keycloak: 'login:app' (default). Entra: '<resource>/.default'.
     [string]$Scope = "login:app",
 
     # Team + membership for the calling (machine) user.
     [string]$TeamName = "Quick Start",
-    # Role for the user's team membership. MUST be a UserTenant role.
+    # Username of the HUMAN bootstrap admin (the Admin App's ADMIN_USERNAME
+    # account). When set, that user is also placed in the team with
+    # -MembershipRoleId. Without a membership the Applications and Profiles
+    # pages return 403 for them: their Global admin role (2) predates the
+    # team-scoped profile privileges and was never backfilled, so those
+    # privileges only reach them through a team membership. Empty = skip.
+    [string]$AdminUsername = "",
+    # Role for the team memberships (machine user and, when -AdminUsername is
+    # set, the human bootstrap admin). MUST be a UserTenant role.
     # 6 = "Tenant admin": this is the role that carries the team-scoped
     # `team.sb-environment.edfi-tenant.*` privileges (incl. profile:read).
     # Do NOT use 2 ("Global admin"): that UserGlobal role was seeded before the
@@ -201,7 +209,7 @@ catch
 {
     Write-Host "Authentication failed calling /auth/me: $($_.Exception.Message)" -ForegroundColor Red
     if ($_.ErrorDetails.Message) { Write-Host $_.ErrorDetails.Message -ForegroundColor Red }
-    throw "Authentication was not accepted. Confirm a matching 'machine' user exists in the Admin App (clientId = the token's client_id/azp/appid) and the token carries aud = MACHINE_AUDIENCE and grants 'login:app' (Keycloak/Auth0: in scope), and that its iss matches the Admin App's AUTH0_CONFIG_SECRET.ISSUER."
+    throw "Authentication was not accepted. Confirm a matching 'machine' user exists in the Admin App (clientId = the token's client_id/azp/appid) and the token carries aud = MACHINE_AUDIENCE and grants 'login:app' (Keycloak: in scope), and that its iss matches the Admin App's AUTH0_CONFIG_SECRET.ISSUER."
 }
 $userId = $me.id
 if (-not $userId) { throw "Could not determine the user id from /auth/me response." }
@@ -222,28 +230,57 @@ else
 }
 $teamId = $team.id
 
-# ---- Step 3: place the user in the team with the requested role --------------
-$memberships = Invoke-Api -Method Get -Path "/teams/$teamId/user-team-memberships"
-$existing = $memberships | Where-Object { $_.userId -eq $userId } | Select-Object -First 1
-if ($existing -and [int]$existing.roleId -eq [int]$MembershipRoleId)
+# ---- Step 3: place the users in the team with the requested role -------------
+function Ensure-TeamMembership
 {
-    Write-Host "User $userId is already a member of team $teamId with roleId $MembershipRoleId." -ForegroundColor Yellow
+    param([int]$UserId, [int]$RoleId, [string]$Label)
+    $memberships = Invoke-Api -Method Get -Path "/teams/$teamId/user-team-memberships"
+    $existing = $memberships | Where-Object { $_.userId -eq $UserId } | Select-Object -First 1
+    if ($existing -and [int]$existing.roleId -eq [int]$RoleId)
+    {
+        Write-Host "$Label (user $UserId) is already a member of team $teamId with roleId $RoleId." -ForegroundColor Yellow
+    }
+    elseif ($existing)
+    {
+        # Membership exists but with the wrong role (e.g. a previous run used role 2);
+        # fix it to the tenant-scoped role so team privileges resolve.
+        Write-Host "PUT /teams/$teamId/user-team-memberships/$($existing.id) { roleId = $RoleId }  (was $($existing.roleId))" -ForegroundColor Cyan
+        Invoke-Api -Method Put -Path "/teams/$teamId/user-team-memberships/$($existing.id)" `
+            -Body @{ roleId = [int]$RoleId } | Out-Null
+        Write-Host "Updated $Label (user $UserId) membership in team $teamId to roleId $RoleId." -ForegroundColor Green
+    }
+    else
+    {
+        Write-Host "POST /teams/$teamId/user-team-memberships { userId = $UserId, roleId = $RoleId }" -ForegroundColor Cyan
+        Invoke-Api -Method Post -Path "/teams/$teamId/user-team-memberships" `
+            -Body @{ teamId = [int]$teamId; userId = [int]$UserId; roleId = [int]$RoleId } | Out-Null
+        Write-Host "Added $Label (user $UserId) to team $teamId with roleId $RoleId." -ForegroundColor Green
+    }
 }
-elseif ($existing)
+
+Ensure-TeamMembership -UserId $userId -RoleId $MembershipRoleId -Label "machine user"
+
+# The HUMAN bootstrap admin needs a membership too: their Global admin role (2)
+# lacks the team-scoped profile privileges (never backfilled), so without a
+# membership carrying them the Applications/Profiles pages return 403.
+if ($AdminUsername)
 {
-    # Membership exists but with the wrong role (e.g. a previous run used role 2);
-    # fix it to the tenant-scoped role so team privileges resolve.
-    Write-Host "PUT /teams/$teamId/user-team-memberships/$($existing.id) { roleId = $MembershipRoleId }  (was $($existing.roleId))" -ForegroundColor Cyan
-    Invoke-Api -Method Put -Path "/teams/$teamId/user-team-memberships/$($existing.id)" `
-        -Body @{ roleId = [int]$MembershipRoleId } | Out-Null
-    Write-Host "Updated user $userId membership in team $teamId to roleId $MembershipRoleId." -ForegroundColor Green
+    # Assign before piping: Invoke-RestMethod emits a JSON array as a single
+    # object, and piping that directly would hand Where-Object the whole array.
+    $allUsers = Invoke-Api -Method Get -Path "/users"
+    $human = @($allUsers) | Where-Object { $_.username -ieq $AdminUsername } | Select-Object -First 1
+    if ($human)
+    {
+        Ensure-TeamMembership -UserId ([int]$human.id) -RoleId $MembershipRoleId -Label "admin user '$AdminUsername'"
+    }
+    else
+    {
+        Write-Host "No Admin App user named '$AdminUsername' was found; skipping their team membership. The Applications/Profiles pages will return 403 for that account until it is added to a team." -ForegroundColor Yellow
+    }
 }
 else
 {
-    Write-Host "POST /teams/$teamId/user-team-memberships { userId = $userId, roleId = $MembershipRoleId }" -ForegroundColor Cyan
-    Invoke-Api -Method Post -Path "/teams/$teamId/user-team-memberships" `
-        -Body @{ teamId = [int]$teamId; userId = [int]$userId; roleId = [int]$MembershipRoleId } | Out-Null
-    Write-Host "Added user $userId to team $teamId with roleId $MembershipRoleId." -ForegroundColor Green
+    Write-Host "-AdminUsername not set; the human bootstrap admin gets no team membership and the Applications/Profiles pages will return 403 for them. Re-run with ADMIN_USERNAME in .env (or -AdminUsername) to fix this." -ForegroundColor Yellow
 }
 
 # ---- Step 4: create (or reuse) the environment --------------------------------
@@ -251,7 +288,9 @@ else
 # POSTing a duplicate. The API has no uniqueness constraint on the name, so a
 # blind POST on re-run would create a second environment.
 $envId = $null
-$existingEnv = @(Invoke-Api -Method Get -Path "/sb-environments") |
+# Assign before piping (same Invoke-RestMethod single-object array quirk as above).
+$allEnvs = Invoke-Api -Method Get -Path "/sb-environments"
+$existingEnv = @($allEnvs) |
     Where-Object { $_.name -eq $EnvironmentName } | Select-Object -First 1
 if ($existingEnv)
 {
@@ -344,7 +383,9 @@ if ($envId)
     $tenants = @()
     try
     {
-        $tenants = @(Invoke-Api -Method Get -Path "/sb-environments/$envId/edfi-tenants")
+        # Assign before wrapping (same Invoke-RestMethod single-object array quirk as above).
+        $tenantsResponse = Invoke-Api -Method Get -Path "/sb-environments/$envId/edfi-tenants"
+        $tenants = @($tenantsResponse)
         $tenants | ConvertTo-Json -Depth 10
     }
     catch
