@@ -43,7 +43,7 @@
 .EXAMPLE
   # Keycloak (default). Default engine is mssql; -AppDbPassword connects to
   # localhost,1433 as the least-privilege app login created by
-  # windows-install/install-all.ps1 (default name 'edfiadminapp').
+  # windows-install/install-all.ps1 (default name 'edfi_adminapp').
   ./bootstrap.ps1 -AdminPassword 'admin' -AppDbPassword 'EdFi-App!2026'
 
 .EXAMPLE
@@ -94,7 +94,7 @@ param(
     # windows-install/install-all.ps1 (-AppDbPassword there). It is db_owner on
     # the app database, which is all this seed needs -- 'sa' is deliberately
     # not used (EDFI-2776).
-    [string]$AppDbUsername = 'edfiadminapp',
+    [string]$AppDbUsername = 'edfi_adminapp',
     [string]$AppDbPassword,                      # required for -DbEngine mssql
     [string]$PostgresAppPassword,                # required for -DbEngine pgsql
     [string]$PostgresHost = "localhost",

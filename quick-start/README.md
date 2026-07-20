@@ -53,10 +53,12 @@ recreates every built-in claimset under an `AA` prefix (e.g. `SIS Vendor` →
 `AA SIS Vendor`) directly in the **EdFi_Security** database — a database on
 the ODS/API side, not the Admin App's. Internal-use claimsets (e.g.
 `Bootstrap Descriptors and EdOrgs`) are excluded; set `CLAIMSET_NAMES` to copy
-a specific list instead. The connection reuses the `SA_PASSWORD` / `POSTGRES_*`
-values from `.env` (server, database name, and container come from the
-`SECURITY_*` variables); skip the step with `./run.ps1 -SkipClaimsets` or
-`COPY_CLAIMSETS=false`.
+a specific list instead. Because `EdFi_Security` is a different database from
+the Admin App's, the SQL Server connection uses its own `SECURITY_DB_USERNAME`
+/ `SECURITY_DB_PASSWORD` login (or `SECURITY_USE_INTEGRATED_SECURITY=true` for
+Windows authentication); PostgreSQL reuses the `POSTGRES_*` values. Server,
+database name, and container come from the other `SECURITY_*` variables. Skip
+the step with `./run.ps1 -SkipClaimsets` or `COPY_CLAIMSETS=false`.
 
 The copies are snapshots: an ODS/API upgrade that changes a built-in claimset
 does not propagate to them. `cleanup.ps1` removes them (pass `-SkipClaimsets`

@@ -83,11 +83,17 @@ if (-not $SkipBootstrap)
 }
 if ($copyClaimsets)
 {
-    # The EdFi_Security connection reuses the SA_PASSWORD / POSTGRES_* values.
-    if ($dbEngine -eq 'mssql' -and -not (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY') -and
-        -not (Get-EnvValue 'SA_PASSWORD')) { $missing += 'SA_PASSWORD' }
+    # EdFi_Security is a different database (ODS/API side), so it has its own
+    # SECURITY_DB_* credentials -- the APP_DB_* login is scoped to the Admin App
+    # database. SECURITY_USE_INTEGRATED_SECURITY=true bypasses both.
+    if ($dbEngine -eq 'mssql' -and -not (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY'))
+    {
+        if (-not (Get-EnvValue 'SECURITY_DB_USERNAME')) { $missing += 'SECURITY_DB_USERNAME' }
+        if (-not (Get-EnvValue 'SECURITY_DB_PASSWORD')) { $missing += 'SECURITY_DB_PASSWORD' }
+    }
     if ($dbEngine -eq 'pgsql' -and -not (Get-EnvValue 'POSTGRES_APP_PASSWORD')) { $missing += 'POSTGRES_APP_PASSWORD' }
 }
+$missing = @($missing | Select-Object -Unique)
 if ($missing.Count -gt 0)
 {
     throw "Missing required value(s) in ${EnvFile}: $($missing -join ', '). Edit the file and try again."
@@ -119,7 +125,7 @@ else
     if ($dbEngine -eq 'mssql')
     {
         # The least-privilege app login; 'sa' is deliberately not used (EDFI-2776).
-        $bootstrapArgs.AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfiadminapp'
+        $bootstrapArgs.AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfi_adminapp'
         $bootstrapArgs.AppDbPassword = Get-EnvValue 'APP_DB_PASSWORD'
     }
     else
@@ -178,8 +184,10 @@ else
     }
     $claimsetPrefix = Get-EnvValue 'CLAIMSET_PREFIX'
     if ($claimsetPrefix) { $claimsetArgs.Prefix = $claimsetPrefix }
-    # The connection reuses the Admin App database credentials (SA_PASSWORD /
-    # POSTGRES_*); only the server, database name, and container differ.
+    # EdFi_Security is a different database (ODS/API side), so mssql uses its
+    # own SECURITY_DB_* credentials -- not the Admin App's APP_DB_* login. Set
+    # SECURITY_USE_INTEGRATED_SECURITY=true to use Windows authentication
+    # instead.
     if ($dbEngine -eq 'mssql')
     {
         $claimsetArgs.SqlServer = Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433'
@@ -189,7 +197,8 @@ else
         }
         else
         {
-            $claimsetArgs.SaPassword = Get-EnvValue 'SA_PASSWORD'
+            $claimsetArgs.SqlUser = Get-EnvValue 'SECURITY_DB_USERNAME'
+            $claimsetArgs.SqlPassword = Get-EnvValue 'SECURITY_DB_PASSWORD'
         }
     }
     else

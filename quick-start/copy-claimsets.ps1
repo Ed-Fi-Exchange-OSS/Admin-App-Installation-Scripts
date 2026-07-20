@@ -33,12 +33,16 @@
   exactly as they appear in dbo.ClaimSets (the defaults already do).
 
 .EXAMPLE
-  # SQL Server (default engine), local EdFi_Security:
-  ./copy-claimsets.ps1 -SaPassword 'EdFi-Local!2026'
+  # SQL Server (default engine), local EdFi_Security. EdFi_Security lives on
+  # the ODS/API side, so it has its own login -- pass one with rights on that
+  # database ('sa' is deliberately not the default), or use
+  # -UseIntegratedSecurity instead.
+  ./copy-claimsets.ps1 -SqlUser 'edfi_security_user' -SqlPassword 'EdFi-Sec!2026'
 
 .EXAMPLE
   # SQL Server on the ODS/API host:
-  ./copy-claimsets.ps1 -SqlServer 'tcp:ods-db.example.org,1433' -SaPassword '...'
+  ./copy-claimsets.ps1 -SqlServer 'tcp:ods-db.example.org,1433' `
+    -SqlUser 'edfi_security_user' -SqlPassword '...'
 
 .EXAMPLE
   # SQL Server with Windows integrated authentication (e.g. a local initdev
@@ -55,7 +59,7 @@
 
 .EXAMPLE
   # Copy only specific claimsets, or use a different prefix:
-  ./copy-claimsets.ps1 -SaPassword '...' `
+  ./copy-claimsets.ps1 -SqlUser 'edfi_security_user' -SqlPassword '...' `
     -ClaimSetNames 'SIS Vendor', 'Ed-Fi Sandbox', 'Assessment Vendor' -Prefix 'AA '
 #>
 param(
@@ -70,10 +74,13 @@ param(
 
     # --- mssql -----------------------------------------------------------------
     # EdFi_Security is provisioned by the ODS/API installation, so it may not be
-    # on this machine -- server and login are parameterized.
+    # on this machine -- server and login are parameterized. It is a different
+    # database from the Admin App's, so it needs its own login with rights on
+    # EdFi_Security ('sa' is deliberately not the default, EDFI-2776); or use
+    # -UseIntegratedSecurity for Windows authentication.
     [string]$SqlServer = 'tcp:localhost,1433',
-    [string]$SqlUser = 'sa',
-    [string]$SaPassword,                         # required for -DbEngine mssql unless -UseIntegratedSecurity
+    [string]$SqlUser,                            # required for -DbEngine mssql unless -UseIntegratedSecurity
+    [string]$SqlPassword,                        # required for -DbEngine mssql unless -UseIntegratedSecurity
     [switch]$UseIntegratedSecurity,
 
     # --- pgsql -----------------------------------------------------------------
@@ -89,7 +96,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Engine-specific required-arg validation.
-if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $SaPassword) { throw "-SaPassword is required when -DbEngine is 'mssql' (the default) without -UseIntegratedSecurity." }
+if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and (-not $SqlUser -or -not $SqlPassword)) { throw "-SqlUser and -SqlPassword (a login with rights on EdFi_Security) are required when -DbEngine is 'mssql' (the default) without -UseIntegratedSecurity." }
 if ($UseIntegratedSecurity -and $DbEngine -ne 'mssql') { throw "-UseIntegratedSecurity only applies when -DbEngine is 'mssql'." }
 if ($DbEngine -eq 'pgsql' -and -not $PostgresPassword) { throw "-PostgresPassword is required when -DbEngine is 'pgsql'." }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'." }
@@ -99,7 +106,7 @@ if ($DbEngine -eq 'mssql')
     # The @(...) wrap is load-bearing: assignment from an if-expression unrolls
     # a one-element array to a scalar string, and splatting a scalar to a
     # native command garbles the argument list.
-    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $SqlUser, '-P', $SaPassword })
+    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $SqlUser, '-P', $SqlPassword })
 }
 
 # No -ClaimSetNames: discover every built-in claimset, excluding internal-use
@@ -111,7 +118,7 @@ if ($ClaimSetNames.Count -eq 0)
     {
         $listSql = 'SET NOCOUNT ON; SELECT ClaimSetName FROM dbo.ClaimSets WHERE IsEdfiPreset = 1 AND ForApplicationUseOnly = 0 ORDER BY ClaimSetId;'
         $raw = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -Q $listSql
-        if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed listing claimsets (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SaPassword / -DatabaseName." }
+        if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed listing claimsets (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName." }
     }
     else
     {
@@ -198,7 +205,7 @@ END
         # -b makes sqlcmd exit nonzero on SQL errors; without it $LASTEXITCODE
         # stays 0 and failures would pass silently.
         & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -Q $sql
-        if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed for claimset '$name' (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SaPassword / -DatabaseName." }
+        if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed for claimset '$name' (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName." }
     }
     else
     {

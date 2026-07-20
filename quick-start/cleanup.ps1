@@ -19,8 +19,9 @@
   Then removes the claimset copies made by copy-claimsets.ps1 from the
   EdFi_Security database: every non-preset claimset starting with the prefix
   (default 'AA ') or, when -ClaimSetNames / CLAIMSET_NAMES is set, only those
-  prefixed names. The connection reuses the SA_PASSWORD / POSTGRES_* values
-  (like run.ps1); only the server, database name, and container are separate.
+  prefixed names. EdFi_Security is a different database (ODS/API side), so the
+  mssql connection uses its own SECURITY_DB_USERNAME / SECURITY_DB_PASSWORD
+  login (or SECURITY_USE_INTEGRATED_SECURITY=true); pgsql reuses POSTGRES_*.
   Only non-preset claimsets are ever deleted, so the built-in originals are
   safe. Skip this phase with -SkipClaimsets (or COPY_CLAIMSETS=false in .env)
   -- for example when EdFi_Security is not reachable from this machine, or when
@@ -66,11 +67,14 @@ param(
 
     # Claimset copies to remove from EdFi_Security (mirrors copy-claimsets.ps1).
     # Empty (the default) = every non-preset claimset starting with the prefix.
-    # The connection reuses the database parameters above; only the mssql server
-    # hosting EdFi_Security is separate (everything else comes from .env).
     [string[]]$ClaimSetNames,
     [string]$ClaimSetPrefix,
     [string]$SecuritySqlServer,
+    # EdFi_Security is a different database (ODS/API side), so it has its own
+    # mssql login -- the app login above is scoped to the Admin App database.
+    # Not needed when SECURITY_USE_INTEGRATED_SECURITY=true.
+    [string]$SecurityDbUsername,
+    [string]$SecurityDbPassword,
     # Skip removing the claimset copies from EdFi_Security.
     [switch]$SkipClaimsets,
 
@@ -94,7 +98,7 @@ function Get-EnvValue
 # Explicit parameters win; otherwise fall back to .env, then to the defaults.
 if (-not $PSBoundParameters.ContainsKey('DbEngine')) { $DbEngine = Get-EnvValue 'DB_ENGINE' 'mssql' }
 if (-not $PSBoundParameters.ContainsKey('DatabaseName')) { $DatabaseName = Get-EnvValue 'DATABASE_NAME' 'sbaa' }
-if (-not $PSBoundParameters.ContainsKey('AppDbUsername')) { $AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfiadminapp' }
+if (-not $PSBoundParameters.ContainsKey('AppDbUsername')) { $AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfi_adminapp' }
 if (-not $PSBoundParameters.ContainsKey('AppDbPassword')) { $AppDbPassword = Get-EnvValue 'APP_DB_PASSWORD' }
 if (-not $PSBoundParameters.ContainsKey('PostgresAppPassword')) { $PostgresAppPassword = Get-EnvValue 'POSTGRES_APP_PASSWORD' }
 if (-not $PSBoundParameters.ContainsKey('PostgresHost')) { $PostgresHost = Get-EnvValue 'POSTGRES_HOST' 'localhost' }
@@ -105,7 +109,7 @@ if (-not $PSBoundParameters.ContainsKey('EnvironmentName')) { $EnvironmentName =
 if (-not $PSBoundParameters.ContainsKey('TeamName')) { $TeamName = Get-EnvValue 'TEAM_NAME' 'Quick Start' }
 if (-not $PSBoundParameters.ContainsKey('MachineUsername')) { $MachineUsername = Get-EnvValue 'MACHINE_USERNAME' 'quick-start-machine' }
 
-# Claimset-copy removal (connection reuses AppDbPassword / PostgresApp*, like run.ps1).
+# Claimset-copy removal (mssql uses the SECURITY_DB_* login; pgsql reuses PostgresApp*, like run.ps1).
 $removeClaimsets = -not $SkipClaimsets -and (Get-EnvValue 'COPY_CLAIMSETS' 'true') -in @('true', 'True', 'TRUE', '1', 'yes')
 if (-not $PSBoundParameters.ContainsKey('ClaimSetNames'))
 {
@@ -113,6 +117,8 @@ if (-not $PSBoundParameters.ContainsKey('ClaimSetNames'))
 }
 if (-not $PSBoundParameters.ContainsKey('ClaimSetPrefix')) { $ClaimSetPrefix = Get-EnvValue 'CLAIMSET_PREFIX' 'AA ' }
 if (-not $PSBoundParameters.ContainsKey('SecuritySqlServer')) { $SecuritySqlServer = Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433' }
+if (-not $PSBoundParameters.ContainsKey('SecurityDbUsername')) { $SecurityDbUsername = Get-EnvValue 'SECURITY_DB_USERNAME' }
+if (-not $PSBoundParameters.ContainsKey('SecurityDbPassword')) { $SecurityDbPassword = Get-EnvValue 'SECURITY_DB_PASSWORD' }
 $securityDatabaseName = Get-EnvValue 'SECURITY_DATABASE_NAME' 'EdFi_Security'
 $securityUseIntegratedSecurity = (Get-EnvValue 'SECURITY_USE_INTEGRATED_SECURITY') -in @('true', 'True', 'TRUE', '1', 'yes')
 $securityPostgresContainer = Get-EnvValue 'SECURITY_POSTGRES_CONTAINER' 'ed-fi-db-admin'
@@ -127,6 +133,7 @@ if ($claimsetTargets.Count -eq 0 -and -not $ClaimSetPrefix)
 }
 
 if ($DbEngine -eq 'mssql' -and -not $AppDbPassword) { throw "-AppDbPassword (or APP_DB_PASSWORD in .env) is required when the engine is 'mssql'." }
+if ($removeClaimsets -and $DbEngine -eq 'mssql' -and -not $securityUseIntegratedSecurity -and (-not $SecurityDbUsername -or -not $SecurityDbPassword)) { throw "-SecurityDbUsername and -SecurityDbPassword (or SECURITY_DB_USERNAME / SECURITY_DB_PASSWORD in .env; a login with rights on EdFi_Security) are required to remove the claimset copies, or set SECURITY_USE_INTEGRATED_SECURITY=true, or skip with -SkipClaimsets." }
 if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppPassword (or POSTGRES_APP_PASSWORD in .env) is required when the engine is 'pgsql'." }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when the engine is 'pgsql'." }
 
@@ -260,10 +267,22 @@ WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
 "@
     # @(...) wrap is load-bearing: a one-element if-expression result is a scalar
     # string, and splatting a scalar garbles the native argument list.
-    $secAuthArgs = @(if ($securityUseIntegratedSecurity) { '-E' } else { '-U', 'sa', '-P', $SaPassword })
-    & sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -b -Q $claimsetSql
-    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed removing the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SaPassword / SECURITY_DATABASE_NAME." }
-    Write-Host "Claimset copies removed from '$securityDatabaseName'." -ForegroundColor Green
+    $secAuthArgs = @(if ($securityUseIntegratedSecurity) { '-E' } else { '-U', $SecurityDbUsername, '-P', $SecurityDbPassword })
+    # Count first so the outcome is honest: a blanket "removed" message when
+    # nothing matched reads as a successful delete of copies that were never there.
+    $countSql = "SET NOCOUNT ON; SELECT COUNT(*) FROM dbo.ClaimSets cs WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;"
+    $matched = @(& sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -b -h -1 -W -Q $countSql | Where-Object { "$_".Trim() })[0]
+    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed counting the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME." }
+    if ([int]"$matched" -eq 0)
+    {
+        Write-Host "No claimset copies matched in '$securityDatabaseName' (nothing to remove -- were they created?)." -ForegroundColor Yellow
+    }
+    else
+    {
+        & sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -b -Q $claimsetSql
+        if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed removing the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME." }
+        Write-Host "Removed $matched claimset copies from '$securityDatabaseName'." -ForegroundColor Green
+    }
 }
 else
 {
@@ -290,17 +309,36 @@ WHERE a.claimsetid = cs.claimsetid
 DELETE FROM dbo.claimsets cs
 WHERE $claimsetFilter AND cs.isedfipreset = FALSE;
 "@
+    # Count first so the outcome is honest (same reason as the mssql branch).
+    $countSql = "SELECT COUNT(*) FROM dbo.claimsets cs WHERE $claimsetFilter AND cs.isedfipreset = FALSE;"
     if ($UsePostgresDocker)
     {
-        $claimsetSql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" $securityPostgresContainer psql -U $PostgresAppUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+        $matched = "$($countSql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" $securityPostgresContainer psql -U $PostgresAppUser -d $securityDatabaseName -v ON_ERROR_STOP=1 -t -A)".Trim()
     }
     else
     {
         $env:PGPASSWORD = $PostgresAppPassword
-        $claimsetSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+        $matched = "$($countSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $securityDatabaseName -v ON_ERROR_STOP=1 -t -A)".Trim()
     }
-    if ($LASTEXITCODE -ne 0) { throw "psql failed removing the claimset copies (exit $LASTEXITCODE). Check -PostgresAppPassword / -PostgresHost / -PostgresPort / -PostgresAppUser / SECURITY_DATABASE_NAME." }
-    Write-Host "Claimset copies removed from '$securityDatabaseName'." -ForegroundColor Green
+    if ($LASTEXITCODE -ne 0) { throw "psql failed counting the claimset copies (exit $LASTEXITCODE). Check -PostgresAppPassword / -PostgresHost / -PostgresPort / -PostgresAppUser / SECURITY_DATABASE_NAME." }
+    if ([int]$matched -eq 0)
+    {
+        Write-Host "No claimset copies matched in '$securityDatabaseName' (nothing to remove -- were they created?)." -ForegroundColor Yellow
+    }
+    else
+    {
+        if ($UsePostgresDocker)
+        {
+            $claimsetSql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" $securityPostgresContainer psql -U $PostgresAppUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+        }
+        else
+        {
+            $env:PGPASSWORD = $PostgresAppPassword
+            $claimsetSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+        }
+        if ($LASTEXITCODE -ne 0) { throw "psql failed removing the claimset copies (exit $LASTEXITCODE). Check -PostgresAppPassword / -PostgresHost / -PostgresPort / -PostgresAppUser / SECURITY_DATABASE_NAME." }
+        Write-Host "Removed $matched claimset copies from '$securityDatabaseName'." -ForegroundColor Green
+    }
 }
 
 Write-Host "Cleanup complete." -ForegroundColor Green
