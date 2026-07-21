@@ -71,8 +71,9 @@
     -Scope 'api://edfiadminapp-api/.default'
 
 .NOTES
-  Requires PowerShell 7+. The ODS instance ids passed in -Odss must match real
-  rows in EdFi_Admin.dbo.OdsInstances on the target ODS/API, or the sync will
+  Requires PowerShell 7+. The ODS instance ids AND names passed in -Odss must
+  match real rows in EdFi_Admin.dbo.OdsInstances on the target ODS/API (the
+  Admin App later matches by name when creating an application), or the sync will
   not find them.
 #>
 param(
@@ -124,7 +125,7 @@ param(
 
     # ODS instances to attach to the (single) tenant. Each entry:
     #   @{ id = <odsInstanceId>; name = <display>; dbName = <db>; allowedEdOrgs = "<csv>" }
-    # ids must match EdFi_Admin.dbo.OdsInstances on the target ODS/API.
+    # ids and names must match EdFi_Admin.dbo.OdsInstances on the target ODS/API.
     [object[]]$Odss = @(
         @{ id = 5; name = "EdFi_Ods_2026"; dbName = "EdFi_Ods_2026"; allowedEdOrgs = "255901" },
         @{ id = 6; name = "EdFi_Ods_2027"; dbName = "EdFi_Ods_2027"; allowedEdOrgs = "255902" }

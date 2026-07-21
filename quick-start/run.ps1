@@ -1,15 +1,22 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-  One-step Global Admin Quick Start: loads .env and runs bootstrap.ps1
-  followed by quick-start.ps1.
+  One-step Global Admin Quick Start: loads .env and runs bootstrap.ps1,
+  quick-start.ps1, and copy-claimsets.ps1.
 
 .DESCRIPTION
   Copy .env.example to .env, edit the values to match your deployment, then run
   ./run.ps1. The variables map 1:1 onto the parameters of bootstrap.ps1 (IdP
-  machine client + machine-user seed) and quick-start.ps1 (team / environment /
-  ODS provisioning through the Admin App API). Both scripts are idempotent, so
+  machine client + machine-user seed), quick-start.ps1 (team / environment /
+  ODS provisioning through the Admin App API), and copy-claimsets.ps1
+  (built-in claimset copies in the ODS/API's EdFi_Security database, so they
+  can be assigned to applications). All the scripts are idempotent, so
   re-running is safe.
+
+  The ODS instances in ODSS_JSON are NOT created by these scripts: their ids
+  and names must match real rows in EdFi_Admin.dbo.OdsInstances on the target
+  ODS/API. Check the table (and create any missing rows) before running --
+  see 'Global Admin Quick Start' on docs.ed-fi.org.
 
 .EXAMPLE
   ./run.ps1
@@ -19,13 +26,19 @@
   ./run.ps1 -SkipBootstrap
 
 .EXAMPLE
+  # EdFi_Security not reachable from here (or copies already made).
+  ./run.ps1 -SkipClaimsets
+
+.EXAMPLE
   ./run.ps1 -EnvFile ./my-deployment.env
 #>
 param(
     # Path to the .env file (copy .env.example and edit it).
     [string]$EnvFile = "$PSScriptRoot/.env",
     # Skip bootstrap.ps1 (IdP client + machine-user seed) and only run quick-start.ps1.
-    [switch]$SkipBootstrap
+    [switch]$SkipBootstrap,
+    # Skip copy-claimsets.ps1 (built-in claimset copies in EdFi_Security).
+    [switch]$SkipClaimsets
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +64,10 @@ function Test-EnvTrue
 
 $provider = Get-EnvValue 'PROVIDER' 'keycloak'
 $dbEngine = Get-EnvValue 'DB_ENGINE' 'mssql'
+$copyClaimsets = -not $SkipClaimsets -and (Get-EnvValue 'COPY_CLAIMSETS' 'true') -in @('true', 'True', 'TRUE', '1', 'yes')
+$odss = @()
+$odssJson = Get-EnvValue 'ODSS_JSON'
+if ($odssJson) { $odss = @($odssJson | ConvertFrom-Json -AsHashtable) }
 
 # ---- Up-front validation of the provider/engine-specific required values -----
 $missing = @()
@@ -64,6 +81,19 @@ if (-not $SkipBootstrap)
     if ($dbEngine -eq 'mssql' -and -not (Get-EnvValue 'APP_DB_PASSWORD')) { $missing += 'APP_DB_PASSWORD' }
     if ($dbEngine -eq 'pgsql' -and -not (Get-EnvValue 'POSTGRES_APP_PASSWORD')) { $missing += 'POSTGRES_APP_PASSWORD' }
 }
+if ($copyClaimsets)
+{
+    # EdFi_Security is a different database (ODS/API side), so it has its own
+    # SECURITY_DB_* credentials -- the APP_DB_* login is scoped to the Admin App
+    # database. SECURITY_USE_INTEGRATED_SECURITY=true bypasses both.
+    if ($dbEngine -eq 'mssql' -and -not (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY'))
+    {
+        if (-not (Get-EnvValue 'SECURITY_DB_USERNAME')) { $missing += 'SECURITY_DB_USERNAME' }
+        if (-not (Get-EnvValue 'SECURITY_DB_PASSWORD')) { $missing += 'SECURITY_DB_PASSWORD' }
+    }
+    if ($dbEngine -eq 'pgsql' -and -not (Get-EnvValue 'POSTGRES_APP_PASSWORD')) { $missing += 'POSTGRES_APP_PASSWORD' }
+}
+$missing = @($missing | Select-Object -Unique)
 if ($missing.Count -gt 0)
 {
     throw "Missing required value(s) in ${EnvFile}: $($missing -join ', '). Edit the file and try again."
@@ -95,7 +125,7 @@ else
     if ($dbEngine -eq 'mssql')
     {
         # The least-privilege app login; 'sa' is deliberately not used (EDFI-2776).
-        $bootstrapArgs.AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfiadminapp'
+        $bootstrapArgs.AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfi_adminapp'
         $bootstrapArgs.AppDbPassword = Get-EnvValue 'APP_DB_PASSWORD'
     }
     else
@@ -128,11 +158,62 @@ $quickStartArgs = @{
     AdminUsername        = Get-EnvValue 'ADMIN_USERNAME'
     SkipCertificateCheck = Test-EnvTrue 'SKIP_CERTIFICATE_CHECK'
 }
-$odssJson = Get-EnvValue 'ODSS_JSON'
-if ($odssJson)
+if ($odss.Count -gt 0)
 {
-    $quickStartArgs.Odss = @($odssJson | ConvertFrom-Json -AsHashtable)
+    $quickStartArgs.Odss = $odss
 }
 
 Write-Host "==> quick-start.ps1" -ForegroundColor Cyan
 & "$PSScriptRoot/quick-start.ps1" @quickStartArgs
+
+# ---- Step 3: copy-claimsets.ps1 (built-in claimset copies in EdFi_Security) --
+if (-not $copyClaimsets)
+{
+    Write-Host "`nSkipping copy-claimsets.ps1 ($(if ($SkipClaimsets) { '-SkipClaimsets' } else { 'COPY_CLAIMSETS=false' }))." -ForegroundColor Yellow
+}
+else
+{
+    $claimsetArgs = @{
+        DbEngine     = $dbEngine
+        DatabaseName = Get-EnvValue 'SECURITY_DATABASE_NAME' 'EdFi_Security'
+    }
+    $claimsetNames = Get-EnvValue 'CLAIMSET_NAMES'
+    if ($claimsetNames)
+    {
+        $claimsetArgs.ClaimSetNames = @($claimsetNames -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    $claimsetPrefix = Get-EnvValue 'CLAIMSET_PREFIX'
+    if ($claimsetPrefix) { $claimsetArgs.Prefix = $claimsetPrefix }
+    # EdFi_Security is a different database (ODS/API side), so mssql uses its
+    # own SECURITY_DB_* credentials -- not the Admin App's APP_DB_* login. Set
+    # SECURITY_USE_INTEGRATED_SECURITY=true to use Windows authentication
+    # instead.
+    if ($dbEngine -eq 'mssql')
+    {
+        $claimsetArgs.SqlServer = Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433'
+        if (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY')
+        {
+            $claimsetArgs.UseIntegratedSecurity = $true
+        }
+        else
+        {
+            $claimsetArgs.SqlUser = Get-EnvValue 'SECURITY_DB_USERNAME'
+            $claimsetArgs.SqlPassword = Get-EnvValue 'SECURITY_DB_PASSWORD'
+        }
+    }
+    else
+    {
+        $claimsetArgs.PostgresPassword = Get-EnvValue 'POSTGRES_APP_PASSWORD'
+        $claimsetArgs.PostgresHost = Get-EnvValue 'POSTGRES_HOST' 'localhost'
+        $claimsetArgs.PostgresPort = [int](Get-EnvValue 'POSTGRES_PORT' '5432')
+        $claimsetArgs.PostgresUser = Get-EnvValue 'POSTGRES_APP_USER' 'edfiadminapp'
+        if (Test-EnvTrue 'USE_POSTGRES_DOCKER')
+        {
+            $claimsetArgs.UsePostgresDocker = $true
+            $claimsetArgs.PostgresContainerName = Get-EnvValue 'SECURITY_POSTGRES_CONTAINER' 'ed-fi-db-admin'
+        }
+    }
+
+    Write-Host "`n==> copy-claimsets.ps1 (engine=$dbEngine)" -ForegroundColor Cyan
+    & "$PSScriptRoot/copy-claimsets.ps1" @claimsetArgs
+}
