@@ -45,14 +45,21 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
 # 2. Full Admin App install (local Keycloak). The pre-flight check tells you if
 #    step 1 was actually needed.
-.\install-all.ps1 -IdpProvider keycloak -SaPassword 'your-sa-password' -KeycloakAdminPassword 'your-keycloak-admin-password' -OidcClientSecret 'your-client-secret' -TestUserPassword 'your-keycloak-user-password'
+.\install-all.ps1 -IdpProvider keycloak `
+  -SaPassword (Read-Host -AsSecureString 'SQL Server sa password') `
+  -AppDbPassword (Read-Host -AsSecureString 'Admin App DB login password') `
+  -KeycloakAdminPassword (Read-Host -AsSecureString 'Keycloak admin password') `
+  -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
+  -TestUserPassword (Read-Host -AsSecureString 'Keycloak test user password')
 ```
 
 When `install-all.ps1` finishes, open `https://localhost:4443/` and sign in with `admin@example.com` (or whatever you passed to `-AdminUsername`) and your `-TestUserPassword`. A green `INSTALL COMPLETE` banner and a written `install-summary.txt` (in the parent of the repo dir, e.g. `C:\Ed-Fi\install-summary.txt`) confirm success.
 
 ### Notes on the parameters
 
+- **All password/secret parameters are `[SecureString]`.** Supply each with `(Read-Host -AsSecureString '...')` as shown above, never a plaintext literal — a plaintext string fails parameter binding before the script runs, and a literal on the command line would be captured in your shell history.
 - **`-SaPassword`**: SQL Server `sa` login password. Must satisfy the Windows password policy `CHECK_POLICY` enforces — length ≥ 8 and at least 3 of 4 character categories (uppercase, lowercase, digit, symbol). Weak passwords are rejected up front with guidance. The same rule applies to every SQL login the scripts create.
+- **`-AppDbPassword`** *(mssql)*: password for the dedicated least-privilege login (`edfi_adminapp`) the Admin App connects as (`db_owner` on `sbaa`, non-`sa`). Required in the default `mssql` mode; the app uses it at runtime, so provisioning and deploy must receive the same value. Subject to the same `CHECK_POLICY` rule as `-SaPassword`.
 - **`-IdpProvider`** *(mandatory)*: `keycloak` | `microsoft` | `google` | `other`. `keycloak` runs the local example IdP; the others target an external OIDC provider (see [Other identity providers](#other-identity-providers)).
 - **`-OidcClientSecret`** *(all modes)*: the OIDC client secret. For `keycloak` it's the secret set on the `edfiadminapp` client (you pick it, 32+ chars recommended); for external providers it's the secret from your app registration.
 - **`-KeycloakAdminPassword`** *(keycloak only)*: Password for the master-realm admin user auto-created when Keycloak first starts.
@@ -61,6 +68,16 @@ When `install-all.ps1` finishes, open `https://localhost:4443/` and sign in with
 #### Database engine selection
 
 - **`-DbEngine`**: `mssql` (default) or `pgsql`. Drives the database prereq path and how `production.js` gets patched. Everything else is identical.
+- **PostgreSQL (Docker) parameters** *(pgsql only)*: instead of `-SaPassword` / `-AppDbPassword`, pass `-UsePostgresDocker` with `-PostgresSuperuserPassword` (the container superuser) and `-PostgresAppPassword` (the least-privilege app role `edfiadminapp`). Both are `[SecureString]`:
+
+  ```powershell
+  .\install-all.ps1 -IdpProvider keycloak -DbEngine pgsql -UsePostgresDocker `
+    -PostgresSuperuserPassword (Read-Host -AsSecureString 'Postgres superuser password') `
+    -PostgresAppPassword (Read-Host -AsSecureString 'Admin App DB role password') `
+    -KeycloakAdminPassword (Read-Host -AsSecureString 'Keycloak admin password') `
+    -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
+    -TestUserPassword (Read-Host -AsSecureString 'Keycloak test user password')
+  ```
 
 ---
 
@@ -120,10 +137,11 @@ The Admin App's auth engine is provider-agnostic (generic OIDC discovery). Keycl
 
 ```powershell
 .\install-all.ps1 -IdpProvider microsoft `
-  -SaPassword 'your-sa-password' `
+  -SaPassword (Read-Host -AsSecureString 'SQL Server sa password') `
+  -AppDbPassword (Read-Host -AsSecureString 'Admin App DB login password') `
   -OidcIssuer 'https://login.microsoftonline.com/<tenant-id>/v2.0' `
   -OidcClientId '<application-id>' `
-  -OidcClientSecret 'your-client-secret' `
+  -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
   -AdminUsername 'you@yourtenant.onmicrosoft.com'
 ```
 
@@ -140,7 +158,7 @@ You can also drive the per-section scripts manually (`00`→`06`), passing `-Oid
 
 ```powershell
 .\uninstall.ps1                                       # prompts before doing anything
-.\uninstall.ps1 -SaPassword 'your-sa-password' -Force # SQL Auth to drop the DB + non-interactive
+.\uninstall.ps1 -SaPassword (Read-Host -AsSecureString 'SQL Server sa password') -Force # SQL Auth to drop the DB + non-interactive
 .\uninstall.ps1 -KeepDatabase -KeepNpmCache           # selective teardown
 
 .\uninstall-keycloak.ps1                              # remove the local Keycloak IdP (separate)
@@ -232,7 +250,7 @@ See the [Admin App User's Guide](https://docs.ed-fi.org/reference/admin-app/) fo
 
 ```powershell
 .\uninstall-keycloak.ps1 -Force
-.\install-all.ps1 ... -KeycloakAdminPassword '<new-pw>' -SkipPhase1
+.\install-all.ps1 ... -KeycloakAdminPassword (Read-Host -AsSecureString 'new Keycloak admin password') -SkipPhase1
 ```
 
 `-OidcClientSecret` and `-TestUserPassword` are idempotently updatable on every re-run — both the Keycloak client and the `oidc` database row are reconciled (UPSERT) on each run, so a changed secret takes effect without a manual reset.

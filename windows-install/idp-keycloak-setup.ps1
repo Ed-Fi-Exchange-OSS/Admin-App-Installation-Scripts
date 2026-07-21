@@ -406,10 +406,18 @@ function Invoke-KcApi {
 # KC_BOOTSTRAP_ADMIN_* env vars are first-run-only.
 Write-Host "Authenticating to Keycloak admin API..."
 try {
+    # Pass the form as a hashtable so Invoke-RestMethod URL-encodes each field:
+    # a &, =, +, %, or # in the admin password would otherwise corrupt a
+    # hand-built body and surface as a misleading invalid_grant.
     $tokenResp = Invoke-RestMethod -Uri "$KeycloakBaseUrl/realms/master/protocol/openid-connect/token" `
         -Method Post `
         -ContentType "application/x-www-form-urlencoded" `
-        -Body "grant_type=password&client_id=admin-cli&username=$AdminUser&password=$AdminPasswordPlain" `
+        -Body @{
+            grant_type = "password"
+            client_id  = "admin-cli"
+            username   = $AdminUser
+            password   = $AdminPasswordPlain
+        } `
         -ErrorAction Stop
 } catch {
     # Untyped catch -- PS 5.1's Invoke-RestMethod wraps HTTP errors variably
@@ -673,7 +681,16 @@ $passwordWorks = $false
 $dagEnabled = $EnableDirectAccessGrants.IsPresent -or ($clients.Count -gt 0 -and (Get-KcClientProp $clients[0] 'directAccessGrantsEnabled'))
 if ($dagEnabled) {
     try {
-        $body = "grant_type=password&client_id=$ClientId&client_secret=$ClientSecretPlain&username=$TestUserEmail&password=$TestUserPasswordPlain&scope=openid"
+        # Hashtable body so Invoke-RestMethod URL-encodes the client secret and
+        # password; a special character in either would otherwise corrupt the form.
+        $body = @{
+            grant_type    = "password"
+            client_id     = $ClientId
+            client_secret = $ClientSecretPlain
+            username      = $TestUserEmail
+            password      = $TestUserPasswordPlain
+            scope         = "openid"
+        }
         $probe = Invoke-RestMethod -Uri "$KeycloakBaseUrl/realms/$RealmName/protocol/openid-connect/token" `
             -Method Post -ContentType "application/x-www-form-urlencoded" -Body $body -TimeoutSec 5 -ErrorAction Stop
         if ($probe.access_token) { $passwordWorks = $true }

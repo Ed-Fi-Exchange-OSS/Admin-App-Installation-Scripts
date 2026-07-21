@@ -238,7 +238,7 @@ $webConfig = @'
     <httpProtocol>
       <customHeaders>
         <remove name="X-Powered-By" />
-        <add name="Strict-Transport-Security" value="max-age=31536000; includeSubDomains" />
+        __HSTS_HEADER__
         <add name="X-Content-Type-Options" value="nosniff" />
         <add name="X-Frame-Options" value="DENY" />
         <add name="Referrer-Policy" value="no-referrer" />
@@ -254,6 +254,17 @@ $webConfig = @'
 $apiOrigin = ([Uri]$ApiUrl).GetLeftPart([System.UriPartial]::Authority)
 $webConfig = $webConfig.Replace('__API_ORIGIN__', $apiOrigin)
 $webConfig = $webConfig.Replace('__HTTPS_PORT__', "$HttpsPort")
+
+# HSTS only on a real hostname / CA-issued cert. On the default self-signed localhost
+# path, an HSTS pin would apply to the WHOLE 'localhost' host for a year (HSTS is
+# port-agnostic), silently rewriting other localhost HTTP services -- e.g. Keycloak
+# dev on :8080 -- to https and breaking the default login flow. Emit it only when the
+# operator supplied their own cert (which implies a real deployment behind a real name).
+if ($CertificateThumbprint -or $CertificatePfxPath) {
+    $webConfig = $webConfig.Replace('__HSTS_HEADER__', '<add name="Strict-Transport-Security" value="max-age=31536000; includeSubDomains" />')
+} else {
+    $webConfig = $webConfig -replace '(?m)^\s*__HSTS_HEADER__\r?\n', ''
+}
 
 $webConfigPath = "$DestPath\web.config"
 if ((Test-Path $webConfigPath) -and ((Get-Content $webConfigPath -Raw) -eq $webConfig)) {

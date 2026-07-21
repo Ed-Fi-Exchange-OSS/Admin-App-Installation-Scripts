@@ -580,10 +580,19 @@ POSTGRES_PORT_EXPOSED=$PostgresPort
                 # already owned by this user (the app connects as itself), so schema
                 # ownership is sufficient. Run as the postgres superuser.
                 Write-Host "Synchronizing $PostgresAppUser password + privileges (idempotent, least-privilege)..."
+                # Escape before interpolating into SQL: double single quotes in the
+                # string literal (password) and double quotes in the quoted
+                # identifiers (user/db). The complexity check encourages symbols, so
+                # an unescaped ' in the password would be a psql syntax error at best
+                # and SQL injection as the superuser at worst (matches the escaping
+                # already applied to $OidcClientId below).
+                $pgAppUserId   = $PostgresAppUser         -replace '"', '""'
+                $pgDbId        = $DatabaseName            -replace '"', '""'
+                $pgAppPwLit    = $PostgresAppPasswordPlain -replace "'", "''"
                 $syncSql = @"
-ALTER USER "$PostgresAppUser" WITH PASSWORD '$PostgresAppPasswordPlain';
-GRANT CONNECT, CREATE ON DATABASE "$DatabaseName" TO "$PostgresAppUser";
-ALTER SCHEMA public OWNER TO "$PostgresAppUser";
+ALTER USER "$pgAppUserId" WITH PASSWORD '$pgAppPwLit';
+GRANT CONNECT, CREATE ON DATABASE "$pgDbId" TO "$pgAppUserId";
+ALTER SCHEMA public OWNER TO "$pgAppUserId";
 "@
                 # Pass the password through the environment, never on the command
                 # line: `docker exec -e PGPASSWORD` (no value) forwards it from

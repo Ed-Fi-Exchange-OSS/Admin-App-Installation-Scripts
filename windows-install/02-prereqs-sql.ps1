@@ -162,6 +162,12 @@ function Invoke-Sqlcmd-Quiet {
     param(
         [string[]]$SqlArgs,
         [string]$Password,
+        # T-SQL to run. When it embeds a secret (a password in ALTER/CREATE LOGIN),
+        # pass it here rather than as `-Q` in $SqlArgs: it is written to an
+        # Administrators-only temp file and run via `-i`, so the statement text
+        # never lands on the sqlcmd process command line (visible in the process
+        # list / auditable via event 4688 / Sysmon). The file is deleted in finally.
+        [string]$QueryText,
         [switch]$FailOnSqlError
     )
     $prev = $ErrorActionPreference
@@ -176,11 +182,27 @@ function Invoke-Sqlcmd-Quiet {
     # calls; the readiness and connection probes below intentionally read exit
     # codes and must not treat an expected failure as fatal.
     if ($FailOnSqlError) { $SqlArgs += "-b" }
+    $queryFile = $null
+    if ($QueryText) {
+        # Create the temp file, lock its ACL down to Administrators + SYSTEM (no
+        # inheritance) BEFORE writing the secret, then hand it to sqlcmd via -i.
+        $queryFile = [System.IO.Path]::GetTempFileName()
+        $acl = New-Object System.Security.AccessControl.FileSecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @('S-1-5-32-544', 'S-1-5-18')) {
+            $account = New-Object System.Security.Principal.SecurityIdentifier $sid
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($account, 'FullControl', 'Allow')))
+        }
+        Set-Acl -Path $queryFile -AclObject $acl
+        Set-Content -Path $queryFile -Value $QueryText -Encoding UTF8
+        $SqlArgs += @('-i', $queryFile)
+    }
     try {
         & sqlcmd @SqlArgs -t 10 2>&1 | Out-Null
     } finally {
         $ErrorActionPreference = $prev
         if ($Password) { Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue }
+        if ($queryFile) { Remove-Item $queryFile -Force -ErrorAction SilentlyContinue }
     }
     return $LASTEXITCODE
 }
@@ -211,7 +233,7 @@ if ($saLoginWorks) {
     Write-Host "sa login doesn't accept the password -- running ALTER LOGIN..."
     $escapedPw = $SaPasswordPlain -replace "'", "''"
     $saQuery = "ALTER LOGIN sa WITH PASSWORD = '$escapedPw'; ALTER LOGIN sa ENABLE;"
-    $ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "(local)", "-E", "-Q", $saQuery) -FailOnSqlError
+    $ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "(local)", "-E") -QueryText $saQuery -FailOnSqlError
     if ($ec -ne 0) {
         throw "Failed to configure sa login (sqlcmd exit code $ec). Verify your Windows user has SQL sysadmin."
     }
@@ -260,7 +282,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$AppDbUserna
     CREATE USER [$safeUser] FOR LOGIN [$safeUser];
 ALTER ROLE db_owner ADD MEMBER [$safeUser];
 "@
-$ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "(local)", "-E", "-Q", $provisionQuery) -FailOnSqlError
+$ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "(local)", "-E") -QueryText $provisionQuery -FailOnSqlError
 if ($ec -ne 0) {
     throw "Failed to provision the Admin App login '$AppDbUsername' (sqlcmd exit code $ec). A CHECK_POLICY failure here means the password is too weak; supply a stronger -AppDbPassword."
 }

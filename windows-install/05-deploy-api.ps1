@@ -420,7 +420,7 @@ $webConfig = @'
     <httpProtocol>
       <customHeaders>
         <remove name="X-Powered-By" />
-        <add name="Strict-Transport-Security" value="max-age=31536000; includeSubDomains" />
+        __HSTS_HEADER__
         <add name="Referrer-Policy" value="no-referrer" />
         <add name="Content-Security-Policy" value="default-src 'none'; frame-ancestors 'none'; base-uri 'none'" />
       </customHeaders>
@@ -431,6 +431,17 @@ $webConfig = @'
 '@
 $webConfig = $webConfig.Replace('__NODE_EXE__', $nodeExe)
 $webConfig = $webConfig.Replace('__HTTPS_PORT__', "$HttpsPort")
+
+# HSTS only on a real hostname / CA-issued cert. On the default self-signed localhost
+# path, an HSTS pin would apply to the WHOLE 'localhost' host for a year (HSTS is
+# port-agnostic), silently rewriting other localhost HTTP services -- e.g. Keycloak
+# dev on :8080 -- to https and breaking the default login flow. Emit it only when the
+# operator supplied their own cert (which implies a real deployment behind a real name).
+if ($CertificateThumbprint -or $CertificatePfxPath) {
+    $webConfig = $webConfig.Replace('__HSTS_HEADER__', '<add name="Strict-Transport-Security" value="max-age=31536000; includeSubDomains" />')
+} else {
+    $webConfig = $webConfig -replace '(?m)^\s*__HSTS_HEADER__\r?\n', ''
+}
 
 # Detailed IIS errors are off for remote clients by default (DetailedLocalOnly:
 # local requests still see detail, which keeps on-box debugging usable). -DevErrors
@@ -718,6 +729,19 @@ BEGIN
 END
 "@
         $env:SQLCMDPASSWORD = $AppDbPasswordPlain
+        # The statement embeds the OIDC client secret, so run it from an
+        # Administrators-only temp file via -i rather than -Q: the secret never
+        # lands on the sqlcmd process command line (process list / event 4688).
+        # Lock the ACL down before writing the secret; delete the file in finally.
+        $oidcQueryFile = [System.IO.Path]::GetTempFileName()
+        $oidcAcl = New-Object System.Security.AccessControl.FileSecurity
+        $oidcAcl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @('S-1-5-32-544', 'S-1-5-18')) {
+            $account = New-Object System.Security.Principal.SecurityIdentifier $sid
+            $oidcAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($account, 'FullControl', 'Allow')))
+        }
+        Set-Acl -Path $oidcQueryFile -AclObject $oidcAcl
+        Set-Content -Path $oidcQueryFile -Value $oidcUpsert -Encoding UTF8
         # This reconciliation is best-effort: on a first install the [oidc] table
         # does not exist yet (the guard above is a no-op), and a transient sqlcmd
         # timeout must not abort the whole install. A -b native error surfaces as a
@@ -726,12 +750,13 @@ END
         # under load.
         $oidcUpsertExit = 1
         try {
-            & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -b -l 30 -Q $oidcUpsert 1>$null 2>$null
+            & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -b -l 30 -i $oidcQueryFile 1>$null 2>$null
             $oidcUpsertExit = $LASTEXITCODE
         } catch {
             $oidcUpsertExit = 1
         } finally {
             Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
+            Remove-Item $oidcQueryFile -Force -ErrorAction SilentlyContinue
         }
         if ($oidcUpsertExit -eq 0) {
             Write-Host "OIDC connection row reconciled with the supplied settings."

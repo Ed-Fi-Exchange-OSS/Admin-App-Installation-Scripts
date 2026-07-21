@@ -13,10 +13,18 @@ set -e
 # (PostgreSQL 13+), so CREATE on the database suffices -- no superuser needed. The
 # user is a non-superuser and cannot touch other databases -- mirrors the MSSQL
 # model (db_owner scoped to the app DB, not a server sysadmin).
+# Pass user/password/db as psql variables and quote the heredoc (<<-'EOSQL') so
+# bash does NOT expand them into the SQL text. psql's :'pw' / :"user" interpolation
+# quotes each value safely, so a password containing a single quote no longer aborts
+# the entrypoint on first boot (ON_ERROR_STOP=1 would brick the volume) or opens SQL
+# injection. -v interpolation is available in every supported psql version.
 psql -v ON_ERROR_STOP=1 \
      --username "$POSTGRES_USER" \
-     --dbname  "$POSTGRES_DB" <<-EOSQL
-  CREATE USER "${ADMIN_APP_DB_USER}" WITH PASSWORD '${ADMIN_APP_DB_PASSWORD}';
-  GRANT CONNECT, CREATE ON DATABASE "${POSTGRES_DB}" TO "${ADMIN_APP_DB_USER}";
-  ALTER SCHEMA public OWNER TO "${ADMIN_APP_DB_USER}";
+     --dbname  "$POSTGRES_DB" \
+     -v app_user="$ADMIN_APP_DB_USER" \
+     -v app_pw="$ADMIN_APP_DB_PASSWORD" \
+     -v app_db="$POSTGRES_DB" <<-'EOSQL'
+  CREATE USER :"app_user" WITH PASSWORD :'app_pw';
+  GRANT CONNECT, CREATE ON DATABASE :"app_db" TO :"app_user";
+  ALTER SCHEMA public OWNER TO :"app_user";
 EOSQL
