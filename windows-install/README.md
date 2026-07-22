@@ -104,6 +104,12 @@ Numbered scripts map to the official guide's section order. The **generic path**
 | `idp-keycloak-setup.ps1` | One run = a ready local Keycloak: installs a JDK if needed, downloads Keycloak, starts it (via `idp-keycloak-start.ps1`), then provisions the `edfi` realm, `edfiadminapp` client, and test user. |
 | `idp-keycloak-start.ps1` | Starts Keycloak in the background (bootstraps the master admin on first run, waits for readiness). Does not require elevation. Use to relaunch Keycloak by hand. |
 
+### External IdP helper (optional: Microsoft Entra ID)
+
+| Script | Purpose |
+|---|---|
+| `idp-entra-setup.ps1` | Optional Entra helper. Creates (or reconciles) a single-tenant Entra App Registration via the Microsoft Graph PowerShell SDK: sets the Web redirect URI, adds the `email` ID-token optional claim, adds the delegated `openid`/`email` Microsoft Graph permissions, creates a client secret, and grants admin consent when the running identity is privileged enough (otherwise it prints the exact manual consent URL). It outputs the client id, client secret, and issuer to pass to `install-all.ps1 -IdpProvider microsoft`. Separate from the install: `install-all.ps1` does not call it. Google Workspace is intentionally not covered (Google exposes no supported API to create the standard Web OAuth client the Admin App needs), so for Google the OAuth client stays a manual step. |
+
 ### Transversal
 
 | Script | Purpose |
@@ -144,9 +150,11 @@ The Admin App's authentication engine is provider-agnostic (generic OIDC discove
   -AdminUsername 'you@yourtenant.onmicrosoft.com'
 ```
 
+> **Optional (Entra only):** rather than registering the App Registration by hand, you can script it first with [`idp-entra-setup.ps1`](#external-idp-helper-optional-microsoft-entra-id). It creates the single-tenant registration, sets the redirect URI and `email` claim, adds the delegated `openid`/`email` permissions, and creates a client secret, then outputs the `-OidcIssuer` / `-OidcClientId` / `-OidcClientSecret` values to pass to the command above. On a clean install the redirect callback id is `1` (the helper's default); if `install-all` later reports a different id, re-run the helper with `-RedirectCallbackId <id>` to add the matching redirect URI (Entra allows editing redirect URIs after creation, and the helper merges rather than replaces).
+
 - `keycloak`/`google` default `-OidcIssuer`; `microsoft`/`other` require it. `-ViteIdpAccountUrl` is defaulted per provider (`other` requires it). `-OidcScope` defaults to `openid email profile`.
 - **Where to find `-OidcIssuer`:** for Entra, the App Registration → *Endpoints* → "OpenID Connect metadata document" URL, minus the trailing `/.well-known/openid-configuration` (typically `https://login.microsoftonline.com/<tenant-id>/v2.0`). For Google it's `https://accounts.google.com` (the default).
-- **You register the OIDC client yourself** in the provider's portal (no script can provision Entra/Google). `install-all` validates the issuer's discovery endpoint and, at the end of the install, prints the exact URIs to register. The redirect URI is `https://localhost:3443/api/auth/callback/<id>`, where `<id>` is the `oidc` database row id `install-all` resolves and prints ("OIDC redirect callback id resolved to `<id>`") — register `callback/<that id>`, not a hardcoded `callback/1`. Post-logout is `https://localhost:3443/api/auth/post-logout` and the allowed origin is `https://localhost:4443`.
+- **You register the OIDC client yourself** in the provider's portal (no script can provision the Google OAuth client; for Entra, the optional `idp-entra-setup.ps1` can script the App Registration). `install-all` validates the issuer's discovery endpoint and, at the end of the install, prints the exact URIs to register. The redirect URI is `https://localhost:3443/api/auth/callback/<id>`, where `<id>` is the `oidc` database row id `install-all` resolves and prints ("OIDC redirect callback id resolved to `<id>`") — register `callback/<that id>`, not a hardcoded `callback/1`. Post-logout is `https://localhost:3443/api/auth/post-logout` and the allowed origin is `https://localhost:4443`.
 - A user must exist in the provider whose **email/username claim equals `-AdminUsername`** — the script seeds that user in the `[user]` table with the admin role, but the identity lives in your identity provider. For Entra specifically, the app registration must emit an `email` claim; see [Entra: "Invalid email from IdP" after sign-in](#entra-invalid-email-from-idp-after-sign-in).
 
 You can also drive the per-section scripts manually (`00`→`06`), passing `-Oidc*` to `05-deploy-api.ps1` and `-ViteIdpAccountUrl` to `04-build.ps1`. When you do, the OIDC **client secret, issuer, client id, and admin username must match** between the identity-provider step (`idp-keycloak-setup.ps1` or your external provider) and `05-deploy-api.ps1` — a mismatch surfaces as a login failure, not an install error. Open a **fresh** elevated PowerShell after `03-prereqs-node.ps1` installs Node, so the updated `PATH` is in effect before `04-build.ps1` runs.
