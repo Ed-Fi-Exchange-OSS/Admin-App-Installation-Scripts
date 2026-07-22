@@ -1,0 +1,472 @@
+#requires -Version 7.0
+<#
+.SYNOPSIS
+  Load education organizations from a CSV (produced by export-edorgs.ps1) into
+  the Admin App application database. Idempotent.
+
+.DESCRIPTION
+  One-time bulk import of pre-existing ODS education organizations into the
+  Admin App's edorg table, so they show up when creating a new Application.
+  Mirrors what the Admin App's own sync writes: one edorg row per education
+  organization (type carried in the discriminator column), the parent/child
+  hierarchy in parentId, and the ancestor/self rows in edorg_closure that the
+  Admin App's tree queries rely on.
+
+  The rows are attached to an EXISTING tenant + ODS registration in the Admin
+  App database: the script looks up the edfi_tenant named -TenantName and its
+  ods row (matched by -OdsDbName when the tenant has more than one), then
+  stamps every imported row with that tenant/environment/ODS scope. Register
+  the environment, tenant, and ODS instances first through the Admin App UI.
+
+  Import rules, per CSV row:
+
+    * discriminator must be an ed org type the Admin App supports
+      (edfi.School, edfi.LocalEducationAgency, edfi.StateEducationAgency,
+      edfi.EducationServiceCenter, edfi.EducationOrganizationNetwork,
+      edfi.PostSecondaryInstitution, edfi.OrganizationDepartment, edfi.Other);
+      other types are skipped with a warning.
+    * an education organization that already exists in the scope (same
+      tenant + ODS + educationOrganizationId) is left untouched, so re-runs
+      are no-ops and never clobber rows written by the Admin App itself.
+    * the parent link is resolved inside the same scope, whether the parent
+      came from this CSV or already existed; a parent that cannot be found
+      leaves the row a root (warned).
+
+  The whole load runs in a single transaction: on any error nothing is
+  imported.
+
+  NOTE: on SQL Server the Admin App schema stores educationOrganizationId as
+  a 32-bit int, so ids above 2,147,483,647 cannot be imported (the script
+  stops and lists them). PostgreSQL stores bigint and has no such limit.
+
+.EXAMPLE
+  # SQL Server (default engine), default tenant, single registered ODS:
+  ./import-edorgs.ps1 -DbPassword 'EdFi-Local!2026'
+
+.EXAMPLE
+  # Tenant with several registered ODS databases -- pick one:
+  ./import-edorgs.ps1 -DbPassword '...' -OdsDbName 'EdFi_Ods_2026'
+
+.EXAMPLE
+  # PostgreSQL (the Admin App Docker stack):
+  ./import-edorgs.ps1 -DbEngine pgsql -PostgresAppPassword 'P@ssw0rd' -UsePostgresDocker
+
+.EXAMPLE
+  # Different CSV and a named environment:
+  ./import-edorgs.ps1 -CsvPath ./district-edorgs.csv -EnvironmentName 'Ed-Fi ODS/API v7.3' -DbPassword '...'
+#>
+param(
+    # CSV produced by export-edorgs.ps1 (or hand-authored with the same columns).
+    [string]$CsvPath = "$PSScriptRoot/edorgs.csv",
+
+    # Admin App tenant to import into (edfi_tenant.name; 'default' unless the
+    # deployment renamed it).
+    [string]$TenantName = 'default',
+    # Optional: environment name (sb_environment.name), only needed when the
+    # same tenant name exists in more than one environment.
+    [string]$EnvironmentName,
+    # Optional: which registered ODS to attach the ed orgs to (ods.dbName),
+    # only needed when the tenant has more than one ODS registered.
+    [string]$OdsDbName,
+
+    [ValidateSet('mssql', 'pgsql')][string]$DbEngine = 'mssql',
+    # The Admin App application database.
+    [string]$DatabaseName = 'sbaa',
+
+    # --- mssql -----------------------------------------------------------------
+    [string]$SqlServer = 'tcp:localhost,1433',
+    [string]$DbUsername = 'sa',
+    [string]$DbPassword,                         # required for -DbEngine mssql unless -UseIntegratedSecurity
+    [switch]$UseIntegratedSecurity,
+
+    # --- pgsql -----------------------------------------------------------------
+    [string]$PostgresAppPassword,                # required for -DbEngine pgsql
+    [string]$PostgresHost = 'localhost',
+    [int]$PostgresPort = 5432,
+    [string]$PostgresAppUser = 'edfiadminapp',
+    [switch]$UsePostgresDocker,
+    # The Admin App Docker stack's database container.
+    [string]$PostgresContainerName = 'edfiadminapp-postgres'
+)
+
+$ErrorActionPreference = 'Stop'
+
+# Engine-specific required-arg validation.
+if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $DbPassword) { throw "-DbPassword is required when -DbEngine is 'mssql' (the default) without -UseIntegratedSecurity." }
+if ($UseIntegratedSecurity -and $DbEngine -ne 'mssql') { throw "-UseIntegratedSecurity only applies when -DbEngine is 'mssql'." }
+if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppPassword is required when -DbEngine is 'pgsql'." }
+if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'." }
+if (-not (Test-Path $CsvPath)) { throw "CSV not found: $CsvPath. Run export-edorgs.ps1 first (or pass -CsvPath)." }
+
+if ($DbEngine -eq 'mssql')
+{
+    # The @(...) wrap is load-bearing: assignment from an if-expression unrolls
+    # a one-element array to a scalar string, and splatting a scalar to a
+    # native command garbles the argument list.
+    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $DbUsername, '-P', $DbPassword })
+}
+
+function Invoke-AdminAppSql
+{
+    # Runs SQL against the Admin App database and returns raw output lines.
+    # mssql reads from a temp file (-i): the generated batch can exceed the
+    # command-line length -Q allows. pgsql reads from stdin.
+    param([Parameter(Mandatory = $true)][string]$Sql, [string]$FailHint)
+
+    if ($DbEngine -eq 'mssql')
+    {
+        $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("edorg-import-{0}.sql" -f [guid]::NewGuid())
+        try
+        {
+            # utf8BOM so sqlcmd decodes non-ASCII institution names correctly.
+            Set-Content -Path $tempFile -Value $Sql -Encoding utf8BOM
+            $out = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            if ($LASTEXITCODE -ne 0)
+            {
+                $out | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+                throw "sqlcmd failed (exit $LASTEXITCODE). $FailHint"
+            }
+            return $out
+        }
+        finally
+        {
+            Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($UsePostgresDocker)
+    {
+        $out = $Sql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+    }
+    else
+    {
+        $env:PGPASSWORD = $PostgresAppPassword
+        $out = $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+    }
+    if ($LASTEXITCODE -ne 0)
+    {
+        $out | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        throw "psql failed (exit $LASTEXITCODE). $FailHint"
+    }
+    return $out
+}
+
+# Ed org types the Admin App understands (packages/models edorg-type enum).
+$supportedDiscriminators = @(
+    'edfi.StateEducationAgency', 'edfi.EducationServiceCenter',
+    'edfi.LocalEducationAgency', 'edfi.School',
+    'edfi.EducationOrganizationNetwork', 'edfi.PostSecondaryInstitution',
+    'edfi.OrganizationDepartment', 'edfi.Other'
+)
+
+# ---- Step 1: read and validate the CSV ---------------------------------------
+Write-Host "Reading $CsvPath..."
+$csv = @(Import-Csv -Path $CsvPath)
+if ($csv.Count -eq 0) { throw "CSV is empty: $CsvPath" }
+foreach ($required in 'educationOrganizationId', 'nameOfInstitution', 'discriminator')
+{
+    if ($required -notin $csv[0].PSObject.Properties.Name) { throw "CSV is missing the '$required' column. Expected the columns written by export-edorgs.ps1." }
+}
+
+$rows = @()
+$skippedByType = @{}
+foreach ($r in $csv)
+{
+    $disc = "$($r.discriminator)".Trim()
+    if ($disc -notin $supportedDiscriminators)
+    {
+        $key = if ($disc) { $disc } else { '(no discriminator)' }
+        $skippedByType[$key] = 1 + $skippedByType[$key]
+        continue
+    }
+    if ("$($r.educationOrganizationId)" -notmatch '^\d+$') { throw "Row with nameOfInstitution '$($r.nameOfInstitution)' has a non-numeric educationOrganizationId '$($r.educationOrganizationId)'." }
+    if (-not "$($r.nameOfInstitution)".Trim()) { throw "Row with educationOrganizationId $($r.educationOrganizationId) has an empty nameOfInstitution." }
+    $rows += [pscustomobject]@{
+        EdOrgId       = [long]$r.educationOrganizationId
+        Name          = "$($r.nameOfInstitution)".Trim()
+        ShortName     = "$($r.shortNameOfInstitution)".Trim()
+        Discriminator = $disc
+        ParentEdOrgId = if ("$($r.parentEducationOrganizationId)" -match '^\d+$') { [long]$r.parentEducationOrganizationId } else { $null }
+    }
+}
+
+foreach ($entry in $skippedByType.GetEnumerator() | Sort-Object Key)
+{
+    Write-Host "WARNING: skipping $($entry.Value) row(s) of type '$($entry.Key)' -- not supported by the Admin App." -ForegroundColor Yellow
+}
+if ($rows.Count -eq 0) { throw "No importable rows: every row in the CSV has an unsupported discriminator." }
+
+$duplicates = @($rows | Group-Object EdOrgId | Where-Object Count -gt 1)
+if ($duplicates.Count -gt 0) { throw "Duplicate educationOrganizationId value(s) in the CSV: $(($duplicates | ForEach-Object Name) -join ', ')." }
+
+# On SQL Server the Admin App stores educationOrganizationId as a 32-bit int.
+if ($DbEngine -eq 'mssql')
+{
+    $tooBig = @($rows | Where-Object { $_.EdOrgId -gt 2147483647 })
+    if ($tooBig.Count -gt 0)
+    {
+        throw ("educationOrganizationId value(s) exceed the SQL Server Admin App schema's int range (max 2147483647): " +
+            "$(($tooBig | ForEach-Object EdOrgId) -join ', '). Remove these rows from the CSV, or use a PostgreSQL Admin App database.")
+    }
+}
+
+# Parents that are neither in the CSV nor (necessarily) in the database: the
+# row still imports, but as a root unless the parent already exists in the
+# Admin App under the same tenant/ODS.
+$idsInCsv = [System.Collections.Generic.HashSet[long]]::new([long[]]@($rows | ForEach-Object EdOrgId))
+$missingParents = @($rows | Where-Object { $null -ne $_.ParentEdOrgId -and -not $idsInCsv.Contains([long]$_.ParentEdOrgId) } |
+        ForEach-Object ParentEdOrgId | Sort-Object -Unique)
+if ($missingParents.Count -gt 0)
+{
+    Write-Host "NOTE: parent id(s) $($missingParents -join ', ') are referenced but not in the CSV; children link to them only if they already exist in the Admin App database (otherwise they import as roots)." -ForegroundColor Yellow
+}
+
+Write-Host "  $($rows.Count) education organizations to import."
+
+# ---- Step 2: resolve the tenant / ODS scope ----------------------------------
+Write-Host "`nResolving tenant '$TenantName'$(if ($EnvironmentName) { " in environment '$EnvironmentName'" }) in $DbEngine db '$DatabaseName'..."
+$tenantNameSql = $TenantName.Replace("'", "''")
+$envNameSql = $EnvironmentName.Replace("'", "''")
+$odsDbNameSql = $OdsDbName.Replace("'", "''")
+
+if ($DbEngine -eq 'mssql')
+{
+    $envFilter = if ($EnvironmentName) { "AND e.[name] = N'$envNameSql'" } else { '' }
+    $odsFilter = if ($OdsDbName) { "AND o.[dbName] = N'$odsDbNameSql'" } else { '' }
+    $scopeSql = @"
+SET NOCOUNT ON;
+SELECT t.[id], t.[sbEnvironmentId], e.[name], o.[id], o.[dbName],
+       COALESCE(CAST(o.[odsInstanceId] AS nvarchar(20)), N'')
+FROM [edfi_tenant] t
+    INNER JOIN [sb_environment] e ON e.[id] = t.[sbEnvironmentId]
+    INNER JOIN [ods] o ON o.[edfiTenantId] = t.[id]
+WHERE t.[name] = N'$tenantNameSql'
+    $envFilter
+    $odsFilter;
+"@
+}
+else
+{
+    $envFilter = if ($EnvironmentName) { "AND e.name = '$envNameSql'" } else { '' }
+    $odsFilter = if ($OdsDbName) { 'AND o."dbName" = ' + "'$odsDbNameSql'" } else { '' }
+    $scopeSql = @"
+SELECT t.id, t."sbEnvironmentId", e.name, o.id, o."dbName",
+       COALESCE(CAST(o."odsInstanceId" AS varchar), '')
+FROM edfi_tenant t
+    JOIN sb_environment e ON e.id = t."sbEnvironmentId"
+    JOIN ods o ON o."edfiTenantId" = t.id
+WHERE t.name = '$tenantNameSql'
+    $envFilter
+    $odsFilter;
+"@
+}
+
+$scopeRows = @(Invoke-AdminAppSql -Sql $scopeSql -FailHint 'Check the connection parameters and -DatabaseName.' |
+        ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -match '\|' })
+
+if ($scopeRows.Count -eq 0)
+{
+    throw ("No registered ODS found for tenant '$TenantName'$(if ($EnvironmentName) { " in environment '$EnvironmentName'" })$(if ($OdsDbName) { " with dbName '$OdsDbName'" }) in '$DatabaseName'. " +
+        'Register the environment, tenant, and ODS instances first through the Admin App UI.')
+}
+if ($scopeRows.Count -gt 1)
+{
+    $candidates = ($scopeRows | ForEach-Object { $p = $_ -split '\|'; "environment '$($p[2])' / ods dbName '$($p[4])'" }) -join '; '
+    throw "Tenant '$TenantName' matches more than one scope: $candidates. Disambiguate with -OdsDbName (and -EnvironmentName if needed)."
+}
+
+$parts = $scopeRows[0] -split '\|'
+$tenantId = [int]$parts[0]
+$sbEnvironmentId = [int]$parts[1]
+$resolvedEnvName = $parts[2]
+$odsId = [int]$parts[3]
+$resolvedOdsDbName = $parts[4]
+$odsInstanceId = if ($parts[5]) { [long]$parts[5] } else { $null }
+$odsInstanceIdSql = if ($null -ne $odsInstanceId) { $odsInstanceId } else { 'NULL' }
+$odsDbNameSqlLit = $resolvedOdsDbName.Replace("'", "''")
+
+Write-Host "  Environment '$resolvedEnvName' (id $sbEnvironmentId), tenant id $tenantId, ODS '$resolvedOdsDbName' (id $odsId, odsInstanceId $(if ($null -ne $odsInstanceId) { $odsInstanceId } else { 'NULL' }))."
+
+# ---- Step 3: build and run the load ------------------------------------------
+# The CSV rows are staged into a temp table, then everything happens set-based
+# in one transaction: insert missing edorg rows, wire parentId within the
+# scope, and fill in the edorg_closure ancestor/self pairs the Admin App's
+# tree queries expect (the closure insert covers pre-existing rows too, so a
+# partially-synced scope is healed rather than corrupted).
+function Get-StageValuesBatches
+{
+    # Multi-row VALUES batches (SQL Server caps a VALUES list at 1000 rows).
+    param([string]$NullKeyword = 'NULL')
+    $batchSize = 500
+    $batches = @()
+    for ($i = 0; $i -lt $rows.Count; $i += $batchSize)
+    {
+        $values = foreach ($row in $rows[$i..([Math]::Min($i + $batchSize, $rows.Count) - 1)])
+        {
+            $name = $row.Name.Replace("'", "''")
+            $short = if ($row.ShortName) { "'" + $row.ShortName.Replace("'", "''") + "'" } else { $NullKeyword }
+            $disc = $row.Discriminator.Replace("'", "''")
+            $parent = if ($null -ne $row.ParentEdOrgId) { $row.ParentEdOrgId } else { $NullKeyword }
+            "($($row.EdOrgId), '$name', $short, '$disc', $parent)"
+        }
+        $batches += ($values -join ",`n")
+    }
+    return $batches
+}
+
+if ($DbEngine -eq 'mssql')
+{
+    $stageInserts = (Get-StageValuesBatches | ForEach-Object {
+            "INSERT INTO #stage (edOrgId, name, shortName, disc, parentEdOrgId) VALUES`n$_;"
+        }) -join "`n"
+
+    $sql = @"
+SET QUOTED_IDENTIFIER ON;
+SET XACT_ABORT ON;
+SET NOCOUNT ON;
+
+CREATE TABLE #stage (
+    edOrgId bigint NOT NULL PRIMARY KEY,
+    name nvarchar(255) NOT NULL,
+    shortName nvarchar(255) NULL,
+    disc nvarchar(255) NOT NULL,
+    parentEdOrgId bigint NULL
+);
+$stageInserts
+
+BEGIN TRANSACTION;
+
+INSERT INTO [edorg] ([created], [modified], [odsId], [odsDbName], [odsInstanceId],
+                     [edfiTenantId], [sbEnvironmentId], [educationOrganizationId],
+                     [nameOfInstitution], [shortNameOfInstitution], [discriminator])
+SELECT GETDATE(), GETDATE(), $odsId, N'$odsDbNameSqlLit', $odsInstanceIdSql,
+       $tenantId, $sbEnvironmentId, s.edOrgId,
+       s.name, s.shortName, s.disc
+FROM #stage s
+WHERE NOT EXISTS (SELECT 1 FROM [edorg] e
+                  WHERE e.[edfiTenantId] = $tenantId AND e.[odsId] = $odsId
+                      AND e.[educationOrganizationId] = s.edOrgId);
+PRINT CONCAT('Inserted ', @@ROWCOUNT, ' new edorg row(s); the rest already existed.');
+
+-- Wire the hierarchy. Only rows without a parent are touched, so links
+-- written by the Admin App itself are never clobbered.
+UPDATE e SET [parentId] = p.[id]
+FROM [edorg] e
+    INNER JOIN #stage s ON s.edOrgId = e.[educationOrganizationId]
+    INNER JOIN [edorg] p ON p.[edfiTenantId] = $tenantId AND p.[odsId] = $odsId
+        AND p.[educationOrganizationId] = s.parentEdOrgId
+WHERE e.[edfiTenantId] = $tenantId AND e.[odsId] = $odsId
+    AND e.[parentId] IS NULL;
+PRINT CONCAT('Linked ', @@ROWCOUNT, ' row(s) to their parent.');
+
+-- Closure pairs (self + every ancestor), same shape the Admin App's ORM
+-- writes. Recomputed for the whole scope and inserted where missing. The
+-- missing pairs are staged first: the closure table's INSTEAD OF trigger
+-- (TR_edorg_closure_psuedo_fk) raises its FK error on an EMPTY insert set,
+-- so the insert must only run when there is something to insert.
+WITH chain AS (
+    SELECT e.[id] AS descendant, e.[id] AS ancestor
+    FROM [edorg] e
+    WHERE e.[edfiTenantId] = $tenantId AND e.[odsId] = $odsId
+    UNION ALL
+    SELECT c.descendant, e.[parentId]
+    FROM chain c
+        INNER JOIN [edorg] e ON e.[id] = c.ancestor
+    WHERE e.[parentId] IS NOT NULL
+)
+SELECT c.ancestor, c.descendant
+INTO #closure_missing
+FROM chain c
+WHERE NOT EXISTS (SELECT 1 FROM [edorg_closure] cc
+                  WHERE cc.[id_ancestor] = c.ancestor AND cc.[id_descendant] = c.descendant);
+
+IF EXISTS (SELECT 1 FROM #closure_missing)
+BEGIN
+    INSERT INTO [edorg_closure] ([id_ancestor], [id_descendant])
+    SELECT ancestor, descendant FROM #closure_missing;
+END
+
+COMMIT TRANSACTION;
+
+SELECT CONCAT('TOTAL|', COUNT(*)) FROM [edorg]
+WHERE [edfiTenantId] = $tenantId AND [odsId] = $odsId;
+"@
+}
+else
+{
+    $stageInserts = (Get-StageValuesBatches | ForEach-Object {
+            "INSERT INTO stage (edorgid, name, shortname, disc, parentedorgid) VALUES`n$_;"
+        }) -join "`n"
+
+    $sql = @"
+BEGIN;
+
+CREATE TEMP TABLE stage (
+    edorgid bigint NOT NULL PRIMARY KEY,
+    name varchar NOT NULL,
+    shortname varchar NULL,
+    disc varchar NOT NULL,
+    parentedorgid bigint NULL
+) ON COMMIT DROP;
+$stageInserts
+
+INSERT INTO edorg (created, modified, "odsId", "odsDbName", "odsInstanceId",
+                   "edfiTenantId", "sbEnvironmentId", "educationOrganizationId",
+                   "nameOfInstitution", "shortNameOfInstitution", discriminator)
+SELECT now(), now(), $odsId, '$odsDbNameSqlLit', $odsInstanceIdSql,
+       $tenantId, $sbEnvironmentId, s.edorgid,
+       s.name, s.shortname, s.disc
+FROM stage s
+ON CONFLICT ("edfiTenantId", "odsId", "educationOrganizationId") DO NOTHING;
+
+-- Wire the hierarchy. Only rows without a parent are touched, so links
+-- written by the Admin App itself are never clobbered.
+UPDATE edorg e SET "parentId" = p.id
+FROM stage s
+    JOIN edorg p ON p."edfiTenantId" = $tenantId AND p."odsId" = $odsId
+        AND p."educationOrganizationId" = s.parentedorgid
+WHERE e."educationOrganizationId" = s.edorgid
+    AND e."edfiTenantId" = $tenantId AND e."odsId" = $odsId
+    AND e."parentId" IS NULL;
+
+-- Closure pairs (self + every ancestor), same shape the Admin App's ORM
+-- writes. Recomputed for the whole scope and inserted where missing.
+WITH RECURSIVE chain AS (
+    SELECT e.id AS descendant, e.id AS ancestor
+    FROM edorg e
+    WHERE e."edfiTenantId" = $tenantId AND e."odsId" = $odsId
+    UNION ALL
+    SELECT c.descendant, e."parentId"
+    FROM chain c
+        JOIN edorg e ON e.id = c.ancestor
+    WHERE e."parentId" IS NOT NULL
+)
+INSERT INTO edorg_closure (id_ancestor, id_descendant)
+SELECT ancestor, descendant FROM chain
+ON CONFLICT (id_ancestor, id_descendant) DO NOTHING;
+
+COMMIT;
+
+SELECT CONCAT('TOTAL|', COUNT(*)) FROM edorg
+WHERE "edfiTenantId" = $tenantId AND "odsId" = $odsId;
+"@
+}
+
+Write-Host "`nImporting into edorg (tenant $tenantId, ods $odsId)..."
+$output = Invoke-AdminAppSql -Sql $sql -FailHint 'Nothing was imported (the load is transactional).'
+# Filter out psql command tags ('INSERT 0 5', 'COMMIT', ...) but keep the
+# PRINT/messages the batch emits.
+$output | Where-Object {
+    "$_".Trim() -and "$_" -notmatch '^TOTAL\|' -and
+    "$_" -notmatch '^(INSERT 0 \d+$|UPDATE \d+$|BEGIN$|COMMIT$|CREATE TABLE$|SELECT \d+$)'
+} | ForEach-Object { Write-Host "  $_" }
+$total = ($output | Where-Object { "$_" -match '^TOTAL\|' } | Select-Object -First 1) -replace '^TOTAL\|', ''
+
+Write-Host "`nSUCCESS: $($rows.Count) education organizations imported or already present ($total total in the scope)." -ForegroundColor Green
+Write-Host "Next:" -ForegroundColor Green
+Write-Host "  1. In the Admin App, create (or edit) an Application: the imported ed orgs"
+Write-Host "     now appear in the Education Organization dropdown for ODS '$resolvedOdsDbName'."
+Write-Host "  2. Non-admin teams see them only once they are granted ownership of the"
+Write-Host "     tenant, environment, ODS, or individual ed orgs (Admin App > team access)."
+Write-Host "  3. This import is a one-time bridge: Admin App v4.1 is slated to keep ed"
+Write-Host "     orgs in sync natively, after which re-running it is unnecessary."
