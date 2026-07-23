@@ -19,10 +19,12 @@ troubleshooting): [Global Admin Quick Start on docs.ed-fi.org](https://docs.ed-f
 | `copy-claimsets.ps1` | Copies every built-in claimset under an `AA` prefix in the ODS/API's EdFi_Security database so they can be assigned to applications in the Admin App (or only the ones in `CLAIMSET_NAMES`). Idempotent. |
 | `cleanup.ps1` | Tears down everything the quick start created (environment, team, machine user). The human bootstrap user is left in place. |
 | `load-dotenv.ps1` | Shared `.env` parser dot-sourced by `run.ps1` and `cleanup.ps1`. |
+| `compat.ps1` | Shared Windows PowerShell 5.1 / PowerShell 7+ compatibility helpers dot-sourced by the other scripts. |
 
 ## Usage
 
-Requires PowerShell 7+. The Ed-Fi ODS/API, ODS Admin API, and Admin App (with
+Requires Windows PowerShell 5.1 or PowerShell 7+. The Ed-Fi ODS/API, ODS Admin
+API, and Admin App (with
 its identity provider) must already be installed and reachable. The ODS
 instances listed in `ODSS_JSON` must already exist in the target ODS/API's
 `EdFi_Admin.dbo.OdsInstances` table — the ids **and names** must match those

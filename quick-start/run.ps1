@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   One-step Global Admin Quick Start: loads .env and runs bootstrap.ps1,
@@ -32,6 +31,7 @@
 .EXAMPLE
   ./run.ps1 -EnvFile ./my-deployment.env
 #>
+#requires -Version 5.1
 param(
     # Path to the .env file (copy .env.example and edit it).
     [string]$EnvFile = "$PSScriptRoot/.env",
@@ -67,7 +67,16 @@ $dbEngine = Get-EnvValue 'DB_ENGINE' 'mssql'
 $copyClaimsets = -not $SkipClaimsets -and (Get-EnvValue 'COPY_CLAIMSETS' 'true') -in @('true', 'True', 'TRUE', '1', 'yes')
 $odss = @()
 $odssJson = Get-EnvValue 'ODSS_JSON'
-if ($odssJson) { $odss = @($odssJson | ConvertFrom-Json -AsHashtable) }
+if ($odssJson)
+{
+    # -AsHashtable is PS6+ only; parse to PSCustomObjects instead (consumers
+    # use dot-access, which works for both). Assign before @(): on Windows
+    # PowerShell 5.1 ConvertFrom-Json emits the parsed array as a SINGLE
+    # pipeline object, so @() directly around the pipeline would wrap the
+    # whole array as one element.
+    $parsedOdss = $odssJson | ConvertFrom-Json
+    $odss = @($parsedOdss)
+}
 
 # ---- Up-front validation of the provider/engine-specific required values -----
 $missing = @()

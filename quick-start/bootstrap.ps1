@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   (Optional) Bootstrap the service-account (machine-to-machine) client used for
@@ -64,6 +63,7 @@
   #     client_id={machineAppGuid}&client_secret={secret}
   #     scope={api-app-id-uri-or-guid}/.default
 #>
+#requires -Version 5.1
 param(
     # keycloak (default): provision the Keycloak client + seed the user.
     # entra: skip all Keycloak calls; only seed the user (app reg is done in Entra).
@@ -108,6 +108,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+. "$PSScriptRoot/compat.ps1"
+
 # Provider-specific required-arg validation.
 if ($Provider -eq 'keycloak' -and -not $AdminPassword) { throw "-AdminPassword is required when -Provider is 'keycloak' (the default)." }
 if ($Provider -eq 'entra' -and $MachineClientId -eq 'edfiadminapp-machine') { throw "-MachineClientId must be the Entra machine app's Application (client) ID GUID when -Provider is 'entra' (it must match the token's azp/appid claim)." }
@@ -118,7 +120,13 @@ if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppP
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'." }
 
 $script:rest = @{}
-if ($SkipCertificateCheck) { $script:rest.SkipCertificateCheck = $true }
+if ($SkipCertificateCheck)
+{
+    # -SkipCertificateCheck exists only on PS 6+; on Windows PowerShell 5.1
+    # fall back to a process-wide validation override.
+    if ($script:webCmdletsSupportSkipCertCheck) { $script:rest.SkipCertificateCheck = $true }
+    else { Enable-TrustAllCertificates }
+}
 
 function Invoke-KcApi
 {

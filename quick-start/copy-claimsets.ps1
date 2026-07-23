@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   Copy built-in Ed-Fi claimsets in the EdFi_Security database under an "AA "
@@ -62,6 +61,7 @@
   ./copy-claimsets.ps1 -SqlUser 'edfi_security_user' -SqlPassword '...' `
     -ClaimSetNames 'SIS Vendor', 'Ed-Fi Sandbox', 'Assessment Vendor' -Prefix 'AA '
 #>
+#requires -Version 5.1
 param(
     # Claimsets to copy. Empty (the default) = all built-in claimsets
     # (IsEdfiPreset = 1, excluding ForApplicationUseOnly = 1).
@@ -94,6 +94,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+. "$PSScriptRoot/compat.ps1"
 
 # Engine-specific required-arg validation.
 if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and (-not $SqlUser -or -not $SqlPassword)) { throw "-SqlUser and -SqlPassword (a login with rights on EdFi_Security) are required when -DbEngine is 'mssql' (the default) without -UseIntegratedSecurity." }

@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   Global Admin Quick Start via the Admin App REST API (no raw SQL).
@@ -71,11 +70,13 @@
     -Scope 'api://edfiadminapp-api/.default'
 
 .NOTES
-  Requires PowerShell 7+. The ODS instance ids AND names passed in -Odss must
+  Requires Windows PowerShell 5.1 or PowerShell 7+. The ODS instance ids AND
+  names passed in -Odss must
   match real rows in EdFi_Admin.dbo.OdsInstances on the target ODS/API (the
   Admin App later matches by name when creating an application), or the sync will
   not find them.
 #>
+#requires -Version 5.1
 param(
     # Base URL of the Admin App API (through the reverse proxy).
     [string]$ApiBaseUrl = "https://localhost/adminapp-api/api",
@@ -137,10 +138,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. "$PSScriptRoot/compat.ps1"
+
 # PowerShell 7.4+ refuses HTTPS->HTTP redirects (the local Keycloak/nginx 302s
 # can resolve to an insecure hop) unless -AllowInsecureRedirect is passed. The
 # switch does not exist before 7.4, so probe for it.
 $script:allowInsecureRedirect = (Get-Command Invoke-WebRequest).Parameters.ContainsKey('AllowInsecureRedirect')
+
+# -SkipCertificateCheck exists only on PS 6+; on Windows PowerShell 5.1 fall
+# back to a process-wide validation override (same probe pattern as above).
+$script:useSkipCertParam = $SkipCertificateCheck -and $script:webCmdletsSupportSkipCertCheck
+if ($SkipCertificateCheck -and -not $script:useSkipCertParam) { Enable-TrustAllCertificates }
 
 # ---- Obtain a Bearer token via the client_credentials grant ------------------
 # Works with any supported provider. The resulting token must satisfy the Admin
@@ -158,7 +166,7 @@ $tokenArgs = @{
         scope         = $Scope
     }
 }
-if ($SkipCertificateCheck) { $tokenArgs.SkipCertificateCheck = $true }
+if ($script:useSkipCertParam) { $tokenArgs.SkipCertificateCheck = $true }
 if ($script:allowInsecureRedirect) { $tokenArgs.AllowInsecureRedirect = $true }
 try
 {
@@ -167,7 +175,8 @@ try
 catch
 {
     Write-Host "Token request failed: $($_.Exception.Message)" -ForegroundColor Red
-    if ($_.ErrorDetails.Message) { Write-Host $_.ErrorDetails.Message -ForegroundColor Red }
+    $body = Get-HttpErrorBody $_
+    if ($body) { Write-Host $body -ForegroundColor Red }
     throw "Could not obtain a token from $TokenUrl. Check -OAuthClientId/-OAuthClientSecret and that the client has the client_credentials grant enabled."
 }
 $BearerToken = $tokenResponse.access_token
@@ -195,7 +204,7 @@ function Invoke-Api
         $reqArgs.Body = ($Body | ConvertTo-Json -Depth 10)
         $reqArgs.ContentType = "application/json"
     }
-    if ($SkipCertificateCheck) { $reqArgs.SkipCertificateCheck = $true }
+    if ($script:useSkipCertParam) { $reqArgs.SkipCertificateCheck = $true }
     if ($script:allowInsecureRedirect) { $reqArgs.AllowInsecureRedirect = $true }
     return Invoke-RestMethod @reqArgs
 }
@@ -209,7 +218,8 @@ try
 catch
 {
     Write-Host "Authentication failed calling /auth/me: $($_.Exception.Message)" -ForegroundColor Red
-    if ($_.ErrorDetails.Message) { Write-Host $_.ErrorDetails.Message -ForegroundColor Red }
+    $body = Get-HttpErrorBody $_
+    if ($body) { Write-Host $body -ForegroundColor Red }
     throw "Authentication was not accepted. Confirm a matching 'machine' user exists in the Admin App (clientId = the token's client_id/azp/appid) and the token carries aud = MACHINE_AUDIENCE and grants 'login:app' (Keycloak: in scope), and that its iss matches the Admin App's AUTH0_CONFIG_SECRET.ISSUER."
 }
 $userId = $me.id
@@ -332,7 +342,8 @@ else
     catch
     {
         Write-Host "Create environment failed: $($_.Exception.Message)" -ForegroundColor Red
-        if ($_.ErrorDetails.Message) { Write-Host $_.ErrorDetails.Message -ForegroundColor Red }
+        $body = Get-HttpErrorBody $_
+        if ($body) { Write-Host $body -ForegroundColor Red }
         throw
     }
 
@@ -355,7 +366,8 @@ function Grant-Ownership
     }
     catch
     {
-        $msg = if ($_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+        $msg = Get-HttpErrorBody $_
+        if (-not $msg) { $msg = $_.Exception.Message }
         # A uniqueness conflict means the team already owns it -- treat as success.
         if ($msg -match '(?i)unique|exist|duplicate|conflict')
         {

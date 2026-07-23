@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   Tears down everything the quick start created in the Admin App application
@@ -43,6 +42,7 @@
   # Leave the claimset copies in place:
   ./cleanup.ps1 -SkipClaimsets
 #>
+#requires -Version 5.1
 param(
     # Path to the .env file supplying defaults (optional).
     [string]$EnvFile = "$PSScriptRoot/.env",
@@ -84,6 +84,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/load-dotenv.ps1"
+. "$PSScriptRoot/compat.ps1"
 
 $script:dotenv = @{}
 if (Test-Path $EnvFile) { $script:dotenv = Read-DotEnv -Path $EnvFile }
