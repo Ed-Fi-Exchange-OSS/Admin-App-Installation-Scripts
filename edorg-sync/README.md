@@ -23,11 +23,12 @@ Full walkthrough (prerequisites, verification, troubleshooting):
 | `import-edorgs.ps1` | Loads the CSV into the Admin App database: inserts the missing `edorg` rows under the configured tenant/ODS, wires the parent/child hierarchy, and fills the closure rows the Admin App's tree queries expect. Skips types the Admin App does not support, never touches existing rows, and runs in a single transaction. Idempotent. |
 | `cleanup-edorgs.ps1` | Deletes exactly the imported ids (from the same CSV) out of the Admin App database; children not in the CSV are kept and become roots. Idempotent. |
 | `load-dotenv.ps1` | Shared `.env` parser dot-sourced by `run.ps1` and `cleanup-edorgs.ps1`. |
+| `compat.ps1` | Shared Windows PowerShell 5.1 / PowerShell 7+ compatibility helpers dot-sourced by the other scripts. |
 
 ## Usage
 
-Requires PowerShell 7+ (plus `sqlcmd` for SQL Server and/or `psql` for
-PostgreSQL, matching the engines in play). The Admin App must already be
+Requires Windows PowerShell 5.1 or PowerShell 7+ (plus `sqlcmd` for SQL Server
+and/or `psql` for PostgreSQL, matching the engines in play). The Admin App must already be
 installed, and the target tenant and ODS instance must already be registered
 in it through the Admin App UI. The source ODS and the Admin App database are
 configured independently and may use different servers and engines.

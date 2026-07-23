@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   Load education organizations from a CSV (produced by export-edorgs.ps1) into
@@ -55,6 +54,7 @@
   # Different CSV and a named environment:
   ./import-edorgs.ps1 -CsvPath ./district-edorgs.csv -EnvironmentName 'Ed-Fi ODS/API v7.3' -DbPassword '...'
 #>
+#requires -Version 5.1
 param(
     # CSV produced by export-edorgs.ps1 (or hand-authored with the same columns).
     [string]$CsvPath = "$PSScriptRoot/edorgs.csv",
@@ -91,6 +91,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+. "$PSScriptRoot/compat.ps1"
+
 # Engine-specific required-arg validation.
 if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $DbPassword) { throw "-DbPassword is required when -DbEngine is 'mssql' (the default) without -UseIntegratedSecurity." }
 if ($UseIntegratedSecurity -and $DbEngine -ne 'mssql') { throw "-UseIntegratedSecurity only applies when -DbEngine is 'mssql'." }
@@ -118,8 +120,9 @@ function Invoke-AdminAppSql
         $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("edorg-import-{0}.sql" -f [guid]::NewGuid())
         try
         {
-            # utf8BOM so sqlcmd decodes non-ASCII institution names correctly.
-            Set-Content -Path $tempFile -Value $Sql -Encoding utf8BOM
+            # UTF-8 with BOM so sqlcmd decodes non-ASCII institution names
+            # correctly ('utf8BOM' is not a valid encoding name on 5.1).
+            Write-Utf8BomFile -Path $tempFile -Content $Sql
             $out = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
             if ($LASTEXITCODE -ne 0)
             {
@@ -161,7 +164,9 @@ $supportedDiscriminators = @(
 
 # ---- Step 1: read and validate the CSV ---------------------------------------
 Write-Host "Reading $CsvPath..."
-$csv = @(Import-Csv -Path $CsvPath)
+# -Encoding UTF8 matters on Windows PowerShell 5.1, where the default is ANSI
+# and a BOM-less UTF-8 CSV (as PS7's export writes) would be misread.
+$csv = @(Import-Csv -Path $CsvPath -Encoding UTF8)
 if ($csv.Count -eq 0) { throw "CSV is empty: $CsvPath" }
 foreach ($required in 'educationOrganizationId', 'nameOfInstitution', 'discriminator')
 {

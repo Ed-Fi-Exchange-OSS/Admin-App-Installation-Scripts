@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   Export education organizations from an EdFi_ODS database to a CSV file, for
@@ -50,6 +49,7 @@
   ./export-edorgs.ps1 -DbEngine pgsql -OdsDatabaseName 'EdFi_Ods_2026' `
     -PostgresPassword 'P@ssw0rd' -UsePostgresDocker
 #>
+#requires -Version 5.1
 param(
     # The ODS database to export from (e.g. EdFi_Ods_2026, EdFi_Ods_Populated_Template).
     [Parameter(Mandatory = $true)][string]$OdsDatabaseName,
@@ -77,6 +77,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+. "$PSScriptRoot/compat.ps1"
 
 # Engine-specific required-arg validation.
 if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $DbPassword) { throw "-DbPassword is required when -DbEngine is 'mssql' (the default) without -UseIntegratedSecurity." }
@@ -134,7 +136,11 @@ FOR JSON PATH, INCLUDE_NULL_VALUES;
     $end = $joined.LastIndexOf(']')
     if ($start -ge 0 -and $end -gt $start)
     {
-        $rows = @($joined.Substring($start, $end - $start + 1) | ConvertFrom-Json)
+        # Assign before @(): on Windows PowerShell 5.1 ConvertFrom-Json emits
+        # the parsed array as a SINGLE pipeline object, so @() directly around
+        # the pipeline would wrap the whole array as one element.
+        $parsed = $joined.Substring($start, $end - $start + 1) | ConvertFrom-Json
+        $rows = @($parsed)
     }
 }
 else

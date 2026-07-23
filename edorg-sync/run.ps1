@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   One-step education organization sync: loads .env and runs export-edorgs.ps1
@@ -33,6 +32,7 @@
 .EXAMPLE
   ./run.ps1 -EnvFile ./my-deployment.env
 #>
+#requires -Version 5.1
 param(
     # Path to the .env file (copy .env.example and edit it).
     [string]$EnvFile = "$PSScriptRoot/.env",

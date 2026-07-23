@@ -1,4 +1,3 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
   Remove education organizations previously imported by import-edorgs.ps1 from
@@ -25,6 +24,7 @@
 .EXAMPLE
   ./cleanup-edorgs.ps1 -CsvPath ./edorgs.csv -DbPassword '...' -OdsDbName 'EdFi_Ods_2026'
 #>
+#requires -Version 5.1
 param(
     # Path to the .env file used for defaults (copy .env.example and edit it).
     [string]$EnvFile = "$PSScriptRoot/.env",
@@ -55,6 +55,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/load-dotenv.ps1"
+. "$PSScriptRoot/compat.ps1"
 
 # ---- Defaults: explicit parameter > .env value > built-in --------------------
 $dotenv = if (Test-Path $EnvFile) { Read-DotEnv -Path $EnvFile } else { @{} }
@@ -108,7 +109,9 @@ function Invoke-AdminAppSql
         $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("edorg-cleanup-{0}.sql" -f [guid]::NewGuid())
         try
         {
-            Set-Content -Path $tempFile -Value $Sql -Encoding utf8BOM
+            # UTF-8 with BOM so sqlcmd decodes non-ASCII input correctly
+            # ('utf8BOM' is not a valid encoding name on 5.1).
+            Write-Utf8BomFile -Path $tempFile -Content $Sql
             $out = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
             if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE). $FailHint" }
             return $out
@@ -133,7 +136,7 @@ function Invoke-AdminAppSql
 }
 
 # ---- Step 1: the ids to delete ------------------------------------------------
-$ids = @(Import-Csv -Path $CsvPath | ForEach-Object { "$($_.educationOrganizationId)".Trim() } |
+$ids = @(Import-Csv -Path $CsvPath -Encoding UTF8 | ForEach-Object { "$($_.educationOrganizationId)".Trim() } |
         Where-Object { $_ -match '^\d+$' } | Sort-Object -Unique)
 if ($ids.Count -eq 0) { throw "No educationOrganizationId values found in $CsvPath." }
 Write-Host "Deleting up to $($ids.Count) education organizations listed in $CsvPath..."

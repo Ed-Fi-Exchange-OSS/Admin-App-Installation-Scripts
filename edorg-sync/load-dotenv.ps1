@@ -1,16 +1,19 @@
-#requires -Version 7.0
 <#
 .SYNOPSIS
-  Dot-sourced helper shared by run.ps1 and cleanup.ps1: parses a .env file
-  into a hashtable.
+  Dot-sourced helper shared by run.ps1 and cleanup-edorgs.ps1: parses a .env
+  file into a hashtable.
 #>
+#requires -Version 5.1
 
 function Read-DotEnv
 {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $values = @{}
-    foreach ($line in Get-Content -Path $Path)
+    # -Encoding UTF8 matters on Windows PowerShell 5.1, where the default is
+    # ANSI (PS7 already defaults to UTF-8; 5.1's UTF8 decoder handles BOM-less
+    # files fine).
+    foreach ($line in Get-Content -Path $Path -Encoding UTF8)
     {
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
