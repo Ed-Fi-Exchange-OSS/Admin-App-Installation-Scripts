@@ -39,8 +39,11 @@ Copy-Item .env.example .env   # then edit .env to match your deployment
 ./run.ps1
 ```
 
-Every `.env` variable is documented in [.env.example](.env.example). All the
-scripts are idempotent, so re-running `run.ps1` is safe; if the machine client
+Every `.env` variable is documented in [.env.example](.env.example). Passwords
+(`KEYCLOAK_ADMIN_PASSWORD`, `APP_DB_PASSWORD`, `POSTGRES_APP_PASSWORD`,
+`SECURITY_DB_PASSWORD`) may be left out of `.env` — `run.ps1` prompts for the
+ones it needs, with the input masked; set them in the file only for unattended
+runs. All the scripts are idempotent, so re-running `run.ps1` is safe; if the machine client
 and machine user are already in place, re-run only the provisioning half with
 `./run.ps1 -SkipBootstrap`.
 
@@ -56,11 +59,15 @@ recreates every built-in claimset under an `AA` prefix (e.g. `SIS Vendor` →
 the ODS/API side, not the Admin App's. Internal-use claimsets (e.g.
 `Bootstrap Descriptors and EdOrgs`) are excluded; set `CLAIMSET_NAMES` to copy
 a specific list instead. Because `EdFi_Security` is a different database from
-the Admin App's, the SQL Server connection uses its own `SECURITY_DB_USERNAME`
-/ `SECURITY_DB_PASSWORD` login (or `SECURITY_USE_INTEGRATED_SECURITY=true` for
-Windows authentication); PostgreSQL reuses the `POSTGRES_*` values. Server,
-database name, and container come from the other `SECURITY_*` variables. Skip
-the step with `./run.ps1 -SkipClaimsets` or `COPY_CLAIMSETS=false`.
+the Admin App's, it has its own connection settings — it can even run on a
+different engine (`SECURITY_DB_ENGINE`, defaulting to `DB_ENGINE`). For SQL
+Server the connection uses its own `SECURITY_DB_USERNAME` /
+`SECURITY_DB_PASSWORD` login (or `SECURITY_USE_INTEGRATED_SECURITY=true` for
+Windows authentication); for PostgreSQL it uses the `POSTGRES_SECURITY_*`
+values, each falling back to the app-side `POSTGRES_*` value when empty.
+Server, database name, and container come from the other `SECURITY_*`
+variables. Skip the step with `./run.ps1 -SkipClaimsets` or
+`COPY_CLAIMSETS=false`.
 
 The copies are snapshots: an ODS/API upgrade that changes a built-in claimset
 does not propagate to them. `cleanup.ps1` removes them (pass `-SkipClaimsets`
@@ -94,7 +101,8 @@ DELETE FROM dbo.ClaimSets WHERE ClaimSetName = 'AA SIS Vendor';
 ```
 
 Reads the same `.env` for the database connection and the names to delete;
-any parameter passed explicitly overrides the `.env` value. Supports SQL
+any parameter passed explicitly overrides the `.env` value, and passwords
+missing from both are prompted for (masked), like `run.ps1`. Supports SQL
 Server (`DB_ENGINE=mssql`) and PostgreSQL (`DB_ENGINE=pgsql`, optionally
 `USE_POSTGRES_DOCKER=true`). Also removes the claimset copies from
 EdFi_Security (via the `SECURITY_*` values) — pass `-SkipClaimsets` to leave

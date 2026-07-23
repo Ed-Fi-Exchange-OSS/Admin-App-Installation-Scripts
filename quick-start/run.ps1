@@ -64,6 +64,9 @@ function Test-EnvTrue
 
 $provider = Get-EnvValue 'PROVIDER' 'keycloak'
 $dbEngine = Get-EnvValue 'DB_ENGINE' 'mssql'
+# EdFi_Security lives on the ODS/API side, so it may use a different engine
+# (and, for pgsql, a different server) than the Admin App database.
+$securityDbEngine = Get-EnvValue 'SECURITY_DB_ENGINE' $dbEngine
 $copyClaimsets = -not $SkipClaimsets -and (Get-EnvValue 'COPY_CLAIMSETS' 'true') -in @('true', 'True', 'TRUE', '1', 'yes')
 $odss = @()
 $odssJson = Get-EnvValue 'ODSS_JSON'
@@ -79,33 +82,62 @@ if ($odssJson)
 }
 
 # ---- Up-front validation of the provider/engine-specific required values -----
+# Non-password values fail fast here; the passwords below are prompted for
+# instead, so nobody is asked to type a secret only to then hit an error.
 $missing = @()
 foreach ($name in 'MACHINE_CLIENT_SECRET', 'TOKEN_URL')
 {
     if (-not (Get-EnvValue $name)) { $missing += $name }
 }
-if (-not $SkipBootstrap)
-{
-    if ($provider -eq 'keycloak' -and -not (Get-EnvValue 'KEYCLOAK_ADMIN_PASSWORD')) { $missing += 'KEYCLOAK_ADMIN_PASSWORD' }
-    if ($dbEngine -eq 'mssql' -and -not (Get-EnvValue 'APP_DB_PASSWORD')) { $missing += 'APP_DB_PASSWORD' }
-    if ($dbEngine -eq 'pgsql' -and -not (Get-EnvValue 'POSTGRES_APP_PASSWORD')) { $missing += 'POSTGRES_APP_PASSWORD' }
-}
-if ($copyClaimsets)
+if ($copyClaimsets -and $securityDbEngine -eq 'mssql' -and -not (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY') -and
+    -not (Get-EnvValue 'SECURITY_DB_USERNAME'))
 {
     # EdFi_Security is a different database (ODS/API side), so it has its own
     # SECURITY_DB_* credentials -- the APP_DB_* login is scoped to the Admin App
     # database. SECURITY_USE_INTEGRATED_SECURITY=true bypasses both.
-    if ($dbEngine -eq 'mssql' -and -not (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY'))
-    {
-        if (-not (Get-EnvValue 'SECURITY_DB_USERNAME')) { $missing += 'SECURITY_DB_USERNAME' }
-        if (-not (Get-EnvValue 'SECURITY_DB_PASSWORD')) { $missing += 'SECURITY_DB_PASSWORD' }
-    }
-    if ($dbEngine -eq 'pgsql' -and -not (Get-EnvValue 'POSTGRES_APP_PASSWORD')) { $missing += 'POSTGRES_APP_PASSWORD' }
+    $missing += 'SECURITY_DB_USERNAME'
 }
 $missing = @($missing | Select-Object -Unique)
 if ($missing.Count -gt 0)
 {
     throw "Missing required value(s) in ${EnvFile}: $($missing -join ', '). Edit the file and try again."
+}
+
+# ---- Prompt for any password not provided in the .env -------------------------
+function Read-EnvSecret
+{
+    # If $Name has no value in the .env, ask for it interactively (masked) and
+    # cache it in $script:dotenv so every later Get-EnvValue read reuses it.
+    param([string]$Name, [string]$Prompt)
+    if (Get-EnvValue $Name) { return }
+    $secure = Read-Host -Prompt "$Prompt [$Name]" -AsSecureString
+    # SecureString -> plaintext the 5.1-compatible way (ConvertFrom-SecureString
+    # -AsPlainText is PS7+); the child scripts take plain [string] parameters.
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    if (-not $value) { throw "No value entered for $Name. Set it in ${EnvFile} or enter it at the prompt." }
+    $script:dotenv[$Name] = $value
+}
+
+if (-not $SkipBootstrap)
+{
+    if ($provider -eq 'keycloak') { Read-EnvSecret 'KEYCLOAK_ADMIN_PASSWORD' 'Keycloak admin password' }
+    if ($dbEngine -eq 'mssql') { Read-EnvSecret 'APP_DB_PASSWORD' 'Admin App database password (the APP_DB_USERNAME login)' }
+    if ($dbEngine -eq 'pgsql') { Read-EnvSecret 'POSTGRES_APP_PASSWORD' 'PostgreSQL app password' }
+}
+if ($copyClaimsets)
+{
+    if ($securityDbEngine -eq 'mssql' -and -not (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY'))
+    {
+        Read-EnvSecret 'SECURITY_DB_PASSWORD' 'EdFi_Security database password (the SECURITY_DB_USERNAME login)'
+    }
+    # POSTGRES_SECURITY_PASSWORD falls back to POSTGRES_APP_PASSWORD, so only
+    # prompt when neither is set.
+    if ($securityDbEngine -eq 'pgsql' -and -not (Get-EnvValue 'POSTGRES_APP_PASSWORD'))
+    {
+        Read-EnvSecret 'POSTGRES_SECURITY_PASSWORD' 'EdFi_Security PostgreSQL password'
+    }
 }
 
 # ---- Step 1: bootstrap.ps1 (IdP machine client + machine-user seed) ----------
@@ -183,7 +215,7 @@ if (-not $copyClaimsets)
 else
 {
     $claimsetArgs = @{
-        DbEngine     = $dbEngine
+        DbEngine     = $securityDbEngine
         DatabaseName = Get-EnvValue 'SECURITY_DATABASE_NAME' 'EdFi_Security'
     }
     $claimsetNames = Get-EnvValue 'CLAIMSET_NAMES'
@@ -197,7 +229,7 @@ else
     # own SECURITY_DB_* credentials -- not the Admin App's APP_DB_* login. Set
     # SECURITY_USE_INTEGRATED_SECURITY=true to use Windows authentication
     # instead.
-    if ($dbEngine -eq 'mssql')
+    if ($securityDbEngine -eq 'mssql')
     {
         $claimsetArgs.SqlServer = Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433'
         if (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY')
@@ -212,17 +244,20 @@ else
     }
     else
     {
-        $claimsetArgs.PostgresPassword = Get-EnvValue 'POSTGRES_APP_PASSWORD'
-        $claimsetArgs.PostgresHost = Get-EnvValue 'POSTGRES_HOST' 'localhost'
-        $claimsetArgs.PostgresPort = [int](Get-EnvValue 'POSTGRES_PORT' '5432')
-        $claimsetArgs.PostgresUser = Get-EnvValue 'POSTGRES_APP_USER' 'edfiadminapp'
-        if (Test-EnvTrue 'USE_POSTGRES_DOCKER')
+        # POSTGRES_SECURITY_* when EdFi_Security is on a different PostgreSQL
+        # server than the Admin App database; each falls back to the app value.
+        $claimsetArgs.PostgresPassword = Get-EnvValue 'POSTGRES_SECURITY_PASSWORD' (Get-EnvValue 'POSTGRES_APP_PASSWORD')
+        $claimsetArgs.PostgresHost = Get-EnvValue 'POSTGRES_SECURITY_HOST' (Get-EnvValue 'POSTGRES_HOST' 'localhost')
+        $claimsetArgs.PostgresPort = [int](Get-EnvValue 'POSTGRES_SECURITY_PORT' (Get-EnvValue 'POSTGRES_PORT' '5432'))
+        $claimsetArgs.PostgresUser = Get-EnvValue 'POSTGRES_SECURITY_USER' (Get-EnvValue 'POSTGRES_APP_USER' 'edfiadminapp')
+        $securityUsePostgresDocker = if (Get-EnvValue 'SECURITY_USE_POSTGRES_DOCKER') { Test-EnvTrue 'SECURITY_USE_POSTGRES_DOCKER' } else { Test-EnvTrue 'USE_POSTGRES_DOCKER' }
+        if ($securityUsePostgresDocker)
         {
             $claimsetArgs.UsePostgresDocker = $true
             $claimsetArgs.PostgresContainerName = Get-EnvValue 'SECURITY_POSTGRES_CONTAINER' 'ed-fi-db-admin'
         }
     }
 
-    Write-Host "`n==> copy-claimsets.ps1 (engine=$dbEngine)" -ForegroundColor Cyan
+    Write-Host "`n==> copy-claimsets.ps1 (engine=$securityDbEngine)" -ForegroundColor Cyan
     & "$PSScriptRoot/copy-claimsets.ps1" @claimsetArgs
 }
