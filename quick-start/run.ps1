@@ -43,6 +43,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/load-dotenv.ps1"
+. "$PSScriptRoot/compat.ps1"
 
 if (-not (Test-Path $EnvFile))
 {
@@ -106,18 +107,12 @@ if ($missing.Count -gt 0)
 # ---- Prompt for any password not provided in the .env -------------------------
 function Read-EnvSecret
 {
-    # If $Name has no value in the .env, ask for it interactively (masked) and
-    # cache it in $script:dotenv so every later Get-EnvValue read reuses it.
+    # If $Name has no value in the .env, ask for it interactively (masked, via
+    # compat.ps1's Read-Secret) and cache it in $script:dotenv so every later
+    # Get-EnvValue read reuses it.
     param([string]$Name, [string]$Prompt)
     if (Get-EnvValue $Name) { return }
-    $secure = Read-Host -Prompt "$Prompt [$Name]" -AsSecureString
-    # SecureString -> plaintext the 5.1-compatible way (ConvertFrom-SecureString
-    # -AsPlainText is PS7+); the child scripts take plain [string] parameters.
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
-    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-    if (-not $value) { throw "No value entered for $Name. Set it in ${EnvFile} or enter it at the prompt." }
-    $script:dotenv[$Name] = $value
+    $script:dotenv[$Name] = Read-Secret -Name $Name -Prompt $Prompt
 }
 
 if (-not $SkipBootstrap)

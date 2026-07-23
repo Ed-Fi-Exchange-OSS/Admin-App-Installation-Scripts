@@ -11,6 +11,8 @@
         -SkipCertificateCheck.
       - Get-HttpErrorBody: engine-agnostic read of a failed web request's
         response body.
+      - Read-Secret: masked interactive prompt for passwords not provided in
+        the .env or as parameters.
     On Windows PowerShell it also aligns TLS and pipe-encoding behavior with
     PowerShell 7 (see inline comments).
 #>
@@ -75,6 +77,29 @@ namespace EdFiQuickStart
 "@
     }
     [EdFiQuickStart.CertPolicy]::TrustAll()
+}
+
+function Read-Secret
+{
+    <#
+    .SYNOPSIS
+        Masked interactive prompt for a secret; returns the plaintext value.
+    .DESCRIPTION
+        Used when a password is not provided in the .env or as a parameter.
+        SecureString -> plaintext the 5.1-compatible way (ConvertFrom-
+        SecureString -AsPlainText is PS7+); the scripts pass plain [string]
+        values to the child scripts and native DB tools.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Prompt
+    )
+    $secure = Read-Host -Prompt "$Prompt [$Name]" -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    if (-not $value) { throw "No value entered for $Name. Set it in the .env (or pass the parameter) or enter it at the prompt." }
+    return $value
 }
 
 function Get-HttpErrorBody

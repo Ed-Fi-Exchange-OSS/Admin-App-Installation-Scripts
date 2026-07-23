@@ -148,19 +148,7 @@ if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker o
 if ($removeClaimsets -and $securityDbEngine -eq 'mssql' -and -not $securityUseIntegratedSecurity -and -not $SecurityDbUsername) { throw "-SecurityDbUsername (or SECURITY_DB_USERNAME in .env; a login with rights on EdFi_Security) is required to remove the claimset copies, or set SECURITY_USE_INTEGRATED_SECURITY=true, or skip with -SkipClaimsets." }
 
 # ---- Prompt for any password not passed as a parameter or set in the .env -----
-function Read-Secret
-{
-    # Masked interactive read, mirroring run.ps1. SecureString -> plaintext the
-    # 5.1-compatible way (ConvertFrom-SecureString -AsPlainText is PS7+).
-    param([string]$Name, [string]$Prompt)
-    $secure = Read-Host -Prompt "$Prompt [$Name]" -AsSecureString
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
-    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-    if (-not $value) { throw "No value entered for $Name. Set it in the .env (or pass the parameter) or enter it at the prompt." }
-    return $value
-}
-
+# Read-Secret (masked prompt) comes from compat.ps1, dot-sourced above.
 if ($DbEngine -eq 'mssql' -and -not $AppDbPassword) { $AppDbPassword = Read-Secret 'APP_DB_PASSWORD' 'Admin App database password (the APP_DB_USERNAME login)' }
 if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword)
 {
