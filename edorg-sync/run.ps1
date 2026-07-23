@@ -44,6 +44,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/load-dotenv.ps1"
+. "$PSScriptRoot/compat.ps1"
 
 if ($SkipExport -and $SkipImport) { throw 'Nothing to do: -SkipExport and -SkipImport exclude each other.' }
 if (-not (Test-Path $EnvFile))
@@ -69,23 +70,40 @@ $dbEngine = Get-EnvValue 'DB_ENGINE' 'mssql'
 $csvPath = Get-EnvValue 'CSV_PATH' "$PSScriptRoot/edorgs.csv"
 
 # ---- Up-front validation of the engine-specific required values --------------
+# Non-password values fail fast; passwords left out of the .env are prompted
+# for below (masked) instead.
 $missing = @()
-if (-not $SkipExport)
-{
-    if (-not (Get-EnvValue 'ODS_DATABASE_NAME')) { $missing += 'ODS_DATABASE_NAME' }
-    if ($odsEngine -eq 'mssql' -and -not (Test-EnvTrue 'ODS_USE_INTEGRATED_SECURITY') -and
-        -not (Get-EnvValue 'ODS_DB_PASSWORD')) { $missing += 'ODS_DB_PASSWORD' }
-    if ($odsEngine -eq 'pgsql' -and -not (Get-EnvValue 'ODS_POSTGRES_PASSWORD')) { $missing += 'ODS_POSTGRES_PASSWORD' }
-}
-if (-not $SkipImport)
-{
-    if ($dbEngine -eq 'mssql' -and -not (Test-EnvTrue 'USE_INTEGRATED_SECURITY') -and
-        -not (Get-EnvValue 'ADMIN_APP_DB_PASSWORD')) { $missing += 'ADMIN_APP_DB_PASSWORD' }
-    if ($dbEngine -eq 'pgsql' -and -not (Get-EnvValue 'POSTGRES_APP_PASSWORD')) { $missing += 'POSTGRES_APP_PASSWORD' }
-}
+if (-not $SkipExport -and -not (Get-EnvValue 'ODS_DATABASE_NAME')) { $missing += 'ODS_DATABASE_NAME' }
 if ($missing.Count -gt 0)
 {
     throw "Missing required value(s) in ${EnvFile}: $($missing -join ', '). Edit the file and try again."
+}
+
+# ---- Prompt for any password not provided in the .env -------------------------
+function Read-EnvSecret
+{
+    # If $Name has no value in the .env, ask for it interactively (masked) and
+    # cache it in $script:dotenv so every later Get-EnvValue read reuses it.
+    param([string]$Name, [string]$Prompt)
+    if (Get-EnvValue $Name) { return }
+    $script:dotenv[$Name] = Read-Secret -Name $Name -Prompt $Prompt
+}
+
+if (-not $SkipExport)
+{
+    if ($odsEngine -eq 'mssql' -and -not (Test-EnvTrue 'ODS_USE_INTEGRATED_SECURITY'))
+    {
+        Read-EnvSecret 'ODS_DB_PASSWORD' 'Source ODS database password (the ODS_DB_USERNAME login)'
+    }
+    if ($odsEngine -eq 'pgsql') { Read-EnvSecret 'ODS_POSTGRES_PASSWORD' 'Source ODS PostgreSQL password' }
+}
+if (-not $SkipImport)
+{
+    if ($dbEngine -eq 'mssql' -and -not (Test-EnvTrue 'USE_INTEGRATED_SECURITY'))
+    {
+        Read-EnvSecret 'ADMIN_APP_DB_PASSWORD' 'Admin App database password (the ADMIN_APP_DB_USER login)'
+    }
+    if ($dbEngine -eq 'pgsql') { Read-EnvSecret 'POSTGRES_APP_PASSWORD' 'Admin App PostgreSQL password' }
 }
 
 # ---- Step 1: export-edorgs.ps1 (EdFi_ODS -> CSV) ------------------------------

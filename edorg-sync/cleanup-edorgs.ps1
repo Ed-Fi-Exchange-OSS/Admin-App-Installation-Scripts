@@ -88,8 +88,16 @@ if (-not $PostgresAppUser) { $PostgresAppUser = Get-EnvValue 'POSTGRES_APP_USER'
 if (-not $UsePostgresDocker -and (Test-EnvTrue 'USE_POSTGRES_DOCKER')) { $UsePostgresDocker = $true }
 if (-not $PostgresContainerName) { $PostgresContainerName = Get-EnvValue 'POSTGRES_CONTAINER' 'edfiadminapp-postgres' }
 
-if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $DbPassword) { throw "-DbPassword (or ADMIN_APP_DB_PASSWORD in $EnvFile) is required when the engine is 'mssql' without integrated security." }
-if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppPassword (or POSTGRES_APP_PASSWORD in $EnvFile) is required when the engine is 'pgsql'." }
+# Passwords not passed as a parameter or set in the .env are prompted for
+# (masked), like run.ps1.
+if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $DbPassword)
+{
+    $DbPassword = Read-Secret 'ADMIN_APP_DB_PASSWORD' 'Admin App database password (the ADMIN_APP_DB_USER login)'
+}
+if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword)
+{
+    $PostgresAppPassword = Read-Secret 'POSTGRES_APP_PASSWORD' 'Admin App PostgreSQL password'
+}
 if (-not (Test-Path $CsvPath)) { throw "CSV not found: $CsvPath. The cleanup deletes exactly the ids listed in the CSV used for the import." }
 
 if ($DbEngine -eq 'mssql')

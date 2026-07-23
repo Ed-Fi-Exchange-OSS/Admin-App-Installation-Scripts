@@ -40,7 +40,11 @@ Copy-Item .env.example .env   # then edit .env to match your deployment
 ./run.ps1
 ```
 
-Every `.env` variable is documented in [.env.example](.env.example). Both
+Every `.env` variable is documented in [.env.example](.env.example). Passwords
+(`ODS_DB_PASSWORD`, `ODS_POSTGRES_PASSWORD`, `ADMIN_APP_DB_PASSWORD`,
+`POSTGRES_APP_PASSWORD`) may be left out of `.env` — `run.ps1` and
+`cleanup-edorgs.ps1` prompt for the ones they need, with the input masked; set
+them in the file only for unattended runs. Both
 scripts are idempotent, so re-running `run.ps1` is safe. To review (or trim)
 the CSV before anything is written to the Admin App, split the run:
 
