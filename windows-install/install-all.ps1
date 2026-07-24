@@ -323,7 +323,7 @@ function Test-DbPasswordUrlSafe {
         [Parameter(Mandatory = $true)][string]$Label
     )
     if ($Password -match '[^A-Za-z0-9!$()*,._~-]') {
-        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form database connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its database credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
+        throw "The $Label contains a character that is unsafe in the Admin App's URL-form database connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its database credentials. For passwords, a compliant strong value is still possible: SQL's policy only needs any 3 of uppercase, lowercase, digit, and symbol."
     }
 }
 
@@ -344,12 +344,14 @@ if ($DbEngine -eq 'mssql') {
     $AppDbPasswordPlain = [System.Net.NetworkCredential]::new('', $AppDbPassword).Password
     Test-SqlPasswordComplexity -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
     Test-DbPasswordUrlSafe -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
+    Test-DbPasswordUrlSafe -Password $AppDbUsername -Label "Admin App DB username (-AppDbUsername)"
 }
 if ($DbEngine -eq 'pgsql') {
     if (-not $PostgresAppPassword) { $PostgresAppPassword = Read-Host -AsSecureString "Postgres app user '$PostgresAppUser' password" }
     $PostgresAppPasswordPlain = [System.Net.NetworkCredential]::new('', $PostgresAppPassword).Password
     Test-SqlPasswordComplexity -Password $PostgresAppPasswordPlain -Label "Postgres app user (-PostgresAppPassword)"
     Test-DbPasswordUrlSafe -Password $PostgresAppPasswordPlain -Label "Postgres app user (-PostgresAppPassword)"
+    Test-DbPasswordUrlSafe -Password $PostgresAppUser -Label "Postgres app username (-PostgresAppUser)"
 }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') {
     throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'."
