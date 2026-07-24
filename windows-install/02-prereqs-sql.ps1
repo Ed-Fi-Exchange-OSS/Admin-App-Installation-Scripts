@@ -1,8 +1,9 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-Configures SQL Server for the Ed-Fi Admin App: enables Mixed Mode auth, TCP/IP
-protocol, and the `sa` login with a known password.
+Configures SQL Server for the Ed-Fi Admin App: enables Mixed Mode auth and the
+TCP/IP protocol. All configuration runs under Windows Authentication; the sa
+login is never enabled or modified.
 
 .DESCRIPTION
 Addresses two SQL Server defaults that block the Admin App API from connecting:
@@ -12,10 +13,8 @@ Addresses two SQL Server defaults that block the Admin App API from connecting:
 Auto-detects the installed SQL Server major version from the registry.
 Restarts the MSSQLSERVER service once at the end. Idempotent — safe to re-run.
 
-.PARAMETER SaPassword
-The password to assign to the sa login. Used only for server-level bootstrap
-(Mixed Mode verification and database creation); the Admin App itself does NOT
-connect as sa -- see AppDbUsername/AppDbPassword.
+Must run under a Windows account that is a SQL Server sysadmin: all server-level
+actions (database creation and login provisioning) use Windows Authentication.
 
 .PARAMETER AppDbUsername
 The dedicated, least-privilege SQL login the Admin App connects as at runtime.
@@ -35,15 +34,14 @@ Name of the Admin App database to create (if it doesn't already exist).
 Default: sbaa (the name the Admin App expects out of the box).
 
 .EXAMPLE
-.\02-prereqs-sql.ps1 -SaPassword 'EdFi-AdminApp-Local!2026' -AppDbPassword 'EdFi-App-Local!2026'
-.\02-prereqs-sql.ps1 -SaPassword 'EdFi-AdminApp-Local!2026' -AppDbPassword 'EdFi-App-Local!2026' -DatabaseName 'myadminapp'
+.\02-prereqs-sql.ps1 -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password')
+.\02-prereqs-sql.ps1 -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password') -DatabaseName 'myadminapp'
 #>
 
 param(
-    # Not Mandatory: PowerShell auto-prompts all Mandatory params before the body
-    # runs, so a weak sa password would only be rejected after the app-DB prompt.
-    # Instead they're prompted, unwrapped, and strength-checked one at a time below.
-    [SecureString]$SaPassword,
+    # Not Mandatory: a Mandatory [SecureString] would prompt before the body runs,
+    # so a weak password would only surface later as an opaque CHECK_POLICY failure.
+    # Instead it's prompted, unwrapped, and strength-checked below, next to its prompt.
     [SecureString]$AppDbPassword,
 
     [string]$AppDbUsername = "edfi_adminapp",
@@ -94,14 +92,10 @@ function Test-DbPasswordUrlSafe {
     }
 }
 
-# Prompt (if omitted), unwrap, and strength-check each secret in turn. Unwrap to new
-# locals -- assigning back to the [SecureString]-typed parameters would re-trigger
-# their type conversion and fail. Point-of-use plaintext (SQLCMDPASSWORD, the inline
-# T-SQL) is unavoidable, so it lives in locals, never on a command line.
-if (-not $SaPassword)    { $SaPassword = Read-Host -AsSecureString "SQL Server 'sa' password" }
-$SaPasswordPlain = [System.Net.NetworkCredential]::new('', $SaPassword).Password
-Test-SqlPasswordComplexity -Password $SaPasswordPlain -Label "sa (-SaPassword)"
-
+# Prompt (if omitted), unwrap, and strength-check the app-login password. Unwrap to a
+# new local -- assigning back to the [SecureString]-typed parameter would re-trigger
+# its type conversion and fail. Point-of-use plaintext (SQLCMDPASSWORD, the inline
+# T-SQL) is unavoidable, so it lives in a local, never on a command line.
 if (-not $AppDbPassword) { $AppDbPassword = Read-Host -AsSecureString "Admin App DB login '$AppDbUsername' password" }
 $AppDbPasswordPlain = [System.Net.NetworkCredential]::new('', $AppDbPassword).Password
 Test-SqlPasswordComplexity -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
@@ -227,8 +221,8 @@ function Invoke-Sqlcmd-Quiet {
 }
 
 # After a service restart, SQL Server's status goes Running before it's
-# actually accepting queries. Loop with Windows-auth probes (sa may not be
-# enabled yet) until a SELECT 1 succeeds or we time out.
+# actually accepting queries. Loop with Windows-auth probes until a SELECT 1
+# succeeds or we time out.
 Write-Host "Waiting for SQL Server to accept queries..."
 $ready = $false
 for ($i = 0; $i -lt 30; $i++) {
@@ -241,38 +235,17 @@ if (-not $ready) {
 }
 Write-Host "SQL Server is responding."
 
-# Enable sa, set password -- only ALTER LOGIN if current password doesn't work
-Write-Host "Checking sa login..."
-$ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "tcp:localhost,1433", "-U", "sa", "-Q", "SELECT 1", "-l", "3") -Password $SaPasswordPlain
-$saLoginWorks = ($ec -eq 0)
-
-if ($saLoginWorks) {
-    Write-Host "sa login already accepts the provided password -- skipping ALTER LOGIN."
-} else {
-    Write-Host "sa login doesn't accept the password -- running ALTER LOGIN..."
-    $escapedPw = $SaPasswordPlain -replace "'", "''"
-    $saQuery = "ALTER LOGIN sa WITH PASSWORD = '$escapedPw'; ALTER LOGIN sa ENABLE;"
-    $ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "(local)", "-E") -QueryText $saQuery -FailOnSqlError
-    if ($ec -ne 0) {
-        throw "Failed to configure sa login (sqlcmd exit code $ec). Verify your Windows user has SQL sysadmin."
-    }
-}
-
-# Verify TCP listener + SQL Auth
+# Verify the TCP listener is up. SQL Auth over TCP is validated later as the app
+# login (the final connection check), so no sa round-trip is needed here.
 $listener = Get-NetTCPConnection -LocalPort 1433 -State Listen -ErrorAction SilentlyContinue
 if (-not $listener) {
     throw "No listener on TCP 1433 after restart. Check Windows Firewall."
 }
 
-$ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "tcp:localhost,1433", "-U", "sa", "-Q", "SELECT @@VERSION") -Password $SaPasswordPlain
-if ($ec -ne 0) {
-    throw "SQL Auth over TCP failed (sqlcmd exit code $ec)."
-}
-
 # Create the Admin App database if it doesn't already exist
 Write-Host "Ensuring database '$DatabaseName' exists..."
 $dbQuery = "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = N'$DatabaseName') CREATE DATABASE [$DatabaseName];"
-$ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "tcp:localhost,1433", "-U", "sa", "-Q", $dbQuery) -Password $SaPasswordPlain -FailOnSqlError
+$ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "(local)", "-E", "-Q", $dbQuery) -FailOnSqlError
 if ($ec -ne 0) {
     throw "Failed to create/verify database '$DatabaseName' (sqlcmd exit code $ec)."
 }

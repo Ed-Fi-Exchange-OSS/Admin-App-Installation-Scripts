@@ -363,9 +363,9 @@ Write-Section "EXISTING STATE THAT WILL BE MODIFIED (collision risk check)"
 # another app on the box may be affected.
 
 # SQL Server instance is shared with other databases?
-# 02-prereqs-sql.ps1 flips Mixed Mode, enables sa, forces TCP/IP on 1433, and
-# restarts the MSSQLSERVER service. If the instance is hosting other apps,
-# they'll feel all three. Skip the entire RISK probe when -DbEngine pgsql --
+# 02-prereqs-sql.ps1 flips Mixed Mode, forces TCP/IP on 1433, and restarts the
+# MSSQLSERVER service. If the instance is hosting other apps, they'll feel all
+# three. Skip the entire RISK probe when -DbEngine pgsql --
 # the SQL Server install won't be touched at all in that mode.
 if ($DbEngine -eq 'mssql' -and $sqlService) {
     $userDbs = & sqlcmd -S "(local)" -E -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND name <> N'$DatabaseName'" 2>$null |
@@ -373,16 +373,7 @@ if ($DbEngine -eq 'mssql' -and $sqlService) {
     if ($userDbs -and $userDbs.Count -gt 0) {
         $preview = ($userDbs | Select-Object -First 3) -join ', '
         if ($userDbs.Count -gt 3) { $preview += ", +$($userDbs.Count - 3) more" }
-        Write-Check RISK "SQL instance hosts other databases" "02 will flip Mixed Mode, reset sa, force TCP:1433, restart service. Other DBs: $preview"
-    }
-
-    # sa already enabled and password unknown to us? We can't know the password
-    # without trying it, but if sa is enabled at all on a shared instance the
-    # 01 script will overwrite it.
-    $saState = & sqlcmd -S "(local)" -E -h-1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN is_disabled = 0 THEN 'enabled' ELSE 'disabled' END FROM sys.sql_logins WHERE name = 'sa'" 2>$null |
-        Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\(' } | Select-Object -First 1
-    if ($saState -and $saState.Trim() -eq 'enabled' -and $userDbs -and $userDbs.Count -gt 0) {
-        Write-Check RISK "sa login is already enabled on a shared instance" "02 will reset sa's password to -SaPassword if the current password doesn't match"
+        Write-Check RISK "SQL instance hosts other databases" "02 will flip Mixed Mode, force TCP:1433, restart service. Other DBs: $preview"
     }
 }
 

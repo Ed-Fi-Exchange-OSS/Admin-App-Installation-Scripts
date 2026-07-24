@@ -6,7 +6,7 @@ Master installer for the Ed-Fi Admin App on Windows IIS. Fully automated.
 Runs in three phases with no manual interaction required.
 
   Phase 1 — Prereqs
-    02-prereqs-sql.ps1        SQL Server Mixed Mode + TCP/IP + sa + app login
+    02-prereqs-sql.ps1        SQL Server Mixed Mode + TCP/IP + least-priv app login
     01-prereqs-iis.ps1        URL Rewrite + httpPlatform handler + unlock handlers (HTTPS added at deploy time)
     03-prereqs-node.ps1       Node.js (the npm cache is set later, by 05-deploy-api)
 
@@ -29,7 +29,8 @@ before re-running.
 
 .PARAMETER DbEngine
 'mssql' (default) or 'pgsql'. Drives which DB prereq path runs and how
-production.js gets patched. 'mssql' requires -SaPassword and -AppDbPassword.
+production.js gets patched. 'mssql' requires -AppDbPassword and must run as a
+Windows user who is a SQL Server sysadmin (server setup uses Windows Auth).
 'pgsql' requires -PostgresAppPassword.
 
 .PARAMETER UsePostgresDocker
@@ -49,11 +50,6 @@ provisions the dedicated app user.
 .PARAMETER PostgresHost / -PostgresPort / -PostgresAppUser
 PostgreSQL connection details written into production.js. Defaults match the
 docker-compose setup ('localhost', 5432, 'edfiadminapp').
-
-.PARAMETER SaPassword
-SQL Server sa password. Required when -DbEngine is 'mssql' (the default). Used
-only for server-level bootstrap and the installer's own admin queries; the Admin
-App does not connect as sa.
 
 .PARAMETER AppDbUsername / -AppDbPassword
 The dedicated least-privilege SQL login the Admin App connects as at runtime
@@ -162,7 +158,6 @@ Default 8082. Becomes the YOPASS_URL the API is configured with.
 # Local Keycloak (MSSQL). Password/secret params are [SecureString]: omit any to
 # be prompted securely, or pass them inline as shown -- never a plaintext literal.
 .\install-all.ps1 -IdpProvider keycloak `
-  -SaPassword (Read-Host -AsSecureString 'sa password') `
   -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password') `
   -KeycloakAdminPassword (Read-Host -AsSecureString 'Keycloak admin password') `
   -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
@@ -181,7 +176,6 @@ Default 8082. Becomes the YOPASS_URL the API is configured with.
 .EXAMPLE
 # Local Keycloak + a local dockerized Yopass for one-time credential links
 .\install-all.ps1 -IdpProvider keycloak `
-  -SaPassword (Read-Host -AsSecureString 'sa password') `
   -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password') `
   -KeycloakAdminPassword (Read-Host -AsSecureString 'Keycloak admin password') `
   -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
@@ -192,7 +186,6 @@ Default 8082. Becomes the YOPASS_URL the API is configured with.
 # External OIDC (Microsoft Entra). Register the app + redirect URIs in Entra first,
 # and make sure a user exists there whose email matches -AdminUsername.
 .\install-all.ps1 -IdpProvider microsoft `
-  -SaPassword (Read-Host -AsSecureString 'sa password') `
   -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password') `
   -OidcIssuer 'https://login.microsoftonline.com/<tenant-id>/v2.0' `
   -OidcClientId '<application-id>' `
@@ -205,10 +198,6 @@ param(
     [string]$DbEngine = 'mssql',
     [switch]$UsePostgresDocker,
 
-    # sa is used only for server-level bootstrap (Mixed Mode, DB creation, and
-    # the installer's own admin queries). The Admin App itself connects as the
-    # dedicated least-privilege login below, not sa.
-    [SecureString]$SaPassword,
     [string]$AppDbUsername = "edfi_adminapp",
     [SecureString]$AppDbPassword,
     [SecureString]$PostgresAppPassword,
@@ -338,24 +327,19 @@ function Test-DbPasswordUrlSafe {
     }
 }
 
-# Engine-specific required-arg resolution. SaPassword was previously a top-level
-# Mandatory parameter; it's now conditionally required so the same script can drive
-# either engine without prompting for irrelevant credentials. Each secret is
-# prompted (if omitted), unwrapped, and strength-checked together, so validation is
-# tied to its own prompt. Plaintext is unavoidable at the point of use -- sqlcmd -P,
-# the docker-compose .env, PGPASSWORD -- so it lives in locals, never on a command
-# line or in the param history. Child scripts still receive the SecureStrings
-# unchanged. Locals are initialized so later references hold $null under either engine.
-$SaPasswordPlain                = $null
+# Engine-specific required-arg resolution. Credentials are conditionally required so
+# the same script can drive either engine without prompting for irrelevant ones. Each
+# secret is prompted (if omitted), unwrapped, and strength-checked, so validation is
+# tied to its own prompt. Plaintext is unavoidable at the point of use -- sqlcmd's
+# SQLCMDPASSWORD, the docker-compose .env, PGPASSWORD -- so it lives in locals, never
+# on a command line or in the param history. Child scripts still receive the
+# SecureStrings unchanged. Locals are initialized so later references hold $null under
+# either engine.
 $AppDbPasswordPlain             = $null
 $PostgresAppPasswordPlain       = $null
 $PostgresSuperuserPasswordPlain = $null
 
 if ($DbEngine -eq 'mssql') {
-    if (-not $SaPassword)    { $SaPassword = Read-Host -AsSecureString "SQL Server 'sa' password (server bootstrap only)" }
-    $SaPasswordPlain = [System.Net.NetworkCredential]::new('', $SaPassword).Password
-    Test-SqlPasswordComplexity -Password $SaPasswordPlain -Label "sa (-SaPassword)"
-
     if (-not $AppDbPassword) { $AppDbPassword = Read-Host -AsSecureString "Admin App DB login '$AppDbUsername' password" }
     $AppDbPasswordPlain = [System.Net.NetworkCredential]::new('', $AppDbPassword).Password
     Test-SqlPasswordComplexity -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
@@ -519,7 +503,7 @@ if (-not $SkipPreflightCheck) {
 if (-not $SkipPhase1) {
     if ($DbEngine -eq 'mssql') {
         Write-Phase "Phase 1.1: SQL Server prereqs (02-prereqs-sql.ps1)"
-        & "$scriptDir\02-prereqs-sql.ps1" -SaPassword $SaPassword -AppDbUsername $AppDbUsername -AppDbPassword $AppDbPassword -DatabaseName $DatabaseName
+        & "$scriptDir\02-prereqs-sql.ps1" -AppDbUsername $AppDbUsername -AppDbPassword $AppDbPassword -DatabaseName $DatabaseName
     } else {
         Write-Phase "Phase 1.1: PostgreSQL prereqs"
         if ($UsePostgresDocker) {
@@ -811,8 +795,8 @@ if ($apiOk) {
             if ($DbEngine -eq 'mssql') {
                 # SQLCMDPASSWORD instead of -P keeps the password off the sqlcmd
                 # process command line; cleared in the finally below.
-                $env:SQLCMDPASSWORD = $SaPasswordPlain
-                & sqlcmd -S "tcp:localhost,1433" -U sa -d $DatabaseName -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
+                $env:SQLCMDPASSWORD = $AppDbPasswordPlain
+                & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
             } else {
                 # Probe via the container's psql (postgres-only -- avoids
                 # requiring psql.exe on the host) when docker is in play;
@@ -861,9 +845,9 @@ IF NOT EXISTS (SELECT 1 FROM [user] WHERE username = '$AdminUsername')
 UPDATE [user] SET roleId = 2, isActive = 1
     WHERE username = '$AdminUsername' AND (roleId IS NULL OR isActive = 0);
 "@
-        $env:SQLCMDPASSWORD = $SaPasswordPlain
+        $env:SQLCMDPASSWORD = $AppDbPasswordPlain
         try {
-            & sqlcmd -S "tcp:localhost,1433" -U sa -d $DatabaseName -Q $upsertQuery 1>$null 2>$null
+            & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -Q $upsertQuery 1>$null 2>$null
             $upsertExit = $LASTEXITCODE
         } finally {
             Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
@@ -918,9 +902,9 @@ UPDATE "user" SET "roleId" = 2, "isActive" = true
     $oidcRowId = 1
     $oidcClientIdSql = $OidcClientId -replace "'", "''"
     if ($DbEngine -eq 'mssql') {
-        $env:SQLCMDPASSWORD = $SaPasswordPlain
+        $env:SQLCMDPASSWORD = $AppDbPasswordPlain
         try {
-            $idOut = & sqlcmd -S "tcp:localhost,1433" -U sa -d $DatabaseName -h -1 -W -Q "SET NOCOUNT ON; SELECT TOP 1 id FROM [oidc] WHERE clientId = '$oidcClientIdSql';" 2>$null
+            $idOut = & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -h -1 -W -Q "SET NOCOUNT ON; SELECT TOP 1 id FROM [oidc] WHERE clientId = '$oidcClientIdSql';" 2>$null
             if ($LASTEXITCODE -eq 0 -and "$idOut" -match '(\d+)') { $oidcRowId = [int]$Matches[1] }
         } finally { Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue }
     } else {
@@ -977,8 +961,7 @@ SQL Server
   Server:             (local) / tcp:localhost,1433
   App login:          $AppDbUsername (db_owner on $DatabaseName, non-sysadmin -- the API connects as this)
   App password:       (the value you supplied via -AppDbPassword)
-  Bootstrap login:    sa (server setup only; not used by the app)
-  sa password:        (the value you supplied via -SaPassword)
+  Server setup:       Windows Authentication (the sa login is not used)
   Database:           $DatabaseName
 "@
 } else {

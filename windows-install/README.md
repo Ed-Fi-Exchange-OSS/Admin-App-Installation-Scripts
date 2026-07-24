@@ -46,7 +46,6 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 # 2. Full Admin App install (local Keycloak). The pre-flight check tells you if
 #    step 1 was actually needed.
 .\install-all.ps1 -IdpProvider keycloak `
-  -SaPassword (Read-Host -AsSecureString 'SQL Server sa password') `
   -AppDbPassword (Read-Host -AsSecureString 'Admin App DB login password') `
   -KeycloakAdminPassword (Read-Host -AsSecureString 'Keycloak admin password') `
   -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
@@ -58,8 +57,8 @@ When `install-all.ps1` finishes, open `https://localhost:4443/` and sign in with
 ### Notes on the parameters
 
 - **All password/secret parameters are `[SecureString]`.** Supply each with `(Read-Host -AsSecureString '...')` as shown above, never a plaintext literal — a plaintext string fails parameter binding before the script runs, and a literal on the command line would be captured in your shell history.
-- **`-SaPassword`**: SQL Server `sa` login password. Must satisfy the Windows password policy `CHECK_POLICY` enforces — length ≥ 8 and at least 3 of 4 character categories (uppercase, lowercase, digit, symbol). Weak passwords are rejected up front with guidance. The same rule applies to every SQL login the scripts create.
-- **`-AppDbPassword`** *(mssql)*: password for the dedicated least-privilege login (`edfi_adminapp`) the Admin App connects as (`db_owner` on `sbaa`, non-`sa`). Required in the default `mssql` mode; the app uses it at runtime, so provisioning and deploy must receive the same value. Subject to the same `CHECK_POLICY` rule as `-SaPassword`.
+- **`-AppDbPassword`** *(mssql)*: password for the dedicated least-privilege login (`edfi_adminapp`) the Admin App connects as (`db_owner` on `sbaa`, non-`sa`). Required in the default `mssql` mode; the app uses it at runtime, so provisioning and deploy must receive the same value. Must satisfy the Windows password policy `CHECK_POLICY` enforces — length ≥ 8 and at least 3 of 4 character categories (uppercase, lowercase, digit, symbol); weak passwords are rejected up front. The same rule applies to every SQL login the scripts create.
+- **SQL Server bootstrap runs under Windows Authentication.** Run the install as a Windows account that is a SQL Server sysadmin: `02-prereqs-sql.ps1` creates the database and the `edfi_adminapp` login over Windows Auth and never enables, resets, or uses the `sa` login. There is no `-SaPassword` parameter.
 - **`-IdpProvider`** *(mandatory)*: `keycloak` | `microsoft` | `google` | `other`. `keycloak` runs the local example IdP; the others target an external OIDC provider (see [Other identity providers](#other-identity-providers)).
 - **`-OidcClientSecret`** *(all modes)*: the OIDC client secret. For `keycloak` it's the secret set on the `edfiadminapp` client (you pick it, 32+ chars recommended); for external providers it's the secret from your app registration.
 - **`-KeycloakAdminPassword`** *(keycloak only)*: Password for the master-realm admin user auto-created when Keycloak first starts.
@@ -68,7 +67,7 @@ When `install-all.ps1` finishes, open `https://localhost:4443/` and sign in with
 #### Database engine selection
 
 - **`-DbEngine`**: `mssql` (default) or `pgsql`. Drives the database prereq path and how `production.js` gets patched. Everything else is identical.
-- **PostgreSQL (Docker) parameters** *(pgsql only)*: instead of `-SaPassword` / `-AppDbPassword`, pass `-UsePostgresDocker` with `-PostgresSuperuserPassword` (the container superuser) and `-PostgresAppPassword` (the least-privilege app role `edfiadminapp`). Both are `[SecureString]`:
+- **PostgreSQL (Docker) parameters** *(pgsql only)*: instead of `-AppDbPassword`, pass `-UsePostgresDocker` with `-PostgresSuperuserPassword` (the container superuser) and `-PostgresAppPassword` (the least-privilege app role `edfiadminapp`). Both are `[SecureString]`:
 
   ```powershell
   .\install-all.ps1 -IdpProvider keycloak -DbEngine pgsql -UsePostgresDocker `
@@ -91,7 +90,7 @@ Numbered scripts map to the official guide's section order. The **generic path**
 |---|---|
 | `00-check-prereqs.ps1` | Read-only diagnostic. `[PASS]`/`[FAIL]`/`[INFO]`/`[RISK]` per prereq. `[RISK]` flags collisions with existing software (shared SQL instance, older `java` on PATH, ports 3333/4200/3443/4443 in use). Exit 0 = clean, 1 = blocking, 2 = ready-with-risks. |
 | `01-prereqs-iis.ps1` | URL Rewrite Module + the HTTP hosting handler (HttpBridge by default, or HttpPlatformHandler via `-HttpHandler`); unlocks the `handlers` section. HTTPS bindings are added at deploy time by `05`/`06`. |
-| `02-prereqs-sql.ps1` | SQL Server config: Mixed Mode + TCP/IP + `sa` login + creates the `sbaa` database + provisions a dedicated least-privilege app login (`edfi_adminapp`, `db_owner` on `sbaa` only, not a server sysadmin) that the app connects as. |
+| `02-prereqs-sql.ps1` | SQL Server config: Mixed Mode + TCP/IP + creates the `sbaa` database + provisions a dedicated least-privilege app login (`edfi_adminapp`, `db_owner` on `sbaa` only, not a server sysadmin) that the app connects as. All server-level work runs under Windows Auth; the `sa` login is never touched. |
 | `03-prereqs-node.ps1` | Node.js install (if missing) and nvm-windows remediation of a too-old version. No Java, no Keycloak. |
 | `04-build.ps1` | `npm ci --legacy-peer-deps`, then `build:api` and `build:fe`. Seeds `packages\fe\.env` (VITE_*) before building. Skips if artifacts are current (override with `-Force`). |
 | `05-deploy-api.ps1` | Deploys the API to the standalone site `EdFi-AdminApp-API` (HTTPS `3443`; HTTP `3333` redirects to it). Seeds/patches `production.js`, writes `web.config`, configures the App Pool, and sets `NPM_CONFIG_CACHE` on the App Pool. |
@@ -137,7 +136,6 @@ The Admin App's auth engine is provider-agnostic (generic OIDC discovery). Keycl
 
 ```powershell
 .\install-all.ps1 -IdpProvider microsoft `
-  -SaPassword (Read-Host -AsSecureString 'SQL Server sa password') `
   -AppDbPassword (Read-Host -AsSecureString 'Admin App DB login password') `
   -OidcIssuer 'https://login.microsoftonline.com/<tenant-id>/v2.0' `
   -OidcClientId '<application-id>' `
@@ -158,7 +156,7 @@ You can also drive the per-section scripts manually (`00`→`06`), passing `-Oid
 
 ```powershell
 .\uninstall.ps1                                       # prompts before doing anything
-.\uninstall.ps1 -SaPassword (Read-Host -AsSecureString 'SQL Server sa password') -Force # SQL Auth to drop the DB + non-interactive
+.\uninstall.ps1 -Force                                # non-interactive teardown (Windows Auth)
 .\uninstall.ps1 -KeepDatabase -KeepNpmCache           # selective teardown
 
 .\uninstall-keycloak.ps1                              # remove the local Keycloak IdP (separate)

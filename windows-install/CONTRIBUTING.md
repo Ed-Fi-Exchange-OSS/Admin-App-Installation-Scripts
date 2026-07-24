@@ -32,7 +32,7 @@ windows-install/
 ├─ install-all.ps1        # master installer (3 phases) — main entry point
 ├─ 00-check-prereqs.ps1   # preflight: ports, OS, tooling
 ├─ 01-prereqs-iis.ps1     # IIS + URL Rewrite + httpPlatform handler  (-HttpHandler here)
-├─ 02-prereqs-sql.ps1     # SQL Server mixed mode + TCP + sa + least-priv app login
+├─ 02-prereqs-sql.ps1     # SQL Server mixed mode + TCP + least-priv app login (Windows Auth)
 ├─ 03-prereqs-node.ps1    # Node.js install / npm cache
 ├─ 04-build.ps1           # npm ci + build:api (webpack) + build:fe (vite)
 ├─ 05-deploy-api.ps1      # deploy API site, NODE_CONFIG, TLS, OIDC row, encryption key
@@ -65,7 +65,7 @@ SQL logins must satisfy CHECK_POLICY (≥8 characters, ≥3 of 4 categories). Al
 ```powershell
 $p = @{
   SourcePath = '<path-to-admin-app-source>'
-  DbEngine = 'mssql'; SaPassword = $sa; AppDbPassword = $appdb
+  DbEngine = 'mssql'; AppDbPassword = $appdb
   IdpProvider = 'keycloak'; OidcClientSecret = $oidc
   KeycloakAdminPassword = $kcadmin; TestUserPassword = $kcuser
   AcceptRisks = $true
@@ -98,7 +98,7 @@ to `accounts.google.com`. Register the redirect URI the installer prints:
 |---|---|
 | `-SourcePath` | Admin App source to build/deploy. Point at the supported release checkout. |
 | `-DbEngine mssql\|pgsql` | Default `mssql`. |
-| `-SaPassword` / `-AppDbPassword` | MSSQL (SecureString). App login is a non-sysadmin `db_owner` on `sbaa`. |
+| `-AppDbPassword` | MSSQL (SecureString). App login is a non-sysadmin `db_owner` on `sbaa`. Server setup uses Windows Auth (no `sa`; run as a SQL sysadmin). |
 | `-UsePostgresDocker` + `-PostgresSuperuserPassword` / `-PostgresAppPassword` | PG via Docker. App user is a non-superuser owning `public` with CONNECT + CREATE. |
 | `-IdpProvider keycloak\|microsoft\|google\|other` | **Mandatory.** `microsoft` requires `-OidcIssuer`. |
 | `-OidcClientSecret` | **Mandatory** (SecureString). |

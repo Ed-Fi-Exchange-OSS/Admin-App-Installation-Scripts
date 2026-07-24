@@ -15,10 +15,10 @@ Steps (each best-effort, continues past individual failures):
      - Delete the deployed dirs C:\inetpub\EdFi-AdminApp-API and
        C:\inetpub\EdFi-AdminApp-FE.
   2. Database teardown (both engines, best-effort per engine):
-     - MSSQL: DROP DATABASE [sbaa] and DROP LOGIN [edfi_adminapp] using SQL Auth
-       (sa + -SaPassword) if provided, else Windows Auth. Skipped when
-       MSSQLSERVER isn't running. Leaves Mixed Mode / sa / TCP:1433 alone
-       (instance-wide settings other apps may rely on).
+     - MSSQL: DROP DATABASE [sbaa] and DROP LOGIN [edfi_adminapp] using Windows
+       Auth (runs as the current sysadmin account). Skipped when MSSQLSERVER
+       isn't running. Leaves Mixed Mode / TCP:1433 alone (instance-wide settings
+       other apps may rely on).
      - PGSQL (docker): `docker compose down -v` from windows-install\docker so
        the data + cert volumes are removed. Skipped when no
        edfiadminapp-postgres container exists. Without the -v, the volume
@@ -55,10 +55,6 @@ Database to drop. Default: sbaa. Must match what 02-prereqs-sql.ps1 created.
 .PARAMETER AppDbUsername
 Server-level login to drop alongside the database. Default: edfi_adminapp. Must
 match what 02-prereqs-sql.ps1 provisioned.
-
-.PARAMETER SaPassword
-SQL sa password. If provided, the DB drop uses SQL Auth over TCP. If omitted,
-the script falls back to Windows Auth via (local).
 
 .PARAMETER KeycloakInstallPath
 Path checked for Keycloak leftovers (informational only; this script does not
@@ -99,14 +95,13 @@ Switch — skip the confirmation prompt.
 
 .EXAMPLE
 .\uninstall.ps1
-.\uninstall.ps1 -SaPassword 'EdFi-Local!2026' -Force
+.\uninstall.ps1 -Force
 .\uninstall.ps1 -KeepDatabase -KeepNpmCache
 #>
 
 param(
     [string]$DatabaseName = "sbaa",
     [string]$AppDbUsername = "edfi_adminapp",
-    [SecureString]$SaPassword,
     [string]$KeycloakInstallPath = "C:\keycloak",
     [string]$NpmCachePath = "C:\npm-cache",
     [string]$AppPoolName = "EdFi-AdminApp-API",
@@ -129,12 +124,6 @@ param(
 # Don't bail on the first non-terminating error -- this is a teardown, we want
 # to push through and report at the end.
 $ErrorActionPreference = 'Continue'
-
-# -SaPassword is optional: omit it to drop the database via Windows Auth. When
-# given it arrives as SecureString (kept off the command line); unwrap to a new
-# local (assigning back to the [SecureString]-typed parameter would re-trigger
-# its type conversion and fail).
-$SaPasswordPlain = if ($SaPassword) { [System.Net.NetworkCredential]::new('', $SaPassword).Password } else { $null }
 
 $results = [System.Collections.Generic.List[object]]::new()
 function Record {
@@ -381,26 +370,18 @@ END
 IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$safeUserLiteral' AND type = 'S')
     DROP LOGIN [$safeUser];
 "@
-        # SQLCMDPASSWORD instead of -P keeps the password off the sqlcmd process
-        # command line; cleared in the finally.
-        $authArgs = if ($SaPasswordPlain) {
-            @("-S", "tcp:localhost,1433", "-U", "sa")
-        } else {
-            @("-S", "(local)", "-E")
-        }
-        if ($SaPasswordPlain) { $env:SQLCMDPASSWORD = $SaPasswordPlain }
+        # Windows Auth via (local): dropping a database and a server login both
+        # require server-level privilege the app login (db_owner only) lacks, so
+        # the teardown runs as the current sysadmin account.
         try {
-            & sqlcmd @authArgs -Q $dropQuery -t 30 2>&1 | Out-Null
+            & sqlcmd -S "(local)" -E -Q $dropQuery -t 30 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
-                $authMode = if ($SaPasswordPlain) { "SQL Auth" } else { "Windows Auth" }
-                Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "OK" $authMode
+                Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "OK" "Windows Auth"
             } else {
                 Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "FAIL" "sqlcmd exit $LASTEXITCODE"
             }
         } catch {
             Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "FAIL" $_.Exception.Message
-        } finally {
-            if ($SaPasswordPlain) { Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue }
         }
     }
 
