@@ -1,13 +1,13 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-Configures SQL Server for the Ed-Fi Admin App: enables Mixed Mode auth and the
+Configures SQL Server for the Ed-Fi Admin App: enables Mixed Mode authentication and the
 TCP/IP protocol. All configuration runs under Windows Authentication; the sa
 login is never enabled or modified.
 
 .DESCRIPTION
 Addresses two SQL Server defaults that block the Admin App API from connecting:
-- Mixed Mode disabled (Windows-only auth) — fails because the app uses SQL Auth
+- Mixed Mode disabled (Windows-only authentication) — fails because the app uses SQL authentication
 - TCP/IP disabled — fails because the `mssql` Node driver requires TCP
 
 Auto-detects the installed SQL Server major version from the registry.
@@ -74,11 +74,11 @@ function Test-SqlPasswordComplexity {
     }
 }
 
-# The Admin App builds its DB connection string as a URL and interpolates the DB
+# The Admin App builds its database connection string as a URL and interpolates the database
 # credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
 # that are structural in a URL (or need percent-encoding) corrupt the parsed password,
 # so the API fails to connect with an opaque "Login failed for user". Until the Admin
-# App URL-encodes its credentials (the real fix), restrict the DB password to characters
+# App URL-encodes its credentials (the real fix), restrict the database password to characters
 # that are safe unencoded in a URL. This does NOT weaken the password: CHECK_POLICY needs
 # 3 of 4 categories and upper+lower+digit alone satisfies it (symbols stay optional).
 # Example passwords such as 'YourStrong!Passw0rd' and 'EdFi-App-Local!2026' remain valid.
@@ -88,7 +88,7 @@ function Test-DbPasswordUrlSafe {
         [Parameter(Mandatory = $true)][string]$Label
     )
     if ($Password -match '[^A-Za-z0-9!$()*,._~-]') {
-        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form DB connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its DB credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
+        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form database connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its database credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
     }
 }
 
@@ -96,7 +96,7 @@ function Test-DbPasswordUrlSafe {
 # new local -- assigning back to the [SecureString]-typed parameter would re-trigger
 # its type conversion and fail. Point-of-use plaintext (SQLCMDPASSWORD, the inline
 # T-SQL) is unavoidable, so it lives in a local, never on a command line.
-if (-not $AppDbPassword) { $AppDbPassword = Read-Host -AsSecureString "Admin App DB login '$AppDbUsername' password" }
+if (-not $AppDbPassword) { $AppDbPassword = Read-Host -AsSecureString "Admin App database login '$AppDbUsername' password" }
 $AppDbPasswordPlain = [System.Net.NetworkCredential]::new('', $AppDbPassword).Password
 Test-SqlPasswordComplexity -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
 Test-DbPasswordUrlSafe -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
@@ -187,7 +187,7 @@ function Invoke-Sqlcmd-Quiet {
     $ErrorActionPreference = 'Continue'
     # Pass the password via SQLCMDPASSWORD instead of -P so it never lands on the
     # sqlcmd process command line (visible in the process list); cleared right
-    # after the call. Windows-auth (-E) callers pass no -Password.
+    # after the call. Windows-authentication (-E) callers pass no -Password.
     if ($Password) { $env:SQLCMDPASSWORD = $Password }
     # -b makes sqlcmd return a non-zero exit code on a SQL error (severity >= 11),
     # so a policy rejection (e.g. a weak password failing CHECK_POLICY) fails
@@ -197,7 +197,7 @@ function Invoke-Sqlcmd-Quiet {
     if ($FailOnSqlError) { $SqlArgs += "-b" }
     $queryFile = $null
     if ($QueryText) {
-        # Create the temp file, lock its ACL down to Administrators + SYSTEM (no
+        # Create the temp file, lock its access control list down to Administrators + SYSTEM (no
         # inheritance) BEFORE writing the secret, then hand it to sqlcmd via -i.
         $queryFile = [System.IO.Path]::GetTempFileName()
         $acl = New-Object System.Security.AccessControl.FileSecurity
@@ -221,7 +221,7 @@ function Invoke-Sqlcmd-Quiet {
 }
 
 # After a service restart, SQL Server's status goes Running before it's
-# actually accepting queries. Loop with Windows-auth probes until a SELECT 1
+# actually accepting queries. Loop with Windows-authentication probes until a SELECT 1
 # succeeds or we time out.
 Write-Host "Waiting for SQL Server to accept queries..."
 $ready = $false
@@ -235,7 +235,7 @@ if (-not $ready) {
 }
 Write-Host "SQL Server is responding."
 
-# Verify the TCP listener is up. SQL Auth over TCP is validated later as the app
+# Verify the TCP listener is up. SQL authentication over TCP is validated later as the app
 # login (the final connection check), so no sa round-trip is needed here.
 $listener = Get-NetTCPConnection -LocalPort 1433 -State Listen -ErrorAction SilentlyContinue
 if (-not $listener) {
@@ -279,7 +279,7 @@ if ($ec -ne 0) {
     throw "Failed to provision the Admin App login '$AppDbUsername' (sqlcmd exit code $ec). A CHECK_POLICY failure here means the password is too weak; supply a stronger -AppDbPassword."
 }
 
-# Verify the app login can connect over TCP with SQL Auth (how the app connects).
+# Verify the app login can connect over TCP with SQL authentication (how the app connects).
 $ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "tcp:localhost,1433", "-U", $AppDbUsername, "-d", $DatabaseName, "-Q", "SELECT 1") -Password $AppDbPasswordPlain
 if ($ec -ne 0) {
     throw "The Admin App login '$AppDbUsername' could not connect over TCP to '$DatabaseName' (sqlcmd exit code $ec)."

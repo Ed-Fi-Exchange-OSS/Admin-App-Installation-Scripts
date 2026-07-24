@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
 Installs the IIS URL Rewrite Module and an httpPlatform handler (HttpBridge or
-Microsoft HttpPlatformHandler), and unlocks the IIS config the Admin App's
+Microsoft HttpPlatformHandler), and unlocks the IIS configuration the Admin App's
 web.config files need.
 
 .DESCRIPTION
@@ -16,7 +16,7 @@ proxies requests to it.
 
 Idempotent -- safe to re-run.
 
-This sets up the IIS engine prerequisites only. The API and FE are deployed as
+This sets up the IIS engine prerequisites only. The API and web application are deployed as
 two standalone sites by 05-deploy-api.ps1 and 06-deploy-fe.ps1.
 
 .PARAMETER HttpHandler
@@ -117,7 +117,7 @@ if ($iisMajor -and $iisMajor -lt 10) {
 Import-Module WebAdministration
 
 # IIS URL Rewrite Module.
-# Still required by the FE web.config SPA fallback (06-deploy-fe.ps1 rewrites to
+# Still required by the web application web.config SPA fallback (06-deploy-fe.ps1 rewrites to
 # index.html). The API no longer uses a rewrite rule under httpPlatform.
 $rewriteDll = "$env:SystemRoot\System32\inetsrv\rewrite.dll"
 if (Test-Path $rewriteDll) {
@@ -167,5 +167,5 @@ if (Get-WebGlobalModule -Name 'httpPlatformHandler' -ErrorAction SilentlyContinu
 }
 
 Write-Host ""
-Write-Host "SUCCESS: URL Rewrite + $HttpHandler installed; IIS config unlocked." -ForegroundColor Green
-Write-Host "The API and FE deploy as standalone sites (05-deploy-api.ps1, 06-deploy-fe.ps1)."
+Write-Host "SUCCESS: URL Rewrite + $HttpHandler installed; IIS configuration unlocked." -ForegroundColor Green
+Write-Host "The API and web application deploy as standalone sites (05-deploy-api.ps1, 06-deploy-fe.ps1)."

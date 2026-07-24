@@ -4,11 +4,11 @@
 Deploys the Ed-Fi Admin App frontend to IIS.
 
 .DESCRIPTION
-- Copies built FE files (index.html + assets\) to the IIS folder
+- Copies built web application files (index.html + assets\) to the IIS folder
 - Creates or updates the IIS site under a dedicated App Pool (started explicitly)
 - Writes web.config with the React Router SPA rewrite rule + security headers
 
-Run AFTER `npm run build:fe` produces dist\packages\fe\ in the source repo.
+Run AFTER `npm run build:fe` produces dist\packages\fe\ in the source repository.
 
 .PARAMETER SourcePath
 Path to the Vite build output, e.g. C:\Ed-Fi\Ed-Fi-AdminApp\dist\packages\fe.
@@ -24,12 +24,12 @@ IIS site name. Default: EdFi-AdminApp-FE.
 HTTP port. Default: 4200.
 
 .PARAMETER ApiUrl
-Base URL of the API the FE bundle calls. Only its origin (scheme://host:port) is
+Base URL of the API the web application bundle calls. Only its origin (scheme://host:port) is
 used, to populate the Content-Security-Policy connect-src. Must match the
 VITE_API_URL baked into the bundle at build time. Default: https://localhost:3443.
 
 .PARAMETER AppPoolName
-Dedicated IIS App Pool for the FE site, created and started here so the SPA does
+Dedicated IIS App Pool for the web application site, created and started here so the SPA does
 not depend on DefaultAppPool (which is often Stopped after a reboot). Default:
 EdFi-AdminApp-FE.
 
@@ -53,10 +53,10 @@ param(
     [string]$CertificatePfxPath = "",
     [SecureString]$CertificatePassword,
 
-    # By default the auto-generated self-signed cert is added to LocalMachine\Root so
+    # By default the auto-generated self-signed certificate is added to LocalMachine\Root so
     # local browsers trust it (no "Not Secure" warning). Set this to skip that where
     # policy forbids adding trusted roots; the browser will then warn. Only affects the
-    # self-signed path -- a supplied real cert is never added to Root.
+    # self-signed path -- a supplied real certificate is never added to Root.
     [switch]$SkipSelfSignedTrust
 )
 
@@ -74,7 +74,7 @@ if (-not (Test-Path "$SourcePath\index.html")) {
     throw "index.html not found at $SourcePath. Did you run 'npm run build:fe'?"
 }
 
-Write-Host "Copying FE files to $DestPath..."
+Write-Host "Copying web application files to $DestPath..."
 New-Item -ItemType Directory -Path $DestPath -Force | Out-Null
 & robocopy $SourcePath $DestPath /MIR /NFL /NDL /NJH /NJS | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
@@ -111,12 +111,12 @@ if ((Get-WebAppPoolState -Name $AppPoolName -ErrorAction SilentlyContinue).Value
 }
 
 # Resolve the TLS certificate for the HTTPS binding. Precedence: an explicit
-# thumbprint (already in LocalMachine\My) -> an imported PFX -> a self-signed cert
+# thumbprint (already in LocalMachine\My) -> an imported PFX -> a self-signed certificate
 # generated for localhost + this host. The self-signed path keeps the local
-# quick-start working with zero cert setup (an untrusted-cert browser warning is
+# quick-start working with zero certificate setup (an untrusted-certificate browser warning is
 # expected). Returns the resolved certificate thumbprint. WET-duplicated in
 # 05-deploy-api.ps1 (windows-install has no shared module); when install-all runs
-# 05 first, this reuses the self-signed cert 05 created (matched by FriendlyName).
+# 05 first, this reuses the self-signed certificate 05 created (matched by FriendlyName).
 function Resolve-HttpsCertificate {
     param(
         [string]$Thumbprint,
@@ -147,7 +147,7 @@ function Resolve-HttpsCertificate {
     }
 
     # Self-signed fallback. Reuse a still-valid one we created before so re-runs
-    # (and the other site's deploy) share a single cert; else generate a fresh one.
+    # (and the other site's deploy) share a single certificate; else generate a fresh one.
     $cert = Get-ChildItem $storePath |
         Where-Object { $_.FriendlyName -eq $friendlyName -and $_.NotAfter -gt (Get-Date) } |
         Sort-Object NotAfter -Descending | Select-Object -First 1
@@ -158,9 +158,9 @@ function Resolve-HttpsCertificate {
         $cert = New-SelfSignedCertificate -DnsName 'localhost', $env:COMPUTERNAME `
             -CertStoreLocation $storePath -FriendlyName $friendlyName -NotAfter (Get-Date).AddYears(5)
     }
-    # Trust the self-signed cert on this machine (add the public cert to
+    # Trust the self-signed certificate on this machine (add the public certificate to
     # LocalMachine\Root) so local browsers don't show "Not Secure". Only the
-    # self-signed path does this -- a supplied real cert is already CA-trusted. Skip
+    # self-signed path does this -- a supplied real certificate is already CA-trusted. Skip
     # with -SkipTrust where policy forbids adding trusted roots. Idempotent; a
     # public-only copy carrying the same FriendlyName is stored so uninstall finds it.
     if (-not $SkipTrust) {
@@ -182,9 +182,9 @@ function Resolve-HttpsCertificate {
     return $cert.Thumbprint
 }
 
-# Add (idempotently) an HTTPS binding on the site and attach the cert. Mirror-port
-# model: API and FE each have their own HTTPS port, so no SNI/hostname is needed
-# (SslFlags 0). The cert is (re)bound every run so a replaced/rotated cert takes
+# Add (idempotently) an HTTPS binding on the site and attach the certificate. Mirror-port
+# model: API and web application each have their own HTTPS port, so no SNI/hostname is needed
+# (SslFlags 0). The certificate is (re)bound every run so a replaced/rotated certificate takes
 # effect. WET-duplicated in 05-deploy-api.ps1.
 function Set-HttpsBinding {
     param(
@@ -202,7 +202,7 @@ function Set-HttpsBinding {
     Write-Host "Bound certificate $Thumbprint to 0.0.0.0:$HttpsPort."
 }
 
-# TLS (always-on): resolve the cert and add the HTTPS binding. The HTTP site created
+# TLS (always-on): resolve the certificate and add the HTTPS binding. The HTTP site created
 # above stays only to 301-redirect to HTTPS (redirect rule added to web.config in T3.2).
 $certThumbprint = Resolve-HttpsCertificate -Thumbprint $CertificateThumbprint -PfxPath $CertificatePfxPath -PfxPassword $CertificatePassword -SkipTrust:$SkipSelfSignedTrust
 Set-HttpsBinding -SiteName $SiteName -HttpsPort $HttpsPort -Thumbprint $certThumbprint
@@ -255,11 +255,11 @@ $apiOrigin = ([Uri]$ApiUrl).GetLeftPart([System.UriPartial]::Authority)
 $webConfig = $webConfig.Replace('__API_ORIGIN__', $apiOrigin)
 $webConfig = $webConfig.Replace('__HTTPS_PORT__', "$HttpsPort")
 
-# HSTS only on a real hostname / CA-issued cert. On the default self-signed localhost
+# HSTS only on a real hostname / CA-issued certificate. On the default self-signed localhost
 # path, an HSTS pin would apply to the WHOLE 'localhost' host for a year (HSTS is
 # port-agnostic), silently rewriting other localhost HTTP services -- e.g. Keycloak
 # dev on :8080 -- to https and breaking the default login flow. Emit it only when the
-# operator supplied their own cert (which implies a real deployment behind a real name).
+# operator supplied their own certificate (which implies a real deployment behind a real name).
 if ($CertificateThumbprint -or $CertificatePfxPath) {
     $webConfig = $webConfig.Replace('__HSTS_HEADER__', '<add name="Strict-Transport-Security" value="max-age=31536000; includeSubDomains" />')
 } else {
@@ -275,4 +275,4 @@ if ((Test-Path $webConfigPath) -and ((Get-Content $webConfigPath -Raw) -eq $webC
 }
 
 Write-Host ""
-Write-Host "SUCCESS: FE deployed at https://localhost:$HttpsPort/ (HTTP :$Port redirects here)." -ForegroundColor Green
+Write-Host "SUCCESS: Web application deployed at https://localhost:$HttpsPort/ (HTTP :$Port redirects here)." -ForegroundColor Green

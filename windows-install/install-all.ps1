@@ -5,7 +5,7 @@ Master installer for the Ed-Fi Admin App on Windows IIS. Fully automated.
 
 Runs in three phases with no manual interaction required.
 
-  Phase 1 — Prereqs
+  Phase 1 — Prerequisites
     02-prereqs-sql.ps1        SQL Server Mixed Mode + TCP/IP + least-priv app login
     01-prereqs-iis.ps1        URL Rewrite + httpPlatform handler + unlock handlers (HTTPS added at deploy time)
     03-prereqs-node.ps1       Node.js (the npm cache is set later, by 05-deploy-api)
@@ -20,17 +20,17 @@ Runs in three phases with no manual interaction required.
 
 Re-run modes:
   Default               Run all three phases end-to-end
-  -SkipPhase1           Skip prereqs (already done)
+  -SkipPhase1           Skip prerequisites (already done)
   -SkipPhase2           Skip build (artifacts already present)
-  -OnlyPhase1           Run prereqs only
+  -OnlyPhase1           Run prerequisites only
 
 If you'd rather build manually, use -SkipPhase2 and run the build yourself
 before re-running.
 
 .PARAMETER DbEngine
-'mssql' (default) or 'pgsql'. Drives which DB prereq path runs and how
+'mssql' (default) or 'pgsql'. Drives which database prerequisite path runs and how
 production.js gets patched. 'mssql' requires -AppDbPassword and must run as a
-Windows user who is a SQL Server sysadmin (server setup uses Windows Auth).
+Windows user who is a SQL Server sysadmin (server setup uses Windows authentication).
 'pgsql' requires -PostgresAppPassword.
 
 .PARAMETER UsePostgresDocker
@@ -53,14 +53,14 @@ docker-compose setup ('localhost', 5432, 'edfiadminapp').
 
 .PARAMETER AppDbUsername / -AppDbPassword
 The dedicated least-privilege SQL login the Admin App connects as at runtime
-(db_owner on the app DB, not a server sysadmin). -AppDbPassword is required when
+(db_owner on the app database, not a server sysadmin). -AppDbPassword is required when
 -DbEngine is 'mssql'. -AppDbUsername defaults to 'edfi_adminapp'. Written into
 production.js as MSSQL_DB_USERNAME / MSSQL_DB_PASSWORD.
 
 .PARAMETER IdpProvider
 Identity provider (mandatory): keycloak | microsoft | google | other. 'keycloak'
-stands up the local example IdP and provisions the realm/client/user. The others
-target an external OIDC provider you register yourself; the AdminApp's auth engine
+stands up the local example identity provider and provisions the realm/client/user. The others
+target an external OIDC provider you register yourself; the AdminApp's authentication engine
 is provider-agnostic (OIDC discovery).
 
 .PARAMETER OidcClientSecret
@@ -78,7 +78,7 @@ OIDC client id. Defaulted for keycloak (edfiadminapp); required for the external
 OIDC scopes requested at login. Default: 'openid email profile'.
 
 .PARAMETER ViteIdpAccountUrl
-The IdP account-management URL the FE links to. Defaulted per provider (keycloak,
+The identity provider account-management URL the web application links to. Defaulted per provider (keycloak,
 microsoft, google); required for 'other'.
 
 .PARAMETER KeycloakAdminPassword
@@ -92,7 +92,7 @@ first start. Subsequent runs ignore it — make sure it matches an existing admi
 Path to an existing Ed-Fi-AdminApp checkout. Optional: when omitted, the Admin
 App source is resolved automatically — a co-located checkout (scripts inside
 <AdminApp>\windows-install\) is honored, otherwise the Admin App is cloned as a
-sibling of this scripts repo (e.g. C:\Ed-Fi\Ed-Fi-AdminApp). Pass this to point
+sibling of this scripts repository (e.g. C:\Ed-Fi\Ed-Fi-AdminApp). Pass this to point
 at a checkout you manage yourself.
 
 .PARAMETER AdminAppRef
@@ -133,7 +133,7 @@ reviewing the [RISK] items.
 
 .PARAMETER AutoUpgradeNode
 Switch — when 03-prereqs-node.ps1 detects a too-old Node on PATH, skip the y/N
-confirmation and proceed with nvm-windows + Node LTS setup automatically.
+confirmation and proceed with nvm-windows + Node Long-Term Support setup automatically.
 For non-interactive runs. Passed through as -AssumeYes to 03-prereqs-node.ps1.
 
 .PARAMETER YopassUrl
@@ -207,7 +207,7 @@ param(
     [string]$PostgresAppUser = "edfiadminapp",
 
     # Identity provider. Mandatory -- choose consciously. 'keycloak' stands up a
-    # local Keycloak (the example IdP); the others deploy against an external OIDC
+    # local Keycloak (the example identity provider); the others deploy against an external OIDC
     # provider you register yourself (the client + user live in that provider).
     [Parameter(Mandatory = $true)]
     [ValidateSet('keycloak','microsoft','google','other')]
@@ -258,25 +258,25 @@ param(
 
     # TLS (always-on). HTTPS ports for the two sites (mirror the HTTP 3333/4200).
     # The certificate is resolved by 05-deploy-api.ps1 and reused by 06-deploy-fe.ps1
-    # (self-signed fallback keyed on FriendlyName), so both sites share one cert.
-    # Supply a real cert via -CertificateThumbprint or -CertificatePfxPath
-    # (+ -CertificatePassword); omit both to auto-generate a self-signed cert.
+    # (self-signed fallback keyed on FriendlyName), so both sites share one certificate.
+    # Supply a real certificate via -CertificateThumbprint or -CertificatePfxPath
+    # (+ -CertificatePassword); omit both to auto-generate a self-signed certificate.
     [int]$HttpsApiPort = 3443,
     [int]$HttpsFePort = 4443,
     [string]$CertificateThumbprint = "",
     [string]$CertificatePfxPath = "",
     [SecureString]$CertificatePassword,
 
-    # By default an auto-generated self-signed cert is added to LocalMachine\Root so
+    # By default an auto-generated self-signed certificate is added to LocalMachine\Root so
     # local browsers trust it. Set this to skip that (browser shows "Not Secure");
-    # only affects the self-signed path, not a supplied real cert.
+    # only affects the self-signed path, not a supplied real certificate.
     [switch]$SkipSelfSignedTrust,
 
     # Disable SSL verification for the API's outbound HTTPS calls (ODS/API, AdminApi,
     # Yopass). Secure by default; set only for self-signed upstreams in non-production.
     [switch]$DisableSslVerification,
 
-    # Keycloak only: register a startup Scheduled Task so the example IdP survives a
+    # Keycloak only: register a startup Scheduled Task so the example identity provider survives a
     # reboot (otherwise it must be restarted by re-running idp-keycloak-start.ps1).
     # Requires an elevated shell. Off by default.
     [switch]$RegisterKeycloakStartupTask
@@ -285,7 +285,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
 
-# Reject a weak DB-login password the moment each is resolved (whether passed as a
+# Reject a weak database-login password the moment each is resolved (whether passed as a
 # param or prompted), before any phase runs, so a weak password fails immediately
 # and next to the prompt that set it -- not later, after an unrelated prompt, as an
 # opaque CHECK_POLICY rejection during MSSQL login provisioning. Mirrors the Windows
@@ -309,11 +309,11 @@ function Test-SqlPasswordComplexity {
     }
 }
 
-# The Admin App builds its DB connection string as a URL and interpolates the DB
+# The Admin App builds its database connection string as a URL and interpolates the database
 # credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
 # that are structural in a URL (or need percent-encoding) corrupt the parsed password,
 # so the API fails to connect with an opaque "Login failed for user". Until the Admin
-# App URL-encodes its credentials (the real fix), restrict the DB password to characters
+# App URL-encodes its credentials (the real fix), restrict the database password to characters
 # that are safe unencoded in a URL. This does NOT weaken the password: CHECK_POLICY needs
 # 3 of 4 categories and upper+lower+digit alone satisfies it (symbols stay optional).
 # Example passwords such as 'YourStrong!Passw0rd' and 'EdFi-App-Local!2026' remain valid.
@@ -323,7 +323,7 @@ function Test-DbPasswordUrlSafe {
         [Parameter(Mandatory = $true)][string]$Label
     )
     if ($Password -match '[^A-Za-z0-9!$()*,._~-]') {
-        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form DB connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its DB credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
+        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form database connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its database credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
     }
 }
 
@@ -340,7 +340,7 @@ $PostgresAppPasswordPlain       = $null
 $PostgresSuperuserPasswordPlain = $null
 
 if ($DbEngine -eq 'mssql') {
-    if (-not $AppDbPassword) { $AppDbPassword = Read-Host -AsSecureString "Admin App DB login '$AppDbUsername' password" }
+    if (-not $AppDbPassword) { $AppDbPassword = Read-Host -AsSecureString "Admin App database login '$AppDbUsername' password" }
     $AppDbPasswordPlain = [System.Net.NetworkCredential]::new('', $AppDbPassword).Password
     Test-SqlPasswordComplexity -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
     Test-DbPasswordUrlSafe -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
@@ -370,7 +370,7 @@ if ($SetupYopassDocker -and $YopassUrl) {
 # the actual container is brought up in phase 1 below.
 $EffectiveYopassUrl = if ($SetupYopassDocker) { "http://localhost:$YopassPort" } else { $YopassUrl }
 
-# IdP provider resolution. 'keycloak' uses the local example IdP (it provisions
+# Identity provider resolution. 'keycloak' uses the local example identity provider (it provisions
 # the realm/client/user); the others target an external OIDC provider you
 # register yourself. Fill per-provider defaults and validate required values.
 $idpIsKeycloak = ($IdpProvider -eq 'keycloak')
@@ -390,10 +390,10 @@ if ($idpIsKeycloak) {
     }
     if (-not $OidcIssuer)        { throw "-OidcIssuer is required when -IdpProvider is '$IdpProvider'." }
     if (-not $OidcClientId)      { throw "-OidcClientId is required when -IdpProvider is '$IdpProvider'." }
-    if (-not $ViteIdpAccountUrl) { throw "-ViteIdpAccountUrl is required when -IdpProvider is '$IdpProvider' (the IdP account-management URL the FE links to)." }
+    if (-not $ViteIdpAccountUrl) { throw "-ViteIdpAccountUrl is required when -IdpProvider is '$IdpProvider' (the identity provider account-management URL the web application links to)." }
 }
 
-# TLS (always-on): the FE bundle bakes the API URL at build time, and 05/06 read
+# TLS (always-on): the web application bundle bakes the API URL at build time, and 05/06 read
 # their URLs from these too, so derive both as https on the mirror ports.
 $ApiUrl = "https://localhost:$HttpsApiPort"
 $FeUrl  = "https://localhost:$HttpsFePort"
@@ -429,7 +429,7 @@ function Resolve-AdminAppRef {
 # Resolve the Admin App source, cloning it if needed. -SourcePath wins when supplied.
 # Otherwise honor a legacy co-located checkout (scripts inside <AdminApp>\windows-install\),
 # and failing that clone the Admin App at the resolved release ref as a sibling of this
-# scripts repo. Build/deploy need the full source tree + package.json, and the Node phase
+# scripts repository. Build/deploy need the full source tree + package.json, and the Node phase
 # below reads engines.node from it, so this must run first.
 if (-not $SourcePath) {
     $colocated = Split-Path $scriptDir -Parent
@@ -444,7 +444,7 @@ if (-not $SourcePath) {
 if (Test-Path "$SourcePath\package.json") {
     Write-Host "Admin App source found at $SourcePath."
 } elseif (Test-Path $SourcePath) {
-    throw "'$SourcePath' exists but has no package.json, so it is not an Admin App checkout. Remove it or pass -SourcePath to an existing Admin App repo."
+    throw "'$SourcePath' exists but has no package.json, so it is not an Admin App checkout. Remove it or pass -SourcePath to an existing Admin App repository."
 } else {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         throw "git is required to fetch the Admin App source but was not found on PATH. Install it (winget install --id Git.Git -e) or clone Ed-Fi-AdminApp yourself and pass -SourcePath."
@@ -468,7 +468,7 @@ $nodeArgs = @{ SourcePath = $SourcePath }
 if ($AutoUpgradeNode) { $nodeArgs.AssumeYes = $true }
 & "$scriptDir\03-prereqs-node.ps1" @nodeArgs
 
-# Pre-flight: run 00-check-prereqs.ps1 to validate manual prereqs are in place.
+# Pre-flight: run 00-check-prereqs.ps1 to validate manual prerequisites are in place.
 # Exit codes from 00:
 #   0 = clean
 #   1 = blocking FAIL items, install must not proceed
@@ -499,13 +499,13 @@ if (-not $SkipPreflightCheck) {
     }
 }
 
-# ---------- Phase 1 — Prereqs ----------
+# ---------- Phase 1 — Prerequisites ----------
 if (-not $SkipPhase1) {
     if ($DbEngine -eq 'mssql') {
-        Write-Phase "Phase 1.1: SQL Server prereqs (02-prereqs-sql.ps1)"
+        Write-Phase "Phase 1.1: SQL Server prerequisites (02-prereqs-sql.ps1)"
         & "$scriptDir\02-prereqs-sql.ps1" -AppDbUsername $AppDbUsername -AppDbPassword $AppDbPassword -DatabaseName $DatabaseName
     } else {
-        Write-Phase "Phase 1.1: PostgreSQL prereqs"
+        Write-Phase "Phase 1.1: PostgreSQL prerequisites"
         if ($UsePostgresDocker) {
             # Generate windows-install\docker\.env from the postgres defaults of
             # production.js-edfi (so the docker container, the app config, and
@@ -548,7 +548,7 @@ POSTGRES_PORT_EXPOSED=$PostgresPort
                 }
                 Set-Acl -Path $envPath -AclObject $envAcl
             } catch {
-                Write-Warning "Could not restrict the ACL on $envPath ($($_.Exception.Message)). It holds the Postgres passwords -- protect it manually."
+                Write-Warning "Could not restrict the access control list (ACL) on $envPath ($($_.Exception.Message)). It holds the Postgres passwords -- protect it manually."
             }
 
             Push-Location $dockerDir
@@ -619,7 +619,7 @@ ALTER SCHEMA public OWNER TO "$pgAppUserId";
         }
     }
 
-    Write-Phase "Phase 1.2: IIS prereqs (01-prereqs-iis.ps1)"
+    Write-Phase "Phase 1.2: IIS prerequisites (01-prereqs-iis.ps1)"
     & "$scriptDir\01-prereqs-iis.ps1"
 
     # Phase 1.3: stand up Yopass (only when asked). The derived URL was already
@@ -679,7 +679,7 @@ if ($idpIsKeycloak) {
     & "$scriptDir\idp-keycloak-setup.ps1" @kcArgs
 } else {
     Write-Phase "Phase 3.1: External OIDC provider ($IdpProvider)"
-    Write-Host "Skipping local IdP setup -- using external provider '$IdpProvider'." -ForegroundColor Cyan
+    Write-Host "Skipping local identity-provider (IdP) setup -- using external provider '$IdpProvider'." -ForegroundColor Cyan
     $disco = "$($OidcIssuer.TrimEnd('/'))/.well-known/openid-configuration"
     Write-Host "Validating OIDC discovery at $disco ..."
     # PS 5.1's default ServicePointManager protocol can exclude TLS 1.2, which fails
@@ -717,9 +717,9 @@ $apiArgs = @{
     # (Previously this wasn't forwarded, so -YopassUrl on install-all was a no-op.)
     YopassUrl            = $EffectiveYopassUrl
 }
-# TLS: https URLs + HTTPS port + cert. ApiUrl/FeUrl flow into production.js
+# TLS: https URLs + HTTPS port + certificate. ApiUrl/FeUrl flow into production.js
 # (MY_URL/FE_URL/WHITELISTED_REDIRECTS via NODE_CONFIG) so the OIDC callback is https.
-# 05 resolves the cert (self-signed if none supplied) and 06 reuses it, so both
+# 05 resolves the certificate (self-signed if none supplied) and 06 reuses it, so both
 # sites share one certificate.
 $apiArgs.ApiUrl = $ApiUrl
 $apiArgs.FeUrl  = $FeUrl
@@ -748,7 +748,7 @@ if ((Test-Path $deployedProdJs) -and ((Get-Content $deployedProdJs -Raw) -match 
     $DbEncryptionKey = $Matches[1]
 }
 
-Write-Phase "Phase 3.3: Deploy FE (06-deploy-fe.ps1)"
+Write-Phase "Phase 3.3: Deploy the web application (06-deploy-fe.ps1)"
 $feArgs = @{
     SourcePath = "$SourcePath\dist\packages\fe"
     ApiUrl     = $ApiUrl
@@ -761,13 +761,13 @@ if ($SkipSelfSignedTrust)   { $feArgs.SkipSelfSignedTrust   = $true }
 & "$scriptDir\06-deploy-fe.ps1" @feArgs
 
 # ---------- Smoke test ----------
-Write-Phase "Smoke test: hitting the API"
+Write-Phase "Smoke test: validate the API is running"
 
 # The API (node, launched by httpPlatform) lazy-starts on first request, so the first hit can be slow. Retry briefly.
 # Smoke test via curl.exe. PS 5.1's Invoke-WebRequest can't reliably complete the
 # TLS handshake to the self-signed https binding ("unexpected error on send"), even
-# with a cert-validation bypass and Tls12 forced; curl.exe (bundled since Win10 1803
-# / Server 2019) handles it. -k accepts the self-signed cert. ~3 minutes of retries:
+# with a certificate-validation bypass and Tls12 forced; curl.exe (bundled since Win10 1803
+# / Server 2019) handles it. -k accepts the self-signed certificate. ~3 minutes of retries:
 # a fresh cold start runs migrations + catalog sync, which can exceed a minute on a
 # slow box. The post-boot steps below are gated on this. A non-5xx (and non-000)
 # status means node is up (401 without a token).
@@ -834,8 +834,8 @@ if ($apiOk) {
     #   1. Seed migration ran and inserted the user with roleId=2 -- both
     #      statements below are no-ops.
     #   2. Migrations created the [user] table but the seed didn't fire (we
-    #      observed this on a clean VM run) -- INSERT runs, user gets roleId=2.
-    #   3. The user exists but with NULL roleId (auth-flow auto-create path) --
+    #      observed this on a clean virtual machine run) -- INSERT runs, user gets roleId=2.
+    #   3. The user exists but with NULL roleId (authentication-flow auto-create path) --
     #      UPDATE corrects it.
     Write-Host "Ensuring '$AdminUsername' exists with admin role..."
     if ($DbEngine -eq 'mssql') {
@@ -898,7 +898,7 @@ UPDATE "user" SET "roleId" = 2, "isActive" = true
     # If a prior oidc row existed the new id != 1 and the registered redirect URI
     # no longer matches what the app sends -> login fails. Read the real id of the
     # row we manage (seeded/upserted for $OidcClientId) and use it for the redirect
-    # URI. Runs for every provider; the id is a DB-row property, not provider-specific.
+    # URI. Runs for every provider; the id is a database-row property, not provider-specific.
     $oidcRowId = 1
     $oidcClientIdSql = $OidcClientId -replace "'", "''"
     if ($DbEngine -eq 'mssql') {
@@ -953,7 +953,7 @@ UPDATE "user" SET "roleId" = 2, "isActive" = true
 # ---------- Done ----------
 Write-Phase "INSTALL COMPLETE"
 
-# Build the DB-specific section of the summary first so the main here-string
+# Build the database-specific section of the summary first so the main here-string
 # below stays simple.
 if ($DbEngine -eq 'mssql') {
     $dbSummary = @"
@@ -1025,14 +1025,14 @@ Identity Provider (external: $IdpProvider)
   Issuer:             $OidcIssuer
   Client ID:          $OidcClientId
   Account URL:        $ViteIdpAccountUrl
-  Register in your IdP: redirect $ApiUrl/api/auth/callback/$oidcRowId, origin $FeUrl
-  Sign in as the IdP user whose email/username = $AdminUsername
+  Register in your identity provider (IdP): redirect $ApiUrl/api/auth/callback/$oidcRowId, origin $FeUrl
+  Sign in as the identity provider user whose email/username = $AdminUsername
 "@
 }
 
 # The encryption key is generated by the installer (the user never supplied it),
 # so it must be persisted for backup. It is the one secret kept in the summary
-# FILE -- which is ACL-locked below -- but redacted from the console copy.
+# FILE -- which is access control list-locked below -- but redacted from the console copy.
 $encryptionSummary = @"
 
 Data encryption key (aes-256-cbc, ODS/API environment secrets)
@@ -1061,7 +1061,7 @@ $yopassSummary
 $encryptionSummary
 
 Notes
-  - TLS is on by default. The FE and API are served over HTTPS from standalone IIS
+  - TLS is on by default. The web application and API are served over HTTPS from standalone IIS
     sites on ports 4443 and 3443; the HTTP ports 4200 and 3333 redirect to HTTPS.
   - User-supplied secrets are NOT stored here -- re-enter the values you passed.
   - This file's ACL is restricted to Administrators and SYSTEM because it holds the
@@ -1071,7 +1071,7 @@ Notes
 # Persist alongside the source tree (one level above the scripts folder by
 # default) so the user can recover the generated key later. Lives outside the
 # scripts folder because it's an install artifact, not a script. The console copy
-# redacts the generated key (the file is the ACL-protected place it lives).
+# redacts the generated key (the file is the access control list-protected place it lives).
 $summaryConsole = $summary.Replace($DbEncryptionKey, "(written to the protected install-summary.txt -- Administrators only)")
 Write-Host $summaryConsole -ForegroundColor Green
 $summaryDir = Split-Path $SourcePath -Parent   # e.g., C:\Ed-Fi
@@ -1082,7 +1082,7 @@ Set-Content -Path $summaryPath -Value $summary -Encoding UTF8
 # The summary holds the generated encryption key; C:\Ed-Fi is otherwise
 # world-readable. Restrict the file to Administrators + SYSTEM (well-known SIDs,
 # so this is locale-independent) and drop inherited access. The install is already
-# complete here, so an ACL failure warns rather than aborting the whole run.
+# complete here, so an access control list failure warns rather than aborting the whole run.
 try {
     $acl = New-Object System.Security.AccessControl.FileSecurity
     $acl.SetAccessRuleProtection($true, $false)
@@ -1093,19 +1093,19 @@ try {
     Set-Acl -Path $summaryPath -AclObject $acl
     $summaryAccess = "Administrators-only"
 } catch {
-    Write-Warning "Could not restrict the ACL on $summaryPath ($($_.Exception.Message)). It holds the encryption key -- protect or delete it manually."
+    Write-Warning "Could not restrict the access control list (ACL) on $summaryPath ($($_.Exception.Message)). It holds the encryption key -- protect or delete it manually."
     $summaryAccess = "WARNING: ACL not restricted -- protect it manually"
 }
 
 Write-Host ""
 Write-Host "Saved to: $summaryPath ($summaryAccess)" -ForegroundColor Cyan
 if ($summaryAccess -eq "Administrators-only") {
-    Write-Host "  Open it from an ELEVATED editor to read the encryption key (a non-elevated session is denied by UAC)." -ForegroundColor DarkGray
+    Write-Host "  Open it from an ELEVATED editor to read the encryption key (a non-elevated session is denied by User Account Control (UAC))." -ForegroundColor DarkGray
 }
 
 # Upstream-TLS heads-up: with SSL_VERIFICATION on (the default), adding an
 # Environment against a self-signed/dev ODS/API or Admin API is rejected. Surface
-# the remedies here so the user isn't left debugging a cert error in the API log.
+# the remedies here so the user isn't left debugging a certificate error in the API log.
 if (-not $DisableSslVerification) {
     Write-Host ""
     Write-Host "Note: the API verifies upstream TLS certificates (SSL_VERIFICATION is on)." -ForegroundColor Yellow

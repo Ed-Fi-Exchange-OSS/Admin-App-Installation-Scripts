@@ -1,16 +1,16 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-Tears down the optional local Keycloak IdP that idp-keycloak-setup.ps1 stands up:
-stops the Keycloak process, deletes the Keycloak install dir, and unsets the
+Tears down the optional local Keycloak identity provider that idp-keycloak-setup.ps1 stands up:
+stops the Keycloak process, deletes the Keycloak install directory, and unsets the
 Machine JAVA_HOME. The JDK install itself is left in place.
 
 .DESCRIPTION
 Steps (each best-effort, continues past individual failures):
   1. Stop any running Keycloak process (java.exe whose command line matches
      kc.bat / keycloak / quarkus, plus a java.exe listening on :8080).
-  2. Delete the Keycloak install dir (unless -KeepKeycloakDownload).
-  3. Unset the Machine env var JAVA_HOME.
+  2. Delete the Keycloak install directory (unless -KeepKeycloakDownload).
+  3. Unset the Machine environment variable JAVA_HOME.
 
 Does NOT touch the JDK install, Node.js, SQL Server, IIS, or the AdminApp's own
 state. Use uninstall.ps1 for the generic AdminApp teardown.
@@ -21,7 +21,7 @@ Prompts for confirmation by default. Pass -Force for non-interactive runs.
 Default: C:\keycloak.
 
 .PARAMETER KeepKeycloakDownload
-Switch -- leave the Keycloak install dir in place (just stop the process and
+Switch -- leave the Keycloak install directory in place (just stop the process and
 unset JAVA_HOME).
 
 .PARAMETER Force
@@ -66,12 +66,12 @@ function Write-Section {
 
 # Confirmation
 Write-Host ""
-Write-Host "Keycloak (local IdP) -- UNINSTALL" -ForegroundColor Magenta
+Write-Host "Keycloak (local identity provider) -- UNINSTALL" -ForegroundColor Magenta
 Write-Host "This will remove:"
 Write-Host "  - Running Keycloak process (java.exe matching kc.bat/keycloak/quarkus, plus the :8080 listener)"
 Write-Host "  - Startup Scheduled Task 'Ed-Fi Admin App Keycloak' (if registered)"
-if (-not $KeepKeycloakDownload) { Write-Host "  - $KeycloakInstallPath (Keycloak install dir)" }
-Write-Host "  - Machine env var JAVA_HOME"
+if (-not $KeepKeycloakDownload) { Write-Host "  - $KeycloakInstallPath (Keycloak install directory)" }
+Write-Host "  - Machine environment variable JAVA_HOME"
 Write-Host ""
 Write-Host "Leaves alone: the JDK install, Node.js, SQL Server, IIS, and the AdminApp's own state (use uninstall.ps1 for those)." -ForegroundColor DarkGray
 Write-Host ""
@@ -99,7 +99,7 @@ try {
     foreach ($p in $kcJava) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
         $killedPids[$p.ProcessId] = $true
-        Record "Stop java.exe PID $($p.ProcessId)" "OK" "Keycloak match in cmdline"
+        Record "Stop java.exe process ID $($p.ProcessId)" "OK" "Keycloak match in command line"
         $kcStopped = $true
     }
 } catch {
@@ -114,10 +114,10 @@ try {
         $proc = Get-Process -Id $listenerPid -ErrorAction SilentlyContinue
         if ($proc -and $proc.ProcessName -eq 'java') {
             Stop-Process -Id $listenerPid -Force -ErrorAction Stop
-            Record "Stop java.exe listener on :8080 (PID $listenerPid)" "OK"
+            Record "Stop java.exe listener on :8080 (process ID $listenerPid)" "OK"
             $kcStopped = $true
         } elseif ($proc) {
-            Record "Listener on :8080 is $($proc.ProcessName) (PID $listenerPid)" "SKIP" "Not java.exe -- leaving alone"
+            Record "Listener on :8080 is $($proc.ProcessName) (process ID $listenerPid)" "SKIP" "Not java.exe -- leaving alone"
         }
     }
 } catch {
@@ -155,7 +155,7 @@ try {
 }
 
 # ========================================================
-Write-Section "2. Keycloak install dir"
+Write-Section "2. Keycloak install directory"
 # ========================================================
 if ($KeepKeycloakDownload) {
     Record "Delete $KeycloakInstallPath" "SKIP" "-KeepKeycloakDownload"
@@ -177,12 +177,12 @@ try {
     $cur = [Environment]::GetEnvironmentVariable("JAVA_HOME", "Machine")
     if ($cur) {
         [Environment]::SetEnvironmentVariable("JAVA_HOME", $null, "Machine")
-        Record "Unset Machine env JAVA_HOME" "OK" "Was: $cur"
+        Record "Unset Machine environment variable JAVA_HOME" "OK" "Was: $cur"
     } else {
-        Record "Unset Machine env JAVA_HOME" "SKIP" "Not set"
+        Record "Unset Machine environment variable JAVA_HOME" "SKIP" "Not set"
     }
 } catch {
-    Record "Unset Machine env JAVA_HOME" "FAIL" $_.Exception.Message
+    Record "Unset Machine environment variable JAVA_HOME" "FAIL" $_.Exception.Message
 }
 
 # ========================================================
@@ -203,6 +203,6 @@ if ($fail -gt 0) {
     exit 1
 } else {
     Write-Host "Uninstall complete." -ForegroundColor Green
-    Write-Host "Open a fresh PowerShell window to pick up the cleared env vars before re-installing." -ForegroundColor Yellow
+    Write-Host "Open a fresh PowerShell window to pick up the cleared environment variables before re-installing." -ForegroundColor Yellow
     exit 0
 }

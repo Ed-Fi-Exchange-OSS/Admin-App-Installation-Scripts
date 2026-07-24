@@ -17,7 +17,7 @@ AdminApp's own TypeORM migrations create the schema the first time you start the
 
 ## Setup
 
-1. Copy the env template and set strong passwords:
+1. Copy the environment template and set strong passwords:
 
    ```powershell
    Copy-Item .env.example .env
@@ -32,7 +32,7 @@ AdminApp's own TypeORM migrations create the schema the first time you start the
    docker compose up -d
    ```
 
-   The `cert-init` service runs first and generates a self-signed cert into the `vol-edfiadminapp-certs` volume; the `postgres` service then starts with SSL enabled.
+   The `cert-init` service runs first and generates a self-signed certificate into the `vol-edfiadminapp-certs` volume; the `postgres` service then starts with SSL enabled.
 
 3. Watch first-boot init logs to confirm the user/grant statements ran:
 
@@ -59,7 +59,7 @@ From the host you can also connect with any PG client to `localhost:5432` using 
 
 ## Network exposure
 
-By default the DB port binds to `127.0.0.1` (loopback only), so the database is reachable only from this host. To expose it for remote access, set `POSTGRES_BIND_HOST=0.0.0.0` in `.env` — only behind a firewall and over TLS (this stack already serves SSL; use `sslmode=verify-full` on remote clients).
+By default the database port binds to `127.0.0.1` (loopback only), so the database is reachable only from this host. To expose it for remote access, set `POSTGRES_BIND_HOST=0.0.0.0` in `.env` — only behind a firewall and over TLS (this stack already serves SSL; use `sslmode=verify-full` on remote clients).
 
 ## Connecting AdminApp v4.x to this database
 
@@ -75,7 +75,7 @@ By default the DB port binds to `127.0.0.1` (loopback only), so the database is 
 
 ### `DB_SSL` — pick one
 
-AdminApp builds its connection string as `?sslmode=require` when `DB_SSL=true`. The `pg-connection-string` library treats `require` as `verify-full` — i.e. Node verifies the server's certificate against a trusted CA. With our self-signed cert, that fails unless you tell Node to trust the cert.
+AdminApp builds its connection string as `?sslmode=require` when `DB_SSL=true`. The `pg-connection-string` library treats `require` as `verify-full` — i.e. Node verifies the server's certificate against a trusted CA. With our self-signed certificate, that fails unless you tell Node to trust the certificate.
 
 **Option 1 (recommended for local) — Disable SSL on the client.** SSL over `localhost` loopback adds no real security; this is the simplest setup.
 
@@ -84,9 +84,9 @@ AdminApp builds its connection string as `?sslmode=require` when `DB_SSL=true`. 
 DB_SSL: false,
 ```
 
-**Option 2 — Keep `DB_SSL: true` and trust the self-signed cert.**
+**Option 2 — Keep `DB_SSL: true` and trust the self-signed certificate.**
 
-1. Export the cert from the container to a host path:
+1. Export the certificate from the container to a host path:
 
    ```powershell
    docker cp edfiadminapp-postgres:/etc/postgresql/certs/server.crt C:\inetpub\EdFi-AdminApp-API\ssl\server.crt
@@ -114,11 +114,11 @@ docker compose down            # stop, keep data and cert
 docker compose down -v         # stop AND delete both volumes (fresh init + new cert)
 ```
 
-Because init scripts only run on a **fresh** data directory, changes to `init/*.sh` only take effect after `docker compose down -v` (or by removing the `vol-edfiadminapp-db` volume manually). Likewise the cert is regenerated only after the `vol-edfiadminapp-certs` volume is removed.
+Because init scripts only run on a **fresh** data directory, changes to `init/*.sh` only take effect after `docker compose down -v` (or by removing the `vol-edfiadminapp-db` volume manually). Likewise the certificate is regenerated only after the `vol-edfiadminapp-certs` volume is removed.
 
 ## Yopass (separate compose file)
 
-`docker-compose.yopass.yml` in this folder is an independent stack (compose project `edfiadminapp-yopass`) that runs [Yopass](https://github.com/jhaals/yopass) + memcached for one-time sharing of newly-created Ed-Fi API client credentials. It is unrelated to the database above and works with either DB engine.
+`docker-compose.yopass.yml` in this folder is an independent stack (compose project `edfiadminapp-yopass`) that runs [Yopass](https://github.com/jhaals/yopass) + memcached for one-time sharing of newly-created Ed-Fi API client credentials. It is unrelated to the database above and works with either database engine.
 
 ```powershell
 # Stand it up on host port 8082 (mapped to the container's port 80, pinned to
@@ -134,7 +134,7 @@ Configure the AdminApp with `USE_YOPASS=true` and `YOPASS_URL=http://localhost:8
 
 ## Notes and scope
 
-- **Self-signed SSL.** Good enough for local dev, not for production. For production, replace `vol-edfiadminapp-certs` with a bind mount to org-issued CA-signed cert/key, or pre-populate the volume.
-- **No pgAdmin.** This compose is Postgres only. For a UI, use your own pgAdmin/psql client, or the pgAdmin service bundled in the full stack under this repo's `compose/` directory (see below).
-- **No AdminApp services.** This compose is the database only. The full AdminApp + Keycloak + Yopass stack lives in this repo's `compose/` directory.
+- **Self-signed SSL.** Good enough for local dev, not for production. For production, replace `vol-edfiadminapp-certs` with a bind mount to org-issued CA-signed certificate/key, or pre-populate the volume.
+- **No pgAdmin.** This compose is Postgres only. For a UI, use your own pgAdmin/psql client, or the pgAdmin service bundled in the full stack under this repository's `compose/` directory (see below).
+- **No AdminApp services.** This compose is the database only. The full AdminApp + Keycloak + Yopass stack lives in this repository's `compose/` directory.
 - **AdminApp v4.x only.** The legacy .NET AdminApp uses `EdFi_Admin` + `EdFi_Security` and is not provisioned here — see the separate `Ed-Fi-ODS-Implementation` repository (`Docker/ods-api-db-admin/`) for that.

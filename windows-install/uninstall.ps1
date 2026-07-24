@@ -9,21 +9,21 @@ Steps (each best-effort, continues past individual failures):
 
   1. IIS teardown:
      - Remove the standalone sites 'EdFi-AdminApp-API' and 'EdFi-AdminApp-FE'.
-     - Remove the HTTPS SSL bindings and delete the auto-generated self-signed cert.
+     - Remove the HTTPS SSL bindings and delete the auto-generated self-signed certificate.
      - Revoke the App Pool's read+execute grant on the node directory.
      - Stop+remove App Pool 'EdFi-AdminApp-API'.
-     - Delete the deployed dirs C:\inetpub\EdFi-AdminApp-API and
+     - Delete the deployed directories C:\inetpub\EdFi-AdminApp-API and
        C:\inetpub\EdFi-AdminApp-FE.
   2. Database teardown (both engines, best-effort per engine):
      - MSSQL: DROP DATABASE [sbaa] and DROP LOGIN [edfi_adminapp] using Windows
-       Auth (runs as the current sysadmin account). Skipped when MSSQLSERVER
+       authentication (runs as the current sysadmin account). Skipped when MSSQLSERVER
        isn't running. Leaves Mixed Mode / TCP:1433 alone (instance-wide settings
        other apps may rely on).
      - PGSQL (docker): `docker compose down -v` from windows-install\docker so
-       the data + cert volumes are removed. Skipped when no
+       the data + certificate volumes are removed. Skipped when no
        edfiadminapp-postgres container exists. Without the -v, the volume
        persists with the OLD edfiadminapp password and TypeORM-created
-       tables, which causes auth/permission failures on the next install.
+       tables, which causes authentication/permission failures on the next install.
   2b. Yopass docker teardown (best-effort): `docker compose -f
      docker-compose.yopass.yml down -v` so the Yopass + memcached containers and
      their volumes are removed. Skipped when docker is absent or the
@@ -37,15 +37,15 @@ Steps (each best-effort, continues past individual failures):
      Informational only -- this step does not stop or delete anything.
   5. Print a summary of what succeeded and what didn't.
 
-The local Keycloak IdP (process, C:\keycloak, JAVA_HOME) is NOT touched here.
+The local Keycloak identity provider (process, C:\keycloak, JAVA_HOME) is NOT touched here.
 Use uninstall-keycloak.ps1 for that.
 
 Does NOT touch:
   - Node.js, JDK, SQL Server, IIS engine installs.
   - URL Rewrite Module, httpPlatform handler (system-level MSIs).
-  - The Admin App source checkout (a separate repo, e.g. C:\Ed-Fi\Ed-Fi-AdminApp)
+  - The Admin App source checkout (a separate repository, e.g. C:\Ed-Fi\Ed-Fi-AdminApp)
     that install-all.ps1 clones or that you pass via -SourcePath.
-  - install-summary.txt next to the repo (run with -RemoveSummary to delete).
+  - install-summary.txt next to the repository (run with -RemoveSummary to delete).
 
 Prompts for confirmation by default. Pass -Force for non-interactive runs.
 
@@ -67,18 +67,18 @@ Default: C:\npm-cache.
 Default: EdFi-AdminApp-API.
 
 .PARAMETER StandaloneFeSiteName
-Name of the FE site created by 06-deploy-fe.ps1. Default: EdFi-AdminApp-FE.
+Name of the web application site created by 06-deploy-fe.ps1. Default: EdFi-AdminApp-FE.
 (The API site name is the App Pool name, $AppPoolName.)
 
 .PARAMETER StandaloneFeAppPoolName
-Name of the dedicated FE App Pool created by 06-deploy-fe.ps1. Default:
+Name of the dedicated web application App Pool created by 06-deploy-fe.ps1. Default:
 EdFi-AdminApp-FE.
 
 .PARAMETER ApiDestPath
 The deployed API directory to delete. Default: C:\inetpub\EdFi-AdminApp-API.
 
 .PARAMETER FeDestPath
-The deployed FE directory to delete. Default: C:\inetpub\EdFi-AdminApp-FE.
+The deployed web application directory to delete. Default: C:\inetpub\EdFi-AdminApp-FE.
 
 .PARAMETER KeepDatabase
 Switch — skip the DROP DATABASE step.
@@ -87,8 +87,8 @@ Switch — skip the DROP DATABASE step.
 Switch — leave C:\npm-cache in place.
 
 .PARAMETER RemoveSummary
-Switch — also delete the install-summary.txt next to the repo (the file
-install-all.ps1 wrote at the parent of the repo directory).
+Switch — also delete the install-summary.txt next to the repository (the file
+install-all.ps1 wrote at the parent of the repository directory).
 
 .PARAMETER Force
 Switch — skip the confirmation prompt.
@@ -111,7 +111,7 @@ param(
     [string]$FeDestPath = "C:\inetpub\EdFi-AdminApp-FE",
     [int]$HttpsApiPort = 3443,
     [int]$HttpsFePort = 4443,
-    # Summary is written by install-all.ps1 to the parent of the repo dir
+    # Summary is written by install-all.ps1 to the parent of the repository directory
     # (i.e. grandparent of windows-install\). Auto-resolve the same way.
     [string]$SummaryPath = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "install-summary.txt"),
 
@@ -151,16 +151,16 @@ function Write-Section {
 Write-Host ""
 Write-Host "Ed-Fi Admin App -- UNINSTALL" -ForegroundColor Magenta
 Write-Host "This will remove:"
-Write-Host "  - Standalone IIS sites '$AppPoolName' (API) and '$StandaloneFeSiteName' (FE)"
-Write-Host "  - IIS App Pools '$AppPoolName' (API) and '$StandaloneFeAppPoolName' (FE)"
+Write-Host "  - Standalone IIS sites '$AppPoolName' (API) and '$StandaloneFeSiteName' (web application)"
+Write-Host "  - IIS App Pools '$AppPoolName' (API) and '$StandaloneFeAppPoolName' (web application)"
 Write-Host "  - HTTPS SSL bindings + the auto-generated self-signed certificate"
-Write-Host "  - Deployed dirs: $ApiDestPath and $FeDestPath"
+Write-Host "  - Deployed directories: $ApiDestPath and $FeDestPath"
 if (-not $KeepDatabase)         {
     Write-Host "  - SQL database [$DatabaseName] + login [$AppDbUsername] (if MSSQLSERVER is running)"
     Write-Host "  - Docker postgres container + volumes (if edfiadminapp-postgres exists)"
 }
 Write-Host "  - Docker Yopass stack (edfiadminapp-yopass + memcached) and its volumes (if present)"
-if (-not $KeepNpmCache)         { Write-Host "  - $NpmCachePath (npm cache dir)" }
+if (-not $KeepNpmCache)         { Write-Host "  - $NpmCachePath (npm cache directory)" }
 if ($RemoveSummary)             { Write-Host "  - $SummaryPath" }
 Write-Host ""
 Write-Host "Leaves alone: Node.js, JDK, SQL Server, IIS, URL Rewrite, httpPlatform handler, source repo." -ForegroundColor DarkGray
@@ -186,7 +186,7 @@ try {
 }
 
 if ($iisAvailable) {
-    # Remove the two standalone AdminApp sites (API named after the App Pool, FE).
+    # Remove the two standalone AdminApp sites (API named after the App Pool, web application).
     foreach ($siteName in @($AppPoolName, $StandaloneFeSiteName)) {
         try {
             $site = Get-Website -Name $siteName -ErrorAction SilentlyContinue
@@ -206,8 +206,8 @@ if ($iisAvailable) {
 
     # TLS teardown: Remove-Website above dropped each site's https binding, but the
     # HTTP.sys SSL certificate registration (IIS:\SslBindings) persists separately --
-    # remove it so a reinstall rebinds cleanly. Then delete the self-signed cert we
-    # generated (matched by FriendlyName); a user-supplied cert is left untouched.
+    # remove it so a reinstall rebinds cleanly. Then delete the self-signed certificate we
+    # generated (matched by FriendlyName); a user-supplied certificate is left untouched.
     foreach ($httpsPort in @($HttpsApiPort, $HttpsFePort)) {
         $sslPath = "IIS:\SslBindings\0.0.0.0!$httpsPort"
         try {
@@ -221,7 +221,7 @@ if ($iisAvailable) {
             Record "Remove SSL binding 0.0.0.0:$httpsPort" "FAIL" $_.Exception.Message
         }
     }
-    # Remove our self-signed cert from BOTH the personal store (My, where it's
+    # Remove our self-signed certificate from BOTH the personal store (My, where it's
     # generated) and the trusted root store (Root, where 05/06 add it so local
     # browsers trust it). Match only OUR FriendlyName so unrelated localhost roots
     # (dotnet dev-certs, IIS Express, ...) are never touched.
@@ -258,12 +258,12 @@ if ($iisAvailable) {
     if ($nodeDir -and (Test-Path $nodeDir)) {
         try {
             & icacls $nodeDir /remove:g "IIS APPPOOL\$AppPoolName" | Out-Null
-            Record "Revoke App Pool grant on node dir" "OK" $nodeDir
+            Record "Revoke App Pool grant on node directory" "OK" $nodeDir
         } catch {
-            Record "Revoke App Pool grant on node dir" "WARN" $_.Exception.Message
+            Record "Revoke App Pool grant on node directory" "WARN" $_.Exception.Message
         }
     } else {
-        Record "Revoke App Pool grant on node dir" "SKIP" "node dir not resolved"
+        Record "Revoke App Pool grant on node directory" "SKIP" "node directory not resolved"
     }
 
     # Stop + remove App Pool
@@ -282,11 +282,11 @@ if ($iisAvailable) {
         Record "Remove App Pool '$AppPoolName'" "FAIL" $_.Exception.Message
     }
 
-    # Stop + remove the dedicated FE App Pool (06-deploy-fe.ps1 creates it so the
+    # Stop + remove the dedicated web application App Pool (06-deploy-fe.ps1 creates it so the
     # SPA no longer rides DefaultAppPool). Guarded so we never touch DefaultAppPool.
     try {
         if ($StandaloneFeAppPoolName -eq 'DefaultAppPool') {
-            Record "Remove FE App Pool" "SKIP" "Refusing to remove DefaultAppPool"
+            Record "Remove web application App Pool" "SKIP" "Refusing to remove DefaultAppPool"
         } elseif (Test-Path "IIS:\AppPools\$StandaloneFeAppPoolName") {
             $feState = (Get-WebAppPoolState -Name $StandaloneFeAppPoolName -ErrorAction SilentlyContinue).Value
             if ($feState -eq 'Started') {
@@ -306,7 +306,7 @@ if ($iisAvailable) {
 # httpPlatform runs node as a child process; removing the App Pool above should
 # terminate it, but it can briefly outlive the pool and keep its stdout log open,
 # which blocks the directory delete. Kill any node process whose command line
-# references this deployment directory (parsing the PID out of the stdout-log
+# references this deployment directory (parsing the process ID out of the stdout-log
 # filename is fragile -- LeXtudio HttpBridge and Microsoft HttpPlatformHandler
 # name those logs differently), then retry the delete a few times.
 foreach ($dir in @($ApiDestPath, $FeDestPath)) {
@@ -337,7 +337,7 @@ foreach ($dir in @($ApiDestPath, $FeDestPath)) {
 # ========================================================
 Write-Section "2. Database (mssql and/or pgsql docker)"
 # ========================================================
-# Try SQL Server first (drop the AdminApp DB if present), then the docker
+# Try SQL Server first (drop the AdminApp database if present), then the docker
 # postgres compose down. Both branches are best-effort and idempotent -- they
 # SKIP cleanly when their respective engine isn't actually in use on this box.
 # -KeepDatabase short-circuits both.
@@ -370,13 +370,13 @@ END
 IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$safeUserLiteral' AND type = 'S')
     DROP LOGIN [$safeUser];
 "@
-        # Windows Auth via (local): dropping a database and a server login both
+        # Windows authentication via (local): dropping a database and a server login both
         # require server-level privilege the app login (db_owner only) lacks, so
         # the teardown runs as the current sysadmin account.
         try {
             & sqlcmd -S "(local)" -E -Q $dropQuery -t 30 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
-                Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "OK" "Windows Auth"
+                Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "OK" "Windows Authentication"
             } else {
                 Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "FAIL" "sqlcmd exit $LASTEXITCODE"
             }
@@ -387,9 +387,9 @@ IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$safeUserLiteral' 
 
     # --- pgsql docker ---------------------------------------------------------
     # Run `docker compose down -v` from windows-install\docker so the persisted
-    # data + cert volumes are removed. Without -v the volume keeps the OLD
+    # data + certificate volumes are removed. Without -v the volume keeps the OLD
     # edfiadminapp password and any tables created by an earlier TypeORM run,
-    # which causes auth/permission failures on the next install.
+    # which causes authentication/permission failures on the next install.
     $dockerDir = Join-Path $PSScriptRoot "docker"
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Record "Docker postgres down -v" "SKIP" "docker not on PATH"
@@ -497,11 +497,11 @@ if ($RemoveSummary) {
 # ========================================================
 Write-Section "4. Keycloak leftovers (informational)"
 # ========================================================
-# This script does not touch the local Keycloak IdP. If leftovers from
+# This script does not touch the local Keycloak identity provider. If leftovers from
 # idp-keycloak-setup.ps1 are present, point the user at uninstall-keycloak.ps1.
 # Informational only -- nothing here is stopped or deleted.
 $kcLeftovers = @()
-if (Test-Path $KeycloakInstallPath) { $kcLeftovers += "install dir $KeycloakInstallPath" }
+if (Test-Path $KeycloakInstallPath) { $kcLeftovers += "install directory $KeycloakInstallPath" }
 if ([Environment]::GetEnvironmentVariable("JAVA_HOME", "Machine")) { $kcLeftovers += "Machine JAVA_HOME" }
 try {
     $kcProc = Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
@@ -510,7 +510,7 @@ try {
 } catch { }
 if ($kcLeftovers.Count -gt 0) {
     Write-Host "Keycloak leftovers detected: $($kcLeftovers -join '; ')" -ForegroundColor Yellow
-    Write-Host "These were NOT removed. Run uninstall-keycloak.ps1 to remove the local Keycloak IdP." -ForegroundColor Yellow
+    Write-Host "These were NOT removed. Run uninstall-keycloak.ps1 to remove the local Keycloak identity provider (IdP)." -ForegroundColor Yellow
 } else {
     Write-Host "No Keycloak leftovers detected." -ForegroundColor DarkGray
 }

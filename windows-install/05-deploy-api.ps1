@@ -8,17 +8,17 @@ Deploys the Ed-Fi Admin App API to IIS via the httpPlatform handler.
 - Creates/configures the IIS App Pool (LoadUserProfile=true, no managed runtime)
 - Creates or updates the IIS application (under a parent site) or standalone site
 - Writes the httpPlatform web.config (handler + <httpPlatform> block)
-- Patches production.js with bare-metal values (DB, API/FE URLs, OIDC)
+- Patches production.js with bare-metal values (database, API/web application URLs, OIDC)
 - Sets icacls permissions for the App Pool user
 
 Run AFTER:
   - 02-prereqs-sql.ps1 (SQL ready)
   - 01-prereqs-iis.ps1 (IIS + httpPlatform handler ready)
   - 03-prereqs-node.ps1 (Node, npm cache ready)
-  - `npm ci --legacy-peer-deps` and `npm run build:api` in the source repo
+  - `npm ci --legacy-peer-deps` and `npm run build:api` in the source repository
 
 .PARAMETER SourcePath
-The built API output folder. Typically the repo root, containing main.js +
+The built API output folder. Typically the repository root, containing main.js +
 packages\ + node_modules\.
 
 .PARAMETER DestPath
@@ -33,7 +33,7 @@ HTTP port for the standalone API site (EdFi-AdminApp-API). Default: 3333.
 
 .PARAMETER AppDbUsername
 The dedicated least-privilege SQL login the Admin App connects as, provisioned by
-02-prereqs-sql.ps1 (db_owner on the app DB, not sa). Written into production.js as
+02-prereqs-sql.ps1 (db_owner on the app database, not sa). Written into production.js as
 MSSQL_DB_USERNAME. Default: edfi_adminapp.
 
 .PARAMETER AppDbPassword
@@ -50,7 +50,7 @@ OIDC issuer URL. Default (Keycloak example): http://localhost:8080/realms/edfi.
 OIDC client id. Default (Keycloak example): edfiadminapp.
 
 .PARAMETER OidcClientSecret
-OIDC client secret (the secret configured on the client in your IdP).
+OIDC client secret (the secret configured on the client in your identity provider).
 
 .PARAMETER OidcScope
 OIDC scopes requested at login. Default: 'openid email profile'.
@@ -90,7 +90,7 @@ param(
 
     # SQL Server credentials the Admin App connects as at runtime. Required only
     # when -DbEngine is 'mssql'. This is the dedicated least-privilege login
-    # provisioned by 02-prereqs-sql.ps1 (db_owner on the app DB, not sa).
+    # provisioned by 02-prereqs-sql.ps1 (db_owner on the app database, not sa).
     [string]$AppDbUsername = "edfi_adminapp",
     [SecureString]$AppDbPassword,
 
@@ -115,7 +115,7 @@ param(
     [string]$OidcScope = "openid email profile",
 
     # URLs baked into production.js (MY_URL/FE_URL). Defaults are https on the
-    # mirror ports; TLS is always-on (see -HttpsPort and the cert params).
+    # mirror ports; TLS is always-on (see -HttpsPort and the certificate params).
     [string]$ApiUrl = "https://localhost:3443",
     [string]$FeUrl = "https://localhost:4443",
     [string]$AdminUsername = "admin@example.com",
@@ -144,24 +144,24 @@ param(
 
     # TLS. HTTPS is always-on: the site gets an https binding on -HttpsPort.
     # Certificate precedence: -CertificateThumbprint (an existing LocalMachine\My
-    # cert) -> -CertificatePfxPath (+ -CertificatePassword; imported) -> a self-signed
-    # cert auto-generated for localhost (keeps the local quick-start working; browsers
-    # warn on the untrusted cert). The HTTP site stays bound only to 301-redirect to HTTPS.
+    # certificate) -> -CertificatePfxPath (+ -CertificatePassword; imported) -> a self-signed
+    # certificate auto-generated for localhost (keeps the local quick-start working; browsers
+    # warn on the untrusted certificate). The HTTP site stays bound only to 301-redirect to HTTPS.
     [int]$HttpsPort = 3443,
     [string]$CertificateThumbprint = "",
     [string]$CertificatePfxPath = "",
     [SecureString]$CertificatePassword,
 
-    # By default the auto-generated self-signed cert is added to LocalMachine\Root so
+    # By default the auto-generated self-signed certificate is added to LocalMachine\Root so
     # local browsers trust it (no "Not Secure" warning). Set this to skip that where
     # policy forbids adding trusted roots; the browser will then warn. Only affects the
-    # self-signed path -- a supplied real cert is never added to Root.
+    # self-signed path -- a supplied real certificate is never added to Root.
     [switch]$SkipSelfSignedTrust,
 
     # SSL verification for the API's OUTBOUND HTTPS calls (to the ODS/API, AdminApi,
     # and Yopass). Secure by default (verification on). Set this to disable it when an
     # upstream uses a self-signed/dev certificate that Node's CA store won't trust
-    # (Node ignores the Windows cert store); prefer NODE_EXTRA_CA_CERTS over this
+    # (Node ignores the Windows certificate store); prefer NODE_EXTRA_CA_CERTS over this
     # where possible. Do not disable in production.
     [switch]$DisableSslVerification
 )
@@ -186,11 +186,11 @@ if ($DbEngine -eq 'pgsql' -and -not $PgDbPassword) {
     throw "-PgDbPassword is required when -DbEngine is 'pgsql'."
 }
 
-# The Admin App builds its DB connection string as a URL and interpolates the DB
+# The Admin App builds its database connection string as a URL and interpolates the database
 # credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
 # that are structural in a URL (or need percent-encoding) corrupt the parsed password,
 # so the API fails to connect with an opaque "Login failed for user". Until the Admin
-# App URL-encodes its credentials (the real fix), restrict the DB password to characters
+# App URL-encodes its credentials (the real fix), restrict the database password to characters
 # that are safe unencoded in a URL. This does NOT weaken the password: SQL's CHECK_POLICY
 # needs 3 of 4 categories and upper+lower+digit alone satisfies it (symbols stay optional).
 # Example passwords such as 'YourStrong!Passw0rd' and 'EdFi-App-Local!2026' remain valid.
@@ -200,7 +200,7 @@ function Test-DbPasswordUrlSafe {
         [Parameter(Mandatory = $true)][string]$Label
     )
     if ($Password -match '[^A-Za-z0-9!$()*,._~-]') {
-        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form DB connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its DB credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
+        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form database connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its database credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
     }
 }
 
@@ -214,7 +214,7 @@ $AppDbPasswordPlain    = if ($AppDbPassword)    { [System.Net.NetworkCredential]
 $PgDbPasswordPlain     = if ($PgDbPassword)     { [System.Net.NetworkCredential]::new('', $PgDbPassword).Password } else { $null }
 $OidcClientSecretPlain = if ($OidcClientSecret) { [System.Net.NetworkCredential]::new('', $OidcClientSecret).Password } else { $null }
 
-# Reject a DB password with URL-breaking characters. Guards a standalone 05 re-run --
+# Reject a database password with URL-breaking characters. Guards a standalone 05 re-run --
 # the install-all smoke-test failure message points operators straight here to redeploy.
 if ($DbEngine -eq 'mssql') { Test-DbPasswordUrlSafe -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)" }
 if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbPasswordPlain  -Label "Postgres app user (-PgDbPassword)" }
@@ -227,7 +227,7 @@ if (-not (Test-Path "$apiBuildDir\main.js")) {
 # Selective copy. The deployment needs three pieces, NOT a full source-tree mirror:
 #   1. Built API output (main.js + assets\)             from dist\packages\api\
 #   2. Config files (production.js etc.)                from packages\api\config\
-#   3. node_modules (runtime deps)                      from repo root
+#   3. node_modules (runtime deps)                      from repository root
 # Each piece is mirrored independently so /MIR doesn't wipe sibling content
 # (web.config, logs\, the other source piece).
 # Capture any already-deployed non-default encryption key BEFORE the file-copy
@@ -287,9 +287,9 @@ try {
 }
 
 # Resolve the TLS certificate for the HTTPS binding. Precedence: an explicit
-# thumbprint (already in LocalMachine\My) -> an imported PFX -> a self-signed cert
+# thumbprint (already in LocalMachine\My) -> an imported PFX -> a self-signed certificate
 # generated for localhost + this host. The self-signed path keeps the local
-# quick-start working with zero cert setup (an untrusted-cert browser warning is
+# quick-start working with zero certificate setup (an untrusted-certificate browser warning is
 # expected). Returns the resolved certificate thumbprint. WET-duplicated in
 # 06-deploy-fe.ps1 (windows-install has no shared module).
 function Resolve-HttpsCertificate {
@@ -322,7 +322,7 @@ function Resolve-HttpsCertificate {
     }
 
     # Self-signed fallback. Reuse a still-valid one we created before so re-runs
-    # (and the other site's deploy) share a single cert; else generate a fresh one.
+    # (and the other site's deploy) share a single certificate; else generate a fresh one.
     $cert = Get-ChildItem $storePath |
         Where-Object { $_.FriendlyName -eq $friendlyName -and $_.NotAfter -gt (Get-Date) } |
         Sort-Object NotAfter -Descending | Select-Object -First 1
@@ -333,9 +333,9 @@ function Resolve-HttpsCertificate {
         $cert = New-SelfSignedCertificate -DnsName 'localhost', $env:COMPUTERNAME `
             -CertStoreLocation $storePath -FriendlyName $friendlyName -NotAfter (Get-Date).AddYears(5)
     }
-    # Trust the self-signed cert on this machine (add the public cert to
+    # Trust the self-signed certificate on this machine (add the public certificate to
     # LocalMachine\Root) so local browsers don't show "Not Secure". Only the
-    # self-signed path does this -- a supplied real cert is already CA-trusted. Skip
+    # self-signed path does this -- a supplied real certificate is already CA-trusted. Skip
     # with -SkipTrust where policy forbids adding trusted roots. Idempotent; a
     # public-only copy carrying the same FriendlyName is stored so uninstall finds it.
     if (-not $SkipTrust) {
@@ -357,9 +357,9 @@ function Resolve-HttpsCertificate {
     return $cert.Thumbprint
 }
 
-# Add (idempotently) an HTTPS binding on the site and attach the cert. Mirror-port
-# model: API and FE each have their own HTTPS port, so no SNI/hostname is needed
-# (SslFlags 0). The cert is (re)bound every run so a replaced/rotated cert takes
+# Add (idempotently) an HTTPS binding on the site and attach the certificate. Mirror-port
+# model: API and web application each have their own HTTPS port, so no SNI/hostname is needed
+# (SslFlags 0). The certificate is (re)bound every run so a replaced/rotated certificate takes
 # effect. WET-duplicated in 06-deploy-fe.ps1.
 function Set-HttpsBinding {
     param(
@@ -377,7 +377,7 @@ function Set-HttpsBinding {
     Write-Host "Bound certificate $Thumbprint to 0.0.0.0:$HttpsPort."
 }
 
-# TLS (always-on): resolve the cert and add the HTTPS binding. The HTTP site created
+# TLS (always-on): resolve the certificate and add the HTTPS binding. The HTTP site created
 # above stays only to 301-redirect to HTTPS (redirect rule added to web.config in T3.2).
 $certThumbprint = Resolve-HttpsCertificate -Thumbprint $CertificateThumbprint -PfxPath $CertificatePfxPath -PfxPassword $CertificatePassword -SkipTrust:$SkipSelfSignedTrust
 Set-HttpsBinding -SiteName $AppPoolName -HttpsPort $HttpsPort -Thumbprint $certThumbprint
@@ -455,11 +455,11 @@ $webConfig = @'
 $webConfig = $webConfig.Replace('__NODE_EXE__', $nodeExe)
 $webConfig = $webConfig.Replace('__HTTPS_PORT__', "$HttpsPort")
 
-# HSTS only on a real hostname / CA-issued cert. On the default self-signed localhost
+# HSTS only on a real hostname / CA-issued certificate. On the default self-signed localhost
 # path, an HSTS pin would apply to the WHOLE 'localhost' host for a year (HSTS is
 # port-agnostic), silently rewriting other localhost HTTP services -- e.g. Keycloak
 # dev on :8080 -- to https and breaking the default login flow. Emit it only when the
-# operator supplied their own cert (which implies a real deployment behind a real name).
+# operator supplied their own certificate (which implies a real deployment behind a real name).
 if ($CertificateThumbprint -or $CertificatePfxPath) {
     $webConfig = $webConfig.Replace('__HSTS_HEADER__', '<add name="Strict-Transport-Security" value="max-age=31536000; includeSubDomains" />')
 } else {
@@ -490,7 +490,7 @@ if ($webConfigChanged) {
     Write-Host "web.config written."
 }
 
-# The source repo ships production.js as a thin stub (only FE_URL, DB_SSL,
+# The source repository ships production.js as a thin stub (only FE_URL, DB_SSL,
 # ENABLE_OPEN_API, WHITELISTED_REDIRECTS) and production.js-edfi as the full
 # Ed-Fi template (DB_SECRET_VALUE, OIDC config, etc.). The full template is
 # what the API actually needs; always overwrite from it before patching.
@@ -517,9 +517,9 @@ if (-not $DbEncryptionKey) {
 
 # Guard (defense-in-depth): a freshly generated key cannot decrypt environment
 # secrets written under a prior install's key. If we're deploying a NEW key but
-# the DB already holds environment rows, fail loudly instead of letting the app
+# the database already holds environment rows, fail loudly instead of letting the app
 # break with a generic "unexpected error". MSSQL only (the engine tested here);
-# a pgsql guard is a follow-up. Best-effort: an unreachable DB / missing table is
+# a pgsql guard is a follow-up. Best-effort: an unreachable database / missing table is
 # treated as "no data at risk".
 if ($freshKeyGenerated -and $DbEngine -eq 'mssql' -and -not $ForceKeyRotation) {
     $envCount = 0
@@ -559,13 +559,13 @@ if (Test-Path $prodJsTemplate) {
 }
 
 # Configure the deployed API. Two delivery paths:
-#   1. NODE_CONFIG (built here, injected on the App Pool env below): a JSON
+#   1. NODE_CONFIG (built here, injected on the App Pool environment below): a JSON
 #      document node-config deep-merges OVER production.js at load time. It
-#      carries every value that is plain data -- DB creds, URLs, OIDC, yopass,
+#      carries every value that is plain data -- database credentials, URLs, OIDC, yopass,
 #      admin user -- so those need no fragile text patching.
 #   2. Two residual production.js text patches that can't be expressed as JSON
 #      data: the per-install encryption KEY (install-all reads it back for the
-#      summary) and API_PORT (a JS expression reading a runtime env var). Both
+#      summary) and API_PORT (a JS expression reading a runtime environment variable). Both
 #      are guarded so a template-formatting change fails loudly instead of
 #      silently shipping a default (PR #234 Architecture concern #4 / T2.8).
 
@@ -637,7 +637,7 @@ if ($DisableSslVerification) {
 
 # Patch + scrub production.js. NODE_CONFIG overrides these at runtime, but the
 # moved secrets still sit at their template defaults on disk; scrub them so a
-# NODE_CONFIG load failure fails SAFE (bad creds -> loud error) rather than
+# NODE_CONFIG load failure fails SAFE (bad credentials -> loud error) rather than
 # falling back to a well-known default. Only write if something changed.
 $prodJsChanged = $false
 if (Test-Path $prodJs) {
@@ -652,7 +652,7 @@ if (Test-Path $prodJs) {
     $c = Set-ConfigAnchor $c "API_PORT:\s*[^,\r\n]+," "API_PORT: process.env.HTTP_PLATFORM_PORT || 3333," 'API_PORT'
 
     # Residual patch 2: per-install encryption key. Kept in production.js because
-    # install-all.ps1 reads it back for the (ACL-locked) install summary. The
+    # install-all.ps1 reads it back for the (access control list-locked) install summary. The
     # existing default-key check below is its silent-no-op guard.
     $c = $c.Replace("KEY: '$defaultKey',", "KEY: '$DbEncryptionKey',")
     if ($c -match $defaultKey) {
@@ -674,7 +674,7 @@ if (Test-Path $prodJs) {
         } catch {
             throw "Failed to write the patched production.js at $prodJs. Check the config folder is writable. Original: $($_.Exception.Message)"
         }
-        Write-Host "production.js patched (API_PORT + encryption key; default secrets scrubbed; app config delivered via NODE_CONFIG)."
+        Write-Host "production.js patched (API_PORT + encryption key; default secrets scrubbed; application configuration delivered via NODE_CONFIG)."
         $prodJsChanged = $true
     } else {
         Write-Host "production.js already has the desired values — not rewriting."
@@ -714,7 +714,7 @@ try {
 } catch {
     throw "Failed to set NPM_CONFIG_CACHE on the App Pool '$AppPoolName'. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
 }
-# NODE_CONFIG carries the structured app configuration (DB creds, URLs, OIDC,
+# NODE_CONFIG carries the structured app configuration (database credentials, URLs, OIDC,
 # yopass, admin user); node-config deep-merges it over production.js at boot.
 # Lives in the admin-only applicationHost.config, not the site's production.js.
 try {
@@ -727,7 +727,7 @@ Write-Host "Permissions granted to $appPoolIdentity; NPM_CONFIG_CACHE and NODE_C
 # ---------- OIDC connection row reconciliation (Gap A) ----------
 # The seed migration inserts the [oidc]/"oidc" row only when the table is empty
 # (COUNT(*)=0), so correcting an issuer or client secret and re-deploying never
-# reaches the DB -- login keeps using the stale values (PR #234 Functionality
+# reaches the database -- login keeps using the stale values (PR #234 Functionality
 # review, Gap A). UPSERT the row this installer manages (keyed on its clientId)
 # so a re-deploy of corrected OIDC settings takes effect at the next login.
 # Guarded on the table existing: on a first install the app hasn't booted yet, so
@@ -755,7 +755,7 @@ END
         # The statement embeds the OIDC client secret, so run it from an
         # Administrators-only temp file via -i rather than -Q: the secret never
         # lands on the sqlcmd process command line (process list / event 4688).
-        # Lock the ACL down before writing the secret; delete the file in finally.
+        # Lock the access control list down before writing the secret; delete the file in finally.
         $oidcQueryFile = [System.IO.Path]::GetTempFileName()
         $oidcAcl = New-Object System.Security.AccessControl.FileSecurity
         $oidcAcl.SetAccessRuleProtection($true, $false)
@@ -787,7 +787,7 @@ END
             Write-Host "Could not reconcile the OIDC connection row (sqlcmd exit $oidcUpsertExit). If login uses stale OIDC settings, update the [oidc] row manually." -ForegroundColor Yellow
         }
     } else {
-        # PG best-effort: 05 has no docker awareness, so reach the DB via psql on
+        # PG best-effort: 05 has no docker awareness, so reach the database via psql on
         # PATH. Probe for the table first (absent on a pre-boot first install) so
         # the UPDATE can't error on a missing table -- the boot seed covers that.
         if (Get-Command psql -ErrorAction SilentlyContinue) {

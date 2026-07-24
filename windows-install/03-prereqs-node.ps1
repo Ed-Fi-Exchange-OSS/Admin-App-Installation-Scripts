@@ -7,14 +7,14 @@ necessary.
 .DESCRIPTION
 This is the only runtime prerequisite the generic Admin App install needs. Java
 and Keycloak are NOT installed here; they live in idp-keycloak-setup.ps1 (the
-optional local-IdP example path).
+optional local identity provider example path).
 
 Order of operations (all idempotent):
   1. If a too-old Node is already on PATH, set up nvm-windows and switch to a
-     current LTS, keeping the previous version recoverable via 'nvm install'.
-     The required major is auto-detected from the repo's package.json
+     current Long-Term Support (LTS) release, keeping the previous version recoverable via 'nvm install'.
+     The required major is auto-detected from the repository's package.json
      engines.node when available.
-  2. If Node is missing, install Node.js LTS via winget.
+  2. If Node is missing, install the Node.js Long-Term Support release via winget.
 
 The npm cache override the App Pool needs is configured by
 05-deploy-api.ps1 (scoped to the App Pool), not here.
@@ -23,7 +23,7 @@ The npm cache override the App Pool needs is configured by
 The Ed-Fi-AdminApp checkout. When package.json exists there, engines.node is parsed
 and used as the floor + nvm install target. Defaults to a co-located checkout (this
 script inside <AdminApp>\windows-install\) or a sibling Ed-Fi-AdminApp folder next
-to this scripts repo (e.g. C:\Ed-Fi\Ed-Fi-AdminApp).
+to this scripts repository (e.g. C:\Ed-Fi\Ed-Fi-AdminApp).
 
 .PARAMETER MinNodeMajor
 Floor enforced when package.json detection fails. Default: 22.
@@ -116,7 +116,7 @@ function Get-NodeZipSha256 {
     return $Matches[1]
 }
 
-# Auto-detect Node floor + install target from the repo's engines.node when
+# Auto-detect Node floor + install target from the repository's engines.node when
 # available. nvm-windows accepts bare-major versions (e.g., 'nvm install 22'),
 # which resolves to the latest 22.x release.
 $pkgJsonPath = Join-Path $SourcePath 'package.json'
@@ -250,15 +250,15 @@ if ($needsRemediation) {
         }
         $latest = $matching | Sort-Object -Descending | Select-Object -First 1
 
-        # AV-fallback: if nvm install reported success but no version directory
-        # appeared, an antivirus / EDR (Defender, CrowdStrike, etc.) most likely
+        # Antivirus fallback: if nvm install reported success but no version directory
+        # appeared, an antivirus / endpoint protection (Defender, CrowdStrike, etc.) most likely
         # consumed the extracted files. Recover by downloading the Node zip from
         # nodejs.org directly and dropping it into nvm's root with the correct
         # vX.Y.Z naming. nvm-windows then sees it like any other installed version.
         if (-not $latest) {
             Write-Host ""
             Write-Host "nvm install reported success but no v$targetMajor.* directory appeared." -ForegroundColor Yellow
-            Write-Host "Falling back to direct download from nodejs.org (typical cause: AV/EDR" -ForegroundColor Yellow
+            Write-Host "Falling back to direct download from nodejs.org (typical cause: antivirus / endpoint protection software" -ForegroundColor Yellow
             Write-Host "quarantining extracted files mid-install)." -ForegroundColor Yellow
 
             # Resolve a concrete X.Y.Z. For bare-major, query nodejs.org's release
@@ -303,7 +303,7 @@ if ($needsRemediation) {
             $inner = Get-ChildItem $tmp -Directory | Select-Object -First 1
             if (-not $inner) { throw "Zip extraction produced no inner directory in $tmp." }
             if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
-            # Copy + delete instead of Move-Item -- AV/EDR can hold transient locks
+            # Copy + delete instead of Move-Item -- antivirus/endpoint protection can hold transient locks
             # on freshly-extracted files that block the delete-source half of a
             # move. Copy-Item only needs read on the source, which is more tolerant.
             # robocopy is the second-line fallback because it retries through locks.
@@ -322,7 +322,7 @@ if ($needsRemediation) {
             Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
             Write-Host "Manual install complete at $dst" -ForegroundColor Green
-            Write-Host "If this happens repeatedly, consider adding '$writeRoot' to your AV exclusions." -ForegroundColor DarkGray
+            Write-Host "If this happens repeatedly, consider adding '$writeRoot' to your antivirus exclusions." -ForegroundColor DarkGray
 
             $useVersion = $fullVer
         } else {
@@ -353,15 +353,15 @@ if ($needsRemediation) {
     Write-Host "To switch back to the previous version later: nvm use $currentVer (after 'nvm install $currentVer' if it was uninstalled)" -ForegroundColor DarkGray
 }
 
-# Install Node.js LTS if it is still missing.
+# Install the Node.js Long-Term Support release if it is still missing.
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
     Write-Host "Node already on PATH: $(node --version) at $($node.Source)"
 } else {
-    Write-Host "Installing Node.js LTS via winget..."
+    Write-Host "Installing the Node.js Long-Term Support (LTS) release via winget..."
     & winget install OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements --silent
     if ($LASTEXITCODE -ne 0) {
-        throw "Node install failed (winget exit code $LASTEXITCODE). If this is the msstore cert issue, the --source winget flag should have skipped it. Check `winget search Node.js` to debug."
+        throw "Node install failed (winget exit code $LASTEXITCODE). If this is the Microsoft Store certificate issue, the --source winget flag should have skipped it. Check `winget search Node.js` to debug."
     }
     # Refresh PATH so subsequent steps in this same shell can use node/npm
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")

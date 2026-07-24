@@ -7,14 +7,14 @@ Edition, and Git.
 
 .DESCRIPTION
 Runs in two phases:
-  1. SCAN -- reports the current state of each prereq (PASS or MISSING)
+  1. SCAN -- reports the current state of each prerequisite (PASS or MISSING)
   2. INSTALL -- installs only the items flagged MISSING
 
-Intended for use on a fresh Windows VM or workstation before running
+Intended for use on a fresh Windows virtual machine or workstation before running
 00-check-prereqs.ps1 / install-all.ps1.
 
-Uses --source winget on the winget commands to avoid msstore certificate
-validation errors that occur on fresh dev-environment VMs.
+Uses --source winget on the winget commands to avoid Microsoft Store certificate
+validation errors that occur on fresh dev-environment virtual machines.
 
 A reboot may be required after this script completes -- if so, the script
 prints a notice but does not reboot automatically.
@@ -56,7 +56,7 @@ if ($currentPolicy -ne 'RemoteSigned' -and $currentPolicy -ne 'Unrestricted' -an
 
 # Strip the zone-of-origin marker from the scripts we ship, so PowerShell doesn't
 # treat them as "downloaded from the internet" and refuse to run them. Only the
-# known repo scripts are unblocked -- we don't vouch for arbitrary .ps1 files that
+# known repository scripts are unblocked -- we don't vouch for arbitrary .ps1 files that
 # happen to be in this folder.
 $scriptDir = $PSScriptRoot
 $knownScripts = @(
@@ -76,7 +76,7 @@ if ($scriptDir) {
     $unexpected = Get-ChildItem "$scriptDir\*.ps1" -ErrorAction SilentlyContinue |
         Where-Object { $knownScripts -notcontains $_.Name }
     if ($unexpected) {
-        Write-Warning ("Left these unrecognized .ps1 file(s) blocked (not part of this repo): " +
+        Write-Warning ("Left these unrecognized .ps1 file(s) blocked (not part of this repository): " +
             ($unexpected.Name -join ', '))
     }
 }
@@ -98,7 +98,7 @@ function Write-Status {
     if ($Detail) { Write-Host "  -- $Detail" -ForegroundColor DarkGray } else { Write-Host "" }
 }
 
-# Sanity: clock drift breaks winget's cert validation on fresh VMs
+# Sanity: clock drift breaks winget's certificate validation on fresh virtual machines
 $beforeSync = Get-Date
 try { w32tm /resync /force 2>&1 | Out-Null } catch {}
 $afterSync = Get-Date
@@ -110,7 +110,8 @@ if ($drift -gt 30) {
 # ============================================================
 # PHASE 1 -- SCAN
 # ============================================================
-Write-Phase "Phase 1: Scanning prereqs"
+Write-Phase "Phase 1: Scanning for required prerequisites (IIS features, SQL Server, Git)"
+Write-Host "Checking what is already installed so Phase 2 installs only what is missing."
 
 # IIS
 $iisFeatures = @(
@@ -179,7 +180,7 @@ if ($gitAction -eq 'install') { $toInstall += 'Git' }
 
 if ($toInstall.Count -eq 0) {
     Write-Host ""
-    Write-Host "All prereqs already in place. Nothing to install." -ForegroundColor Green
+    Write-Host "All prerequisites already in place. Nothing to install." -ForegroundColor Green
     Write-Host ""
     Write-Host "Next step: run .\install-all.ps1 to install the Admin App."
     return
@@ -222,7 +223,7 @@ if ($gitAction -eq 'install') {
 }
 
 # ============================================================
-Write-Phase "VM PREREQS COMPLETE"
+Write-Phase "VIRTUAL MACHINE PREREQUISITES COMPLETE"
 Write-Host "Next steps:"
 Write-Host "  1. If any install above said a reboot may be required, reboot now."
 Write-Host "  2. Run .\install-all.ps1 from this folder -- it runs the pre-flight check and the full install."

@@ -7,7 +7,7 @@ scripts touch, without changing anything.
 .DESCRIPTION
 Groups checks into three categories:
 
-  Manual prereqs   — must be installed before any install script can run
+  Manual prerequisites   — must be installed before any install script can run
   Auto-installed   — scripts install these if missing (informational)
   Already configured — scripts will (re)apply these even if present
 
@@ -17,7 +17,7 @@ install-all.ps1 to see what's already in place and what needs attention.
 .PARAMETER SourcePath
 Path to the Ed-Fi-AdminApp checkout. Defaults to a co-located checkout (this
 script inside <AdminApp>\windows-install\) or a sibling Ed-Fi-AdminApp folder
-next to this scripts repo (e.g. C:\Ed-Fi\Ed-Fi-AdminApp).
+next to this scripts repository (e.g. C:\Ed-Fi\Ed-Fi-AdminApp).
 
 .PARAMETER DatabaseName
 Default: sbaa.
@@ -33,7 +33,7 @@ param(
         if (Test-Path "$c\package.json") { $c } else { Join-Path (Split-Path $c -Parent) 'Ed-Fi-AdminApp' }
     ),
     [string]$DatabaseName = "sbaa",
-    # Which DB engine the install will target. 'mssql' enables the SQL Server
+    # Which database engine the install will target. 'mssql' enables the SQL Server
     # checks below; 'pgsql' replaces them with a docker-availability check.
     [ValidateSet('mssql','pgsql')]
     [string]$DbEngine = 'mssql',
@@ -49,10 +49,10 @@ $ErrorActionPreference = 'Continue'
 
 # Minimum versions enforced by the install scripts. The Node floor is
 # auto-detected from $SourcePath\package.json (engines.node) below when the
-# repo is cloned; the constant here is the fallback when it isn't.
+# repository is cloned; the constant here is the fallback when it isn't.
 $MinNodeMajor = 22  # fallback if package.json detection fails
 
-# Auto-detect the Node floor from the repo's engines.node when available. Keeps
+# Auto-detect the Node floor from the repository's engines.node when available. Keeps
 # the check in sync if the AdminApp bumps its requirement (e.g., 22 -> 24).
 $pkgJsonPath = Join-Path $SourcePath 'package.json'
 if (Test-Path $pkgJsonPath) {
@@ -214,9 +214,9 @@ if ($git) {
 
 # Source repo present
 if (Test-Path "$SourcePath\package.json") {
-    Write-Check PASS "Source repo cloned" "$SourcePath"
+    Write-Check PASS "Source repository cloned" "$SourcePath"
 } else {
-    Write-Check FAIL "Source repo not found at $SourcePath" "install-all.ps1 fetches it automatically; or clone Ed-Fi-AdminApp and pass -SourcePath"
+    Write-Check FAIL "Source repository not found at $SourcePath" "install-all.ps1 fetches it automatically; or clone Ed-Fi-AdminApp and pass -SourcePath"
 }
 
 # ============================================================
@@ -245,7 +245,7 @@ if ($httpPlatform) {
 }
 
 # Node.js -- presence AND version (>= $MinNodeMajor). Both missing and too-old
-# are INFO: 03-prereqs-node.ps1 installs LTS when missing and remediates a stale
+# are INFO: 03-prereqs-node.ps1 installs the Long-Term Support release when missing and remediates a stale
 # version via nvm-windows.
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
@@ -266,7 +266,7 @@ if ($node) {
         Write-Check INFO "Node.js version unparsable" "Output was: $nodeVer"
     }
 } else {
-    Write-Check INFO "Node.js not on PATH" "03-prereqs-node.ps1 will install LTS via winget"
+    Write-Check INFO "Node.js not on PATH" "03-prereqs-node.ps1 will install the Long-Term Support (LTS) release via winget"
 }
 
 # ============================================================
@@ -279,9 +279,9 @@ if ($DbEngine -eq 'mssql' -and $sqlService -and $sqlService.Status -eq 'Running'
     if ($verKey) {
         $loginMode = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$($verKey.PSChildName)\MSSQLServer" -Name LoginMode -ErrorAction SilentlyContinue).LoginMode
         if ($loginMode -eq 2) {
-            Write-Check PASS "SQL Server Mixed Mode auth enabled"
+            Write-Check PASS "SQL Server Mixed Mode authentication enabled"
         } elseif ($loginMode -eq 1) {
-            Write-Check INFO "SQL Server is Windows-auth only" "02-prereqs-sql.ps1 will switch to Mixed Mode"
+            Write-Check INFO "SQL Server is Windows-authentication only" "02-prereqs-sql.ps1 will switch to Mixed Mode"
         } else {
             Write-Check INFO "SQL Server LoginMode = $loginMode (unknown)"
         }
@@ -314,7 +314,7 @@ if (Test-Path $npmCache) {
     Write-Check INFO "npm cache folder not present" "05-deploy-api.ps1 will create it and set NPM_CONFIG_CACHE on the App Pool"
 }
 
-# Build artifacts present? Nx outputs to dist\packages\<project>\, not the repo root.
+# Build artifacts present? Nx outputs to dist\packages\<project>\, not the repository root.
 $apiMainJs = "$SourcePath\dist\packages\api\main.js"
 if (Test-Path $apiMainJs) {
     Write-Check PASS "API build artifact present" $apiMainJs
@@ -323,9 +323,9 @@ if (Test-Path $apiMainJs) {
 }
 $feIndex = "$SourcePath\dist\packages\fe\index.html"
 if (Test-Path $feIndex) {
-    Write-Check PASS "FE build artifact present" "$SourcePath\dist\packages\fe\"
+    Write-Check PASS "Web application build artifact present" "$SourcePath\dist\packages\fe\"
 } else {
-    Write-Check INFO "FE not built yet" "04-build.ps1 will run build:fe"
+    Write-Check INFO "Web application not built yet" "04-build.ps1 will run build:fe"
 }
 
 # IIS state
@@ -358,7 +358,7 @@ try {
 Write-Section "EXISTING STATE THAT WILL BE MODIFIED (collision risk check)"
 # ============================================================
 # These checks flag things that already exist on this machine that the install
-# scripts WILL change. On a clean dev VM, nothing here should fire. On a
+# scripts WILL change. On a clean dev virtual machine, nothing here should fire. On a
 # workstation that already runs other software, each RISK is a heads-up that
 # another app on the box may be affected.
 
@@ -383,9 +383,9 @@ if ($DbEngine -eq 'mssql' -and $sqlService) {
 # only a foreign owner.
 $portChecks = @(
     @{ Port = 3333; Site = 'EdFi-AdminApp-API'; Role = 'API (HTTP)' },
-    @{ Port = 4200; Site = 'EdFi-AdminApp-FE';  Role = 'FE (HTTP)'  },
+    @{ Port = 4200; Site = 'EdFi-AdminApp-FE';  Role = 'Web application (HTTP)'  },
     @{ Port = 3443; Site = 'EdFi-AdminApp-API'; Role = 'API (HTTPS)' },
-    @{ Port = 4443; Site = 'EdFi-AdminApp-FE';  Role = 'FE (HTTPS)'  }
+    @{ Port = 4443; Site = 'EdFi-AdminApp-FE';  Role = 'Web application (HTTPS)'  }
 )
 foreach ($pc in $portChecks) {
     $listener = Get-NetTCPConnection -LocalPort $pc.Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1

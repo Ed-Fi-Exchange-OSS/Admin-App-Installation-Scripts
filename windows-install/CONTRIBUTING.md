@@ -14,7 +14,7 @@ contributor guidelines.
 
 - **Windows** with the **IIS** role, and an **elevated (Administrator) PowerShell** — IIS, SQL,
   uninstall, and scheduled-task steps require elevation. `docker compose` must also run elevated
-  because the generated `docker/.env` is ACL-restricted to Administrators.
+  because the generated `docker/.env` is access control list-restricted to Administrators.
 - **PowerShell 5.1 or later.**
 - **Docker Desktop** (Linux containers) — only for the PostgreSQL and Yopass paths.
 - **Node.js** — installed and managed by `03-prereqs-node.ps1`.
@@ -86,7 +86,7 @@ $pg = @{
 .\install-all.ps1 @pg
 ```
 
-**External IdP (Entra ID / Google):** set `-IdpProvider microsoft|google`,
+**External identity provider (Entra ID / Google):** set `-IdpProvider microsoft|google`,
 `-OidcClientId`, `-OidcClientSecret`, and `-AdminUsername <idp-user-email>`. Entra also requires
 `-OidcIssuer 'https://login.microsoftonline.com/<tenant-id>/v2.0'`; Google defaults the issuer
 to `accounts.google.com`. Register the redirect URI the installer prints:
@@ -98,15 +98,15 @@ to `accounts.google.com`. Register the redirect URI the installer prints:
 |---|---|
 | `-SourcePath` | Admin App source to build/deploy. Point at the supported release checkout. |
 | `-DbEngine mssql\|pgsql` | Default `mssql`. |
-| `-AppDbPassword` | MSSQL (SecureString). App login is a non-sysadmin `db_owner` on `sbaa`. Server setup uses Windows Auth (no `sa`; run as a SQL sysadmin). |
+| `-AppDbPassword` | MSSQL (SecureString). App login is a non-sysadmin `db_owner` on `sbaa`. Server setup uses Windows authentication (no `sa`; run as a SQL sysadmin). |
 | `-UsePostgresDocker` + `-PostgresSuperuserPassword` / `-PostgresAppPassword` | PG via Docker. App user is a non-superuser owning `public` with CONNECT + CREATE. |
 | `-IdpProvider keycloak\|microsoft\|google\|other` | **Mandatory.** `microsoft` requires `-OidcIssuer`. |
 | `-OidcClientSecret` | **Mandatory** (SecureString). |
-| `-AdminUsername` | Seeded admin; must equal the IdP user's email claim. |
+| `-AdminUsername` | Seeded admin; must equal the identity provider user's email claim. |
 | `-SkipPhase1` / `-SkipPhase2` / `-OnlyPhase1` | Phase control. |
 | `-DisableSslVerification` | Disable upstream TLS verification (local self-signed upstreams). On by default. |
 | `-HttpsApiPort` / `-HttpsFePort` | HTTPS ports (default 3443 / 4443). |
-| `-CertificateThumbprint` / `-CertificatePfxPath` / `-CertificatePassword` | Supply a real cert instead of self-signed. |
+| `-CertificateThumbprint` / `-CertificatePfxPath` / `-CertificatePassword` | Supply a real certificate instead of self-signed. |
 | `-RegisterKeycloakStartupTask` | Register a reboot-survival scheduled task for Keycloak. |
 | `-AcceptRisks` | Proceed past 00-check port RISK warnings. |
 
@@ -121,7 +121,7 @@ MSI is left in place on uninstall, switching may require removing the current ha
 | Port | Purpose |
 |---|---|
 | 3333 / **3443** | API HTTP → redirects to HTTPS |
-| 4200 / **4443** | FE HTTP → redirects to HTTPS |
+| 4200 / **4443** | Web application HTTP → redirects to HTTPS |
 | 5432 | PostgreSQL (loopback-bound by default) |
 | 8080 | Keycloak (local dev) |
 
@@ -129,7 +129,7 @@ Use `curl.exe` for HTTPS smoke checks — `Invoke-WebRequest` on PS 5.1 cannot h
 self-signed binding:
 ```powershell
 curl.exe -sk -o NUL -w "%{http_code}" https://localhost:3443/api/teams   # 401 = API up
-curl.exe -sk -o NUL -w "%{http_code}" https://localhost:4443/            # 200 = FE up
+curl.exe -sk -o NUL -w "%{http_code}" https://localhost:4443/            # 200 = web application up
 ```
 
 ---
@@ -153,16 +153,16 @@ Changes must not weaken these properties (each is exercised by the E2E suite):
 
 - **Least-privilege database access** — the app connects as a non-`sa` / non-superuser login
   (SQL Server: `db_owner` of `sbaa`, `sysadmin = 0`; PostgreSQL: non-superuser owning `public`
-  with `CONNECT` + `CREATE`, never a DB-wide `GRANT ALL`). PostgreSQL needs `CREATE` on the
+  with `CONNECT` + `CREATE`, never a database-wide `GRANT ALL`). PostgreSQL needs `CREATE` on the
   database to build the `citext` extension and the `pgboss` schema at first boot.
 - **Per-install data-encryption key** — generated per install, recorded only in the
   Administrators-only summary, reused (not rotated) on idempotent re-runs.
-- **TLS always-on** — HTTPS bindings on both sites, HTTP ports redirect, self-signed cert
+- **TLS always-on** — HTTPS bindings on both sites, HTTP ports redirect, self-signed certificate
   auto-trusted when none is supplied, enforcing (not Report-Only) CSP.
 - **Upstream TLS verification on by default** (`-DisableSslVerification` is an explicit opt-out).
 - **PostgreSQL bound to loopback** by default; remote exposure is opt-in.
 - **No plaintext user secrets** in the install summary, console, or history; `docker/.env` is
-  generated at install time, ACL-restricted, and git-ignored.
+  generated at install time, access control list-restricted, and git-ignored.
 
 ---
 
@@ -173,7 +173,7 @@ Changes must not weaken these properties (each is exercised by the E2E suite):
   `docker compose` (without `install-all`) needs a `.env` — copy `.env.example` and fill it.
 - **Fresh vs existing volume:** Docker init scripts run only on a fresh volume. Use
   `docker compose down -v` to re-run `init/`; plain `docker compose down` preserves the volume.
-- **FE build memory:** free RAM and run `npx nx reset` before rebuilding (nx caches `fe:build`
+- **Web application build memory:** free RAM and run `npx nx reset` before rebuilding (nx caches `fe:build`
   and ignores `.env`); prefer `-SkipInstall` on iterative runs.
 - **PowerShell line continuation:** a comment after a backtick breaks the parse — prefer
   splatting (`@{ }`) for multi-argument calls.
@@ -187,8 +187,8 @@ Changes must not weaken these properties (each is exercised by the E2E suite):
 These are deployment/orchestration scripts with no unit-testable surface. Before opening a PR,
 validate the affected paths end to end on a clean box:
 
-- Install completes and the app boots; API returns 401 and the FE returns 200 with SPA fallback.
-- Exercise both database engines when a change touches the DB path, and both `-HttpHandler`
+- Install completes and the app boots; API returns 401 and the web application returns 200 with SPA fallback.
+- Exercise both database engines when a change touches the database path, and both `-HttpHandler`
   values when a change touches hosting.
 - For PostgreSQL, test both a fresh volume and an existing-volume re-run.
 - Confirm the security invariants above still hold.
@@ -203,5 +203,5 @@ validate the affected paths end to end on a clean box:
 - **Sign your commits** (GPG). On Windows, commit from a PowerShell session; if the first
   signature of a session fails, re-prime the GPG agent once and retry.
 - Keep the PR focused on one change; isolate whitespace-only edits from functional ones.
-- In the PR description, state what changed and how you validated it (the engines, IdPs, and
+- In the PR description, state what changed and how you validated it (the engines, identity providers, and
   handlers you exercised).

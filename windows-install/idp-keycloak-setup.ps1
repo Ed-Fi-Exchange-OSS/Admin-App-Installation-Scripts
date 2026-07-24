@@ -6,10 +6,10 @@ Keycloak, starts it, and provisions the edfi realm, edfiadminapp client, and
 test user. One run leaves a fully-ready local Keycloak for the Admin App.
 
 .DESCRIPTION
-The Admin App's auth engine is provider-agnostic (generic OIDC discovery), so a
-real deployment points it at whatever IdP the organization runs. This script is
+The Admin App's authentication engine is provider-agnostic (generic OIDC discovery), so a
+real deployment points it at whatever identity provider the organization runs. This script is
 only the convenience path for a local dev install that wants Keycloak as the
-example IdP.
+example identity provider.
 
 Steps (each idempotent):
   1. JDK: reuse an existing Java >= 17 already on PATH, otherwise install
@@ -65,10 +65,10 @@ The secret to set on the client. Save it; you pass the same value to 05-deploy-a
 
 .PARAMETER FeBaseUrl / -ApiBaseUrl
 Base URLs used to build the client's redirect/origin URIs. Default to the
-standalone HTTPS sites (FE https://localhost:4443, API https://localhost:3443).
+standalone HTTPS sites (web application https://localhost:4443, API https://localhost:3443).
 
 .PARAMETER TestUserEmail / -TestUserFirstName / -TestUserLastName / -TestUserPassword
-The seeded test user. TestUserEmail must match the AdminApp DB's seeded user.
+The seeded test user. TestUserEmail must match the AdminApp database's seeded user.
 
 .PARAMETER IncludeAudienceMapper
 Switch -- add the audience mapper (only needed for bearer-token API access).
@@ -76,7 +76,7 @@ Switch -- add the audience mapper (only needed for bearer-token API access).
 .PARAMETER EnableDirectAccessGrants
 Switch -- enable the password grant (OAuth ROPC) on the client. Testing only;
 sends user credentials straight to the token endpoint. The script warns if this
-is combined with a non-localhost -KeycloakBaseUrl (a production/remote IdP).
+is combined with a non-localhost -KeycloakBaseUrl (a production/remote identity provider).
 
 .EXAMPLE
 .\idp-keycloak-setup.ps1 -AdminPassword 'admin' -ClientSecret 'mysecret123' -TestUserPassword 'TestUser123!'
@@ -106,7 +106,7 @@ param(
     [Parameter(Mandatory = $true)]
     [SecureString]$ClientSecret,
 
-    # Defaults match the always-on-TLS standalone sites (FE on 4443, API on 3443).
+    # Defaults match the always-on-TLS standalone sites (web application on 4443, API on 3443).
     # The client's redirect and web-origin URIs are built from these.
     [string]$FeBaseUrl = "https://localhost:4443",
     [string]$ApiBaseUrl = "https://localhost:3443",
@@ -124,7 +124,7 @@ param(
     [Parameter(Mandatory = $true)]
     [SecureString]$TestUserPassword,
 
-    # Realm display + session settings (Ed-Fi docs defaults). Tune per env if
+    # Realm display + session settings (Ed-Fi docs defaults). Tune per environment if
     # needed. Offline session max requires offlineSessionMaxLifespanEnabled.
     [string]$RealmDisplayName     = "Ed-Fi",
     [string]$RealmDisplayNameHtml = "Ed-Fi Technology Suite",
@@ -154,7 +154,7 @@ if ($EnableDirectAccessGrants) {
     $isLoopback = ($kcHost -eq 'localhost') -or
         ([System.Net.IPAddress]::TryParse($kcHost, [ref]$ip) -and [System.Net.IPAddress]::IsLoopback($ip))
     if (-not $isLoopback) {
-        Write-Warning "Direct Access Grants (OAuth password grant) is enabled on a non-localhost Keycloak ($KeycloakBaseUrl). This flow sends user credentials directly to the token endpoint and is intended for local testing only -- do not enable it against a production or remote IdP."
+        Write-Warning "Direct Access Grants (OAuth password grant) is enabled on a non-localhost Keycloak ($KeycloakBaseUrl). This flow sends user credentials directly to the token endpoint and is intended for local testing only -- do not enable it against a production or remote identity provider (IdP)."
     }
 }
 
@@ -269,7 +269,7 @@ if ($existingJavaMajor -ge 17 -and -not $JdkDownloadUrl) {
         Write-Host "NOTE: Machine JAVA_HOME ($existingJavaHome) will be overwritten with the OpenJDK 21 path." -ForegroundColor Yellow
     }
 
-    # Step 2: install / locate OpenJDK 21. Match jdk-21* dirs that actually
+    # Step 2: install / locate OpenJDK 21. Match jdk-21* directories that actually
     # contain a runnable java.exe -- a leftover half-install can't fool us.
     $existing21 = Get-ChildItem "C:\Program Files\Microsoft" -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "jdk-21*" -and (Test-Path "$($_.FullName)\bin\java.exe") } |
@@ -403,7 +403,7 @@ function Invoke-KcApi {
 # user gets actionable recovery steps instead of a raw WebException. This is
 # the most common 06 failure mode -- the master admin was bootstrapped with a
 # different password than what -KeycloakAdminPassword now carries, because
-# KC_BOOTSTRAP_ADMIN_* env vars are first-run-only.
+# KC_BOOTSTRAP_ADMIN_* environment variables are first-run-only.
 Write-Host "Authenticating to Keycloak admin API..."
 try {
     # Pass the form as a hashtable so Invoke-RestMethod URL-encodes each field:
@@ -444,7 +444,7 @@ try {
         Write-Host "[ERROR] Keycloak admin auth failed (HTTP $code, invalid_grant)." -ForegroundColor Red
         Write-Host "        The master admin was bootstrapped with a different password than the"
         Write-Host "        one passed via -KeycloakAdminPassword. Keycloak 26's KC_BOOTSTRAP_ADMIN_*"
-        Write-Host "        env vars only apply on first run against an empty data dir."
+        Write-Host "        environment variables only apply on first run against an empty data directory."
         Write-Host ""
         Write-Host "        Recovery options:" -ForegroundColor Yellow
         Write-Host "          A) Re-run install-all with the ORIGINAL admin password."
@@ -515,12 +515,12 @@ $clients = Invoke-KcApi -Method Get -Path "/realms/$RealmName/clients?clientId=$
 # arrays inside hashtables, which silently breaks redirectUris and webOrigins).
 # Values match the Ed-Fi docs:
 #   Root URL                  = the origin
-#   Admin URL                 = FE base
-#   Valid Redirect URIs       = API callback + FE callback + API post-logout (no wildcard)
+#   Admin URL                 = web application base
+#   Valid Redirect URIs       = API callback + web application callback + API post-logout (no wildcard)
 #   Valid Post Logout URIs    = API post-logout endpoint only. The app always sends
 #                               MY_URL/api/auth/post-logout as its post_logout_redirect_uri
-#                               (auth.controller.ts), then forwards to the FE itself, so no
-#                               FE URI needs to be pre-registered. (Keycloak 26 separates
+#                               (auth.controller.ts), then forwards to the web application itself, so no
+#                               web application URI needs to be pre-registered. (Keycloak 26 separates
 #                               these from Valid Redirect URIs; multiple URIs joined "##".)
 #   Web Origins               = API base (for CORS on the OIDC endpoints)
 $fe  = $FeBaseUrl  -replace '/$', ''
