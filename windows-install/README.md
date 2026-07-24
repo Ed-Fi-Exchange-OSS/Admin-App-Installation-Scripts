@@ -72,7 +72,7 @@ When `install-all.ps1` finishes, open `https://localhost:4443/` and sign in with
   ```powershell
   .\install-all.ps1 -IdpProvider keycloak -DbEngine pgsql -UsePostgresDocker `
     -PostgresSuperuserPassword (Read-Host -AsSecureString 'Postgres superuser password') `
-    -PostgresAppPassword (Read-Host -AsSecureString 'Admin App DB role password') `
+    -PostgresAppPassword (Read-Host -AsSecureString 'Admin App database role password') `
     -KeycloakAdminPassword (Read-Host -AsSecureString 'Keycloak admin password') `
     -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
     -TestUserPassword (Read-Host -AsSecureString 'Keycloak test user password')
@@ -156,7 +156,7 @@ You can also drive the per-section scripts manually (`00`→`06`), passing `-Oid
 
 ```powershell
 .\uninstall.ps1                                       # prompts before doing anything
-.\uninstall.ps1 -Force                                # non-interactive teardown (Windows Auth)
+.\uninstall.ps1 -Force                                # non-interactive teardown (Windows Authentication)
 .\uninstall.ps1 -KeepDatabase -KeepNpmCache           # selective teardown
 
 .\uninstall-keycloak.ps1                              # remove the local Keycloak identity provider (separate)

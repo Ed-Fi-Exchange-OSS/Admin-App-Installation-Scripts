@@ -32,19 +32,19 @@ windows-install/
 ├─ install-all.ps1        # master installer (3 phases) — main entry point
 ├─ 00-check-prereqs.ps1   # preflight: ports, OS, tooling
 ├─ 01-prereqs-iis.ps1     # IIS + URL Rewrite + httpPlatform handler  (-HttpHandler here)
-├─ 02-prereqs-sql.ps1     # SQL Server mixed mode + TCP + least-priv app login (Windows Auth)
+├─ 02-prereqs-sql.ps1     # SQL Server mixed mode + TCP + least-privilege app login (Windows Authentication)
 ├─ 03-prereqs-node.ps1    # Node.js install / npm cache
 ├─ 04-build.ps1           # npm ci + build:api (webpack) + build:fe (vite)
 ├─ 05-deploy-api.ps1      # deploy API site, NODE_CONFIG, TLS, OIDC row, encryption key
-├─ 06-deploy-fe.ps1       # deploy FE site + SPA fallback
+├─ 06-deploy-fe.ps1       # deploy web application site + SPA fallback
 ├─ idp-keycloak-setup.ps1 # provision local Keycloak realm/client/user
 ├─ idp-keycloak-start.ps1 # start Keycloak (optional reboot-survival scheduled task)
-├─ uninstall.ps1          # tear down sites, pools, DB, login, certs, npm cache
+├─ uninstall.ps1          # tear down sites, pools, database, login, certificates, npm cache
 ├─ uninstall-keycloak.ps1 # tear down Keycloak
-├─ setup-vm-prereqs.ps1   # fresh-VM bootstrap
+├─ setup-vm-prereqs.ps1   # fresh virtual machine bootstrap
 ├─ yopass-docker.ps1      # optional one-time-credential-link stack
 ├─ README.md              # user install guide
-└─ docker/                # PostgreSQL + optional Yopass compose stack; init/ creates the PG role
+└─ docker/                # PostgreSQL + optional Yopass compose stack; init/ creates the PostgreSQL role
 ```
 
 Scripts refer to their own location as `<repo>\windows-install\` in docstrings; functional
@@ -99,7 +99,7 @@ to `accounts.google.com`. Register the redirect URI the installer prints:
 | `-SourcePath` | Admin App source to build/deploy. Point at the supported release checkout. |
 | `-DbEngine mssql\|pgsql` | Default `mssql`. |
 | `-AppDbPassword` | MSSQL (SecureString). App login is a non-sysadmin `db_owner` on `sbaa`. Server setup uses Windows authentication (no `sa`; run as a SQL sysadmin). |
-| `-UsePostgresDocker` + `-PostgresSuperuserPassword` / `-PostgresAppPassword` | PG via Docker. App user is a non-superuser owning `public` with CONNECT + CREATE. |
+| `-UsePostgresDocker` + `-PostgresSuperuserPassword` / `-PostgresAppPassword` | PostgreSQL via Docker. App user is a non-superuser owning `public` with CONNECT + CREATE. |
 | `-IdpProvider keycloak\|microsoft\|google\|other` | **Mandatory.** `microsoft` requires `-OidcIssuer`. |
 | `-OidcClientSecret` | **Mandatory** (SecureString). |
 | `-AdminUsername` | Seeded admin; must equal the identity provider user's email claim. |
