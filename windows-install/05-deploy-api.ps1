@@ -186,6 +186,24 @@ if ($DbEngine -eq 'pgsql' -and -not $PgDbPassword) {
     throw "-PgDbPassword is required when -DbEngine is 'pgsql'."
 }
 
+# The Admin App builds its DB connection string as a URL and interpolates the DB
+# credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
+# that are structural in a URL (or need percent-encoding) corrupt the parsed password,
+# so the API fails to connect with an opaque "Login failed for user". Until the Admin
+# App URL-encodes its credentials (the real fix), restrict the DB password to characters
+# that are safe unencoded in a URL. This does NOT weaken the password: SQL's CHECK_POLICY
+# needs 3 of 4 categories and upper+lower+digit alone satisfies it (symbols stay optional).
+# Example passwords such as 'YourStrong!Passw0rd' and 'EdFi-App-Local!2026' remain valid.
+function Test-DbPasswordUrlSafe {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if ($Password -match '[^A-Za-z0-9!$()*,._~-]') {
+        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form DB connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its DB credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
+    }
+}
+
 # Secrets arrive as SecureString (kept off the command line); unwrap the ones
 # supplied to plaintext locals for sqlcmd -P and the production.js patch.
 # Point-of-use plaintext is unavoidable. DbEncryptionKey stays a plain string:
@@ -195,6 +213,11 @@ if ($DbEngine -eq 'pgsql' -and -not $PgDbPassword) {
 $AppDbPasswordPlain    = if ($AppDbPassword)    { [System.Net.NetworkCredential]::new('', $AppDbPassword).Password } else { $null }
 $PgDbPasswordPlain     = if ($PgDbPassword)     { [System.Net.NetworkCredential]::new('', $PgDbPassword).Password } else { $null }
 $OidcClientSecretPlain = if ($OidcClientSecret) { [System.Net.NetworkCredential]::new('', $OidcClientSecret).Password } else { $null }
+
+# Reject a DB password with URL-breaking characters. Guards a standalone 05 re-run --
+# the install-all smoke-test failure message points operators straight here to redeploy.
+if ($DbEngine -eq 'mssql') { Test-DbPasswordUrlSafe -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)" }
+if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbPasswordPlain  -Label "Postgres app user (-PgDbPassword)" }
 
 $apiBuildDir = "$SourcePath\dist\packages\api"
 if (-not (Test-Path "$apiBuildDir\main.js")) {

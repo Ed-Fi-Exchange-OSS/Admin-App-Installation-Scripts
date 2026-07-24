@@ -76,6 +76,24 @@ function Test-SqlPasswordComplexity {
     }
 }
 
+# The Admin App builds its DB connection string as a URL and interpolates the DB
+# credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
+# that are structural in a URL (or need percent-encoding) corrupt the parsed password,
+# so the API fails to connect with an opaque "Login failed for user". Until the Admin
+# App URL-encodes its credentials (the real fix), restrict the DB password to characters
+# that are safe unencoded in a URL. This does NOT weaken the password: CHECK_POLICY needs
+# 3 of 4 categories and upper+lower+digit alone satisfies it (symbols stay optional).
+# Example passwords such as 'YourStrong!Passw0rd' and 'EdFi-App-Local!2026' remain valid.
+function Test-DbPasswordUrlSafe {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if ($Password -match '[^A-Za-z0-9!$()*,._~-]') {
+        throw "The $Label password contains a character that is unsafe in the Admin App's URL-form DB connection string. Use only letters, digits, and these symbols: ! `$ ( ) * , - . _ ~  This is a temporary installer restriction until the Admin App URL-encodes its DB credentials; a strong password is still possible because SQL's policy needs any 3 of uppercase, lowercase, digit, and symbol."
+    }
+}
+
 # Prompt (if omitted), unwrap, and strength-check each secret in turn. Unwrap to new
 # locals -- assigning back to the [SecureString]-typed parameters would re-trigger
 # their type conversion and fail. Point-of-use plaintext (SQLCMDPASSWORD, the inline
@@ -87,6 +105,7 @@ Test-SqlPasswordComplexity -Password $SaPasswordPlain -Label "sa (-SaPassword)"
 if (-not $AppDbPassword) { $AppDbPassword = Read-Host -AsSecureString "Admin App DB login '$AppDbUsername' password" }
 $AppDbPasswordPlain = [System.Net.NetworkCredential]::new('', $AppDbPassword).Password
 Test-SqlPasswordComplexity -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
+Test-DbPasswordUrlSafe -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
 
 # Find the SQL Server version-specific registry key
 $verKey = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server" -ErrorAction SilentlyContinue |
