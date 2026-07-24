@@ -278,6 +278,9 @@ if ($existingJavaMajor -ge 17 -and -not $JdkDownloadUrl) {
         $openJdk21Root = $existing21.FullName
         Write-Host "OpenJDK 21 already installed at $openJdk21Root"
     } elseif (-not $JdkDownloadUrl) {
+        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            throw "winget (the Windows Package Manager) is required to install OpenJDK 21, but it is not on PATH. Windows 10/11 include it; on Windows Server 2019/2022 install it first (see the prerequisites) and re-run, or pass -JdkDownloadUrl to install from a zip instead."
+        }
         Write-Host "Installing OpenJDK 21 via winget (Keycloak runtime)..."
         & winget install Microsoft.OpenJDK.21 --source winget --accept-source-agreements --accept-package-agreements --silent
         if ($LASTEXITCODE -ne 0) {

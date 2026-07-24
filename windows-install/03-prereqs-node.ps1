@@ -186,6 +186,9 @@ if ($needsRemediation) {
     if (Get-Command nvm -ErrorAction SilentlyContinue) {
         Write-Host "nvm-windows already installed at $((Get-Command nvm).Source)."
     } else {
+        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            throw "winget (the Windows Package Manager) is required to install nvm-windows, but it is not on PATH. Windows 10/11 include it; on Windows Server 2019/2022 install it first (see the prerequisites) and re-run, or install nvm-windows manually from https://github.com/coreybutler/nvm-windows/releases."
+        }
         Write-Host "Installing nvm-windows via winget..."
         & winget install CoreyButler.NVMforWindows --source winget --accept-source-agreements --accept-package-agreements --silent
         if ($LASTEXITCODE -ne 0) {
@@ -358,6 +361,9 @@ $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
     Write-Host "Node already on PATH: $(node --version) at $($node.Source)"
 } else {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "winget (the Windows Package Manager) is required to install Node.js, but it is not on PATH. Windows 10/11 include it; on Windows Server 2019/2022 install it first (Microsoft's App Installer, or the community winget-install script at your own risk) and re-run, or install Node.js manually."
+    }
     Write-Host "Installing the Node.js Long-Term Support (LTS) release via winget..."
     & winget install OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements --silent
     if ($LASTEXITCODE -ne 0) {

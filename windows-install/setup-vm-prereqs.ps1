@@ -191,6 +191,13 @@ if ($toInstall.Count -eq 0) {
 # ============================================================
 Write-Phase "Phase 2: Installing $($toInstall -join ', ')"
 
+# SQL Server and Git are installed with winget. On Windows Server it may be absent
+# (it is not shipped there); fail early with clear guidance rather than a cryptic
+# "'winget' is not recognized" once we are mid-install.
+if (($sqlAction -eq 'install' -or $gitAction -eq 'install') -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    throw "winget (the Windows Package Manager) is required to install SQL Server and Git, but it is not on PATH. Windows 10/11 include it; on Windows Server 2019/2022 install it first (Microsoft's App Installer, or the community winget-install script at your own risk), then re-run this script. See the prerequisites in README.md."
+}
+
 if ($iisAction -eq 'install') {
     Write-Host "Enabling $($iisMissing.Count) IIS feature(s)..."
     Enable-WindowsOptionalFeature -Online -FeatureName $iisMissing -All -NoRestart | Out-Null

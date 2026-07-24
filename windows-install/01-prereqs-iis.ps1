@@ -86,6 +86,9 @@ function Install-VerifiedMsi {
     if ($needsDownload) {
         Write-Host "Downloading $Name from $Url ..."
         try {
+            # Windows PowerShell 5.1 renders a progress bar per chunk that makes
+            # Invoke-WebRequest 10-50x slower; suppressing it downloads at full speed.
+            $ProgressPreference = 'SilentlyContinue'
             Invoke-WebRequest -Uri $Url -OutFile $msi -UseBasicParsing
         } catch {
             throw "Failed to download $Name from $Url. Check internet connectivity and that the URL is reachable. Original: $($_.Exception.Message)"

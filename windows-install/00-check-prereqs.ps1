@@ -223,6 +223,16 @@ if (Test-Path "$SourcePath\package.json") {
 Write-Section "AUTO-INSTALLED COMPONENTS (scripts will install if missing)"
 # ============================================================
 
+# winget (Windows Package Manager) -- the install scripts use it to install Node.js,
+# OpenJDK, SQL Server, and Git. Windows 10/11 ship it; Windows Server 2019/2022 do
+# not, so on Server it must be installed as a prerequisite before running the scripts.
+# Flag it so a run on Server without winget fails fast with guidance, not mid-way.
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+    Write-Check PASS "winget (Windows Package Manager)"
+} else {
+    Write-Check INFO "winget not on PATH" "Windows Server doesn't ship it -- install winget (Microsoft App Installer) as a prerequisite before running install-all; see the installation docs"
+}
+
 # URL Rewrite Module
 $rewrite = Test-Path "$env:SystemRoot\System32\inetsrv\rewrite.dll"
 if ($rewrite) {
