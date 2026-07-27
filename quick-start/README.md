@@ -25,7 +25,36 @@ troubleshooting): [Global Admin Quick Start on docs.ed-fi.org](https://docs.ed-f
 
 Requires Windows PowerShell 5.1 or PowerShell 7+. The Ed-Fi ODS/API, ODS Admin
 API, and Admin App (with
-its identity provider) must already be installed and reachable. The ODS
+its identity provider) must already be installed and reachable. The Admin API
+must also have client registration enabled
+(`Authentication:AllowRegistration=true` in its `appsettings.json`) while the
+quick start runs: when the environment is created, the Admin App registers its
+own client credentials at the Admin API's `POST /connect/register` endpoint.
+If you followed the Admin API first-time setup and disabled registration after
+creating your first client, re-enable it for the quick start run (it can be
+turned off again afterwards) — with registration disabled, environment
+creation fails (a 403 on `Create environment failed`, or a failed sync with no
+clear error for Admin API v2 environments).
+
+Before running the scripts, verify registration works end to end by manually
+registering a first client against the Admin API (the secret must be 32–128
+characters and contain an uppercase letter, a lowercase letter, a digit, and a
+special character):
+
+```powershell
+curl.exe -k -X POST https://localhost/AdminApi/connect/register `
+  -d "ClientId=bootstrap-client" `
+  -d "ClientSecret=<32-128 chars, upper+lower+digit+special>" `
+  -d "DisplayName=Bootstrap"
+```
+
+A `200` response (`Registered client bootstrap-client successfully.`) confirms
+the Admin API is ready. A `403` means registration is disabled (see above); a
+`500` means the Admin API itself failed server-side — check its log file and
+confirm its database tables were installed (the `adminapi` schema in
+`EdFi_Admin`).
+
+The ODS
 instances listed in `ODSS_JSON` must already exist in the target ODS/API's
 `EdFi_Admin.dbo.OdsInstances` table — the ids **and names** must match those
 rows exactly. How to check the table (and create missing rows) is covered in
