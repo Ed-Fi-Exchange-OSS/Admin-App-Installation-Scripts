@@ -125,6 +125,13 @@ Switch — add the Keycloak audience mapper (needed for bearer-token API access)
 .PARAMETER EnableDirectAccessGrants
 Switch — enable password grant on the Keycloak client (testing only).
 
+.PARAMETER SkipKeycloakStartupTask
+Switch — opt out of the Keycloak startup task (keycloak mode only). By default the
+installer registers a Windows Scheduled Task that, at boot, starts Keycloak, waits until
+its realm answers, and recycles the API app pool so the API registers its OIDC strategy
+against a running identity provider. Skipping it means Keycloak does not come back after
+a reboot and logins fail until it is started and the API is recycled by hand.
+
 .PARAMETER AcceptRisks
 Switch — bypass the y/N confirmation when 00-check-prereqs flags collision
 risks (e.g., another app sharing the SQL instance, a non-OpenJDK-21 'java' on
@@ -276,10 +283,11 @@ param(
     # Yopass). Secure by default; set only for self-signed upstreams in non-production.
     [switch]$DisableSslVerification,
 
-    # Keycloak only: register a startup Scheduled Task so the example identity provider survives a
-    # reboot (otherwise it must be restarted by re-running idp-keycloak-start.ps1).
-    # Requires an elevated shell. Off by default.
-    [switch]$RegisterKeycloakStartupTask
+    # Keycloak only: opt OUT of the startup Scheduled Task that brings the example
+    # identity provider back after a reboot and recycles the API app pool once its realm
+    # answers. Registered by default -- without it a reboot leaves the Admin App unable
+    # to authenticate anyone.
+    [switch]$SkipKeycloakStartupTask
 )
 
 $ErrorActionPreference = 'Stop'
@@ -677,7 +685,7 @@ if ($idpIsKeycloak) {
     if ($JdkSha256) { $kcArgs.JdkSha256 = $JdkSha256 }
     if ($IncludeAudienceMapper) { $kcArgs.IncludeAudienceMapper = $true }
     if ($EnableDirectAccessGrants) { $kcArgs.EnableDirectAccessGrants = $true }
-    if ($RegisterKeycloakStartupTask) { $kcArgs.RegisterStartupTask = $true }
+    if ($SkipKeycloakStartupTask) { $kcArgs.SkipStartupTask = $true }
     & "$scriptDir\idp-keycloak-setup.ps1" @kcArgs
 } else {
     Write-Phase "Phase 3.1: External OIDC provider ($IdpProvider)"
