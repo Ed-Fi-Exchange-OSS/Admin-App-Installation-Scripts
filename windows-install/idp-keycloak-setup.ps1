@@ -78,6 +78,19 @@ Switch -- enable the password grant (OAuth ROPC) on the client. Testing only;
 sends user credentials straight to the token endpoint. The script warns if this
 is combined with a non-localhost -KeycloakBaseUrl (a production/remote identity provider).
 
+.PARAMETER SkipStartupTask
+Switch -- do NOT register the Windows Scheduled Task that brings Keycloak back after a
+reboot. The task is registered by default: without it Keycloak does not restart, and
+the API (which registers its OIDC strategies once at startup and never retries) rejects
+every login with 'Unknown authentication strategy'. Pass this to opt out. Remove an
+already-registered task with schtasks /delete /tn 'Ed-Fi Admin App Keycloak' /f.
+
+.PARAMETER ApiAppPoolName
+IIS app pool the startup task recycles once Keycloak is ready, so the API re-registers
+its OIDC strategy against a running identity provider. Default: EdFi-AdminApp-API (the
+name 05-deploy-api.ps1 uses). When the app pool is absent the task logs it and skips
+the recycle.
+
 .EXAMPLE
 .\idp-keycloak-setup.ps1 -AdminPassword 'admin' -ClientSecret 'mysecret123' -TestUserPassword 'TestUser123!'
 #>
@@ -138,9 +151,15 @@ param(
     [switch]$IncludeAudienceMapper,
     [switch]$EnableDirectAccessGrants,
 
-    # Forwarded to idp-keycloak-start.ps1: register a startup Scheduled Task so
-    # Keycloak survives a reboot. Requires elevation. Off by default.
-    [switch]$RegisterStartupTask
+    # Opt OUT of the startup Scheduled Task. Registering it is the default: this script
+    # already requires elevation, and without the task Keycloak does not come back after
+    # a reboot, which leaves the Admin App unable to authenticate anyone.
+    [switch]$SkipStartupTask,
+
+    # The IIS app pool the startup task recycles once Keycloak is ready, so the API
+    # re-registers its OIDC strategy against a live identity provider. Default matches
+    # 05-deploy-api.ps1 (-AppPoolName).
+    [string]$ApiAppPoolName = "EdFi-AdminApp-API"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -212,6 +231,309 @@ function Resolve-KeycloakSha256 {
     if ($Override) { return $Override }
     if ($KnownKeycloakSha256.ContainsKey($Version)) { return $KnownKeycloakSha256[$Version] }
     throw "No pinned SHA-256 for Keycloak $Version. Keycloak publishes no .sha256 sidecar, so pass -KeycloakSha256 with the SHA-256 of keycloak-$Version.zip (verify it against the official keycloak-$Version.zip.asc GPG signature or .zip.sha1 sidecar first)."
+}
+
+# Resolve kc.bat under the install path, accepting a flat OR a nested (versioned)
+# layout. Returns $null when Keycloak has not been extracted yet.
+function Resolve-KcBat {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$InstallPath)
+    if (Test-Path (Join-Path $InstallPath 'bin\kc.bat')) {
+        return (Join-Path $InstallPath 'bin\kc.bat')
+    }
+    $sub = Get-ChildItem $InstallPath -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path "$($_.FullName)\bin\kc.bat" } |
+        Select-Object -First 1
+    if ($sub) { return "$($sub.FullName)\bin\kc.bat" }
+    return $null
+}
+
+# --- Startup task ---------------------------------------------------------------
+# Registering the boot task lives here rather than in idp-keycloak-start.ps1 for two
+# reasons: this script already requires elevation, and the task needs the realm and API
+# app pool names, which are provisioning concerns this script owns. idp-keycloak-start
+# stays a plain "launch Keycloak" script that runs unelevated.
+
+# Resolve a concrete JDK home to bake into the generated startup script. A task running
+# as SYSTEM sees only machine-scope environment variables, and kc.bat falls back to bare
+# 'java' from PATH when JAVA_HOME is unset -- which fails on a host where the JDK is only
+# on the interactive user's PATH. The JDK step above writes machine JAVA_HOME only when
+# it installs OpenJDK itself, so it cannot be relied on. Returns $null when nothing
+# usable is found; the caller degrades to the PATH fallback with a warning.
+function Resolve-JavaHome {
+    [CmdletBinding()]
+    param()
+    foreach ($candidate in @([Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine'), $env:JAVA_HOME)) {
+        if ($candidate -and (Test-Path (Join-Path $candidate 'bin\java.exe'))) { return $candidate }
+    }
+    $javaCommand = Get-Command java -ErrorAction SilentlyContinue
+    if ($javaCommand) {
+        # <jdk>\bin\java.exe -> <jdk>
+        $candidate = Split-Path (Split-Path $javaCommand.Source -Parent) -Parent
+        if ($candidate -and (Test-Path (Join-Path $candidate 'bin\java.exe'))) { return $candidate }
+    }
+    return $null
+}
+
+# Write the script the startup task executes. Kept as a generated file rather than
+# inlined into the task's Arguments for two reasons: the readiness poll and the app pool
+# recycle need real PowerShell, and a quoted command line nested inside cmd.exe quoting
+# is fragile. The file is also runnable by hand, which makes a failed boot diagnosable.
+#
+# The script deliberately outlives the readiness gate: it waits on the Keycloak process,
+# so the task stays running for as long as Keycloak does (which is what
+# ExecutionTimeLimit PT0S allows) and the task result reflects whether Keycloak is
+# still up, not just whether it launched.
+function Write-KeycloakStartupScript {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$KcBat,
+        [Parameter(Mandatory)][string]$KeycloakLogPath,
+        [Parameter(Mandatory)][string]$TaskLogPath,
+        [Parameter(Mandatory)][string]$DiscoveryUrl,
+        [Parameter(Mandatory)][string]$ApiAppPoolName,
+        [Parameter(Mandatory)][int]$ReadyTimeoutSeconds,
+        [AllowEmptyString()][string]$JavaHome
+    )
+    # Single-quoted here-string: every $ below belongs to the generated script, not to
+    # this one. Values are injected with String.Replace so a '$' or a regex
+    # metacharacter in a path cannot corrupt the result.
+    $template = @'
+# Generated by idp-keycloak-setup.ps1. Re-run that script to regenerate; edits made
+# here are overwritten.
+#
+# Runs at system startup as SYSTEM. Starts Keycloak, waits until the realm's OIDC
+# discovery endpoint answers, then recycles the Admin App API app pool so the API
+# registers its OIDC strategy against a live Keycloak -- the API registers strategies
+# once at startup and never retries, so an API that started first would reject every
+# login with 'Unknown authentication strategy'.
+
+# Continue past non-terminating errors: a boot script that aborts silently is worse
+# than one that logs and carries on to the next step.
+$ErrorActionPreference = 'Continue'
+
+$kcBat               = '__KC_BAT__'
+$javaHome            = '__JAVA_HOME__'
+$keycloakLogPath     = '__KEYCLOAK_LOG__'
+$taskLogPath         = '__TASK_LOG__'
+$discoveryUrl        = '__DISCOVERY_URL__'
+$apiAppPoolName      = '__API_APP_POOL__'
+$readyTimeoutSeconds = __READY_TIMEOUT__
+
+function Write-TaskLog {
+    param([Parameter(Mandatory)][string]$Message)
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $Message" | Add-Content -LiteralPath $taskLogPath
+}
+
+Write-TaskLog "Startup task begin."
+
+# kc.bat prefers JAVA_HOME over the PATH lookup, so setting it here makes the task
+# independent of which PATH scope the JDK happens to be on.
+if ($javaHome) {
+    $env:JAVA_HOME = $javaHome
+    Write-TaskLog "JAVA_HOME set to $javaHome"
+} else {
+    Write-TaskLog "No JDK path was resolved at registration time; kc.bat will fall back to 'java' on the machine PATH."
+}
+
+$keycloak = Start-Process -FilePath $kcBat -ArgumentList 'start-dev' `
+    -WorkingDirectory (Split-Path $kcBat -Parent) `
+    -RedirectStandardOutput $keycloakLogPath -RedirectStandardError "$keycloakLogPath.err" `
+    -WindowStyle Hidden -PassThru
+# Start-Process does not retain the process handle when output is redirected, so
+# ExitCode reads back as $null once the process ends. Touching .Handle caches it.
+# Without this the task always exits 0 and the log records an empty exit code, so a
+# dead Keycloak is indistinguishable from a clean shutdown.
+$null = $keycloak.Handle
+Write-TaskLog "Launched '$kcBat start-dev' (process ID $($keycloak.Id))."
+
+# Health gate: wait for the realm the Admin App actually authenticates against, not
+# just an open port. Mirrors the realm-level healthcheck the Ed-Fi Docker reference
+# uses before it starts the API.
+$deadline = (Get-Date).AddSeconds($readyTimeoutSeconds)
+$ready = $false
+while ((Get-Date) -lt $deadline) {
+    if ($keycloak.HasExited) {
+        Write-TaskLog "Keycloak exited during startup with code $($keycloak.ExitCode); see $keycloakLogPath."
+        exit 1
+    }
+    try {
+        Invoke-RestMethod -Uri $discoveryUrl -TimeoutSec 5 | Out-Null
+        $ready = $true
+        break
+    } catch {
+        Start-Sleep -Seconds 5
+    }
+}
+
+if ($ready) {
+    Write-TaskLog "Keycloak ready at $discoveryUrl"
+    # Recycling kills any Node process that started before Keycloak was reachable; the
+    # next request spawns one that discovers the realm successfully.
+    try {
+        Import-Module WebAdministration -ErrorAction Stop
+        if (Test-Path "IIS:\AppPools\$apiAppPoolName") {
+            Restart-WebAppPool -Name $apiAppPoolName
+            Write-TaskLog "Recycled app pool '$apiAppPoolName'."
+        } else {
+            Write-TaskLog "App pool '$apiAppPoolName' not found; skipping the recycle (Keycloak-only install)."
+        }
+    } catch {
+        Write-TaskLog "Could not recycle app pool '$apiAppPoolName': $($_.Exception.Message)"
+    }
+} else {
+    Write-TaskLog "Keycloak did not answer $discoveryUrl within $readyTimeoutSeconds seconds; skipping the API app pool recycle. Keycloak is left running."
+}
+
+# Stay alive for Keycloak's lifetime so the task represents the running server.
+$keycloak.WaitForExit()
+$exitCode = $keycloak.ExitCode
+if ($null -eq $exitCode) {
+    Write-TaskLog "Keycloak stopped without reporting an exit code; treating it as a failure so the task does not record a false success."
+    $exitCode = 1
+} else {
+    Write-TaskLog "Keycloak exited with code $exitCode."
+}
+exit $exitCode
+'@
+    $rendered = $template.
+        Replace('__KC_BAT__',        $KcBat).
+        Replace('__JAVA_HOME__',     $JavaHome).
+        Replace('__KEYCLOAK_LOG__',  $KeycloakLogPath).
+        Replace('__TASK_LOG__',      $TaskLogPath).
+        Replace('__DISCOVERY_URL__', $DiscoveryUrl).
+        Replace('__API_APP_POOL__',  $ApiAppPoolName).
+        Replace('__READY_TIMEOUT__', $ReadyTimeoutSeconds.ToString())
+    Set-Content -LiteralPath $ScriptPath -Value $rendered -Encoding UTF8
+}
+
+# Register the startup Scheduled Task. Idempotent -- TASK_CREATE_OR_UPDATE overwrites any
+# existing task of the same name.
+function Register-KeycloakStartupTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$KcBat,
+        [Parameter(Mandatory)][string]$InstallPath,
+        [Parameter(Mandatory)][string]$DiscoveryUrl,
+        [Parameter(Mandatory)][string]$ApiAppPoolName,
+        [Parameter(Mandatory)][int]$ReadyTimeoutSeconds
+    )
+    $taskName = 'Ed-Fi Admin App Keycloak'
+    $startupScriptPath = Join-Path $InstallPath 'edfi-keycloak-startup.ps1'
+    $keycloakLogPath = Join-Path $InstallPath 'keycloak-startup.log'
+    $taskLogPath = Join-Path $InstallPath 'keycloak-startup-task.log'
+
+    $javaHome = Resolve-JavaHome
+    Write-KeycloakStartupScript -ScriptPath $startupScriptPath -KcBat $KcBat `
+        -KeycloakLogPath $keycloakLogPath -TaskLogPath $taskLogPath -DiscoveryUrl $DiscoveryUrl `
+        -ApiAppPoolName $ApiAppPoolName -ReadyTimeoutSeconds $ReadyTimeoutSeconds `
+        -JavaHome ([string]$javaHome)
+    if ($javaHome) {
+        Write-Host "Startup script will run Keycloak with JAVA_HOME=$javaHome"
+    } else {
+        Write-Warning "No JDK path could be resolved for the startup task; it will rely on 'java' being on the machine PATH."
+    }
+
+    # Register through the Task Scheduler COM API. Neither Register-ScheduledTask (the
+    # ScheduledTasks CIM module) nor schtasks.exe /create /xml can persist a SYSTEM
+    # service-account principal: both store
+    # <LogonType>InteractiveToken</LogonType> next to the SYSTEM SID, and omitting the
+    # element from the XML does not help because the service normalizes it to
+    # InteractiveToken on save. That pairing is self-contradictory -- SYSTEM has no
+    # interactive token -- so the task cannot be read back by the CIM provider
+    # (Get-ScheduledTask fails with SCHED_E_INVALIDVALUE, 0x80041318) and has no valid
+    # token to run with at boot, where no interactive session exists.
+    #
+    # RegisterTask takes the logon type as an explicit argument, which is the only way to
+    # persist TASK_LOGON_SERVICE_ACCOUNT. <LogonType> stays out of the XML because the
+    # schema's enumeration has no 'ServiceAccount' member -- the argument supplies it.
+    # The S-1-5-18 SID rather than the 'SYSTEM' account name also keeps registration
+    # working on non-English Windows.
+    #
+    # Schema 1.2 (Windows 8 / Server 2012+) rather than 1.3: only 1.2-era elements are
+    # used, so the lower version widens the supported OS range at no cost.
+    # ExecutionTimeLimit PT0S -> no time limit, so the task is not killed after the
+    # default 3-day cap; it runs for as long as Keycloak does.
+    # RestartOnFailure is kept as a best-effort safety net on the boot path. Do not rely
+    # on it: Task Scheduler was measured not to act on a non-zero action result.
+    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $escapedCommand = [System.Security.SecurityElement]::Escape($powerShellPath)
+    $escapedArguments = [System.Security.SecurityElement]::Escape(
+        "-NoProfile -ExecutionPolicy Bypass -File `"$startupScriptPath`"")
+    $escapedWorkingDirectory = [System.Security.SecurityElement]::Escape($InstallPath)
+    $taskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Starts the Ed-Fi Admin App example Keycloak identity provider at system startup, then recycles the Admin App API app pool so the API registers its OIDC strategy against a running Keycloak.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$escapedCommand</Command>
+      <Arguments>$escapedArguments</Arguments>
+      <WorkingDirectory>$escapedWorkingDirectory</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"@
+    # TASK_CREATE_OR_UPDATE makes re-registration idempotent; the password argument is
+    # unused for a service account.
+    $taskCreateOrUpdate = 6
+    $taskLogonServiceAccount = 5
+    $scheduler = New-Object -ComObject Schedule.Service
+    try {
+        $scheduler.Connect()
+        $scheduler.GetFolder('\').RegisterTask(
+            $taskName, $taskXml, $taskCreateOrUpdate, 'S-1-5-18', $null, $taskLogonServiceAccount, $null) | Out-Null
+    } catch {
+        throw "Failed to register the startup task '$taskName': $($_.Exception.Message)"
+    } finally {
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler)
+    }
+
+    # Confirm the logon type actually persisted -- this is the exact value the CIM
+    # provider rejects when it is wrong, and a silent regression here would only show up
+    # as a failed boot.
+    $persisted = ([xml](Get-Content -LiteralPath "$env:SystemRoot\System32\Tasks\$taskName" -Raw)).Task.Principals.Principal
+    if ($persisted.PSObject.Properties['LogonType'] -and $persisted.LogonType -ne 'ServiceAccount') {
+        Write-Warning "The startup task registered with LogonType '$($persisted.LogonType)' instead of ServiceAccount. It may fail to start at boot; check Task Scheduler history for '$taskName'."
+    }
+
+    Write-Host "Registered startup task '$taskName' (runs as SYSTEM at boot)." -ForegroundColor Green
+    Write-Host "  Startup script: $startupScriptPath" -ForegroundColor DarkGray
+    Write-Host "  Task log:       $taskLogPath" -ForegroundColor DarkGray
+    Write-Host "  At boot it starts Keycloak, waits for $DiscoveryUrl, then recycles app pool '$ApiAppPoolName'." -ForegroundColor DarkGray
+    Write-Host "  Remove it with: schtasks /delete /tn '$taskName' /f" -ForegroundColor DarkGray
 }
 
 # Secrets arrive as SecureString (kept off the command line); unwrap to plaintext
@@ -315,15 +637,7 @@ if ($openJdk21Root) {
 }
 
 # Keycloak -- accept flat OR nested (BasePath\keycloak-<ver>\bin\kc.bat) layout
-$existingKcBat = $null
-if (Test-Path "$KeycloakInstallPath\bin\kc.bat") {
-    $existingKcBat = "$KeycloakInstallPath\bin\kc.bat"
-} else {
-    $sub = Get-ChildItem $KeycloakInstallPath -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path "$($_.FullName)\bin\kc.bat" } |
-        Select-Object -First 1
-    if ($sub) { $existingKcBat = "$($sub.FullName)\bin\kc.bat" }
-}
+$existingKcBat = Resolve-KcBat -InstallPath $KeycloakInstallPath
 if ($existingKcBat) {
     Write-Host "Keycloak already installed at $existingKcBat"
 } else {
@@ -380,8 +694,7 @@ Write-Host "Starting Keycloak via idp-keycloak-start.ps1..."
     -AdminUser $AdminUser `
     -AdminPassword $AdminPassword `
     -BaseUrl $KeycloakBaseUrl `
-    -ReadyTimeoutSeconds $ReadyTimeoutSeconds `
-    -RegisterStartupTask:$RegisterStartupTask
+    -ReadyTimeoutSeconds $ReadyTimeoutSeconds
 
 function Invoke-KcApi {
     param(
@@ -708,6 +1021,23 @@ if ($passwordWorks) {
     $pwBody = @{ type = "password"; value = $TestUserPasswordPlain; temporary = $false }
     Invoke-KcApi -Method Put -Path "/realms/$RealmName/users/$userId/reset-password" -Body $pwBody
     Write-Host "Password set for '$TestUserEmail'."
+}
+
+# Startup task -- registered last, once the realm exists, so the task's health gate has
+# something real to wait on. Opt out with -SkipStartupTask.
+if ($SkipStartupTask) {
+    Write-Host ""
+    Write-Warning "Skipping the startup task (-SkipStartupTask). Keycloak will NOT restart after a reboot, and the Admin App will reject logins until Keycloak is started and the API app pool '$ApiAppPoolName' is recycled."
+} else {
+    Write-Host ""
+    Write-Host "Registering the Keycloak startup task..."
+    $kcBatForTask = Resolve-KcBat -InstallPath $KeycloakInstallPath
+    if (-not $kcBatForTask) {
+        throw "kc.bat not found under $KeycloakInstallPath, so the startup task cannot be registered. Re-run this script, or pass -SkipStartupTask to continue without reboot survival."
+    }
+    Register-KeycloakStartupTask -KcBat $kcBatForTask -InstallPath $KeycloakInstallPath `
+        -DiscoveryUrl "$KeycloakBaseUrl/realms/$RealmName/.well-known/openid-configuration" `
+        -ApiAppPoolName $ApiAppPoolName -ReadyTimeoutSeconds $ReadyTimeoutSeconds
 }
 
 Write-Host ""

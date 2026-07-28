@@ -102,7 +102,7 @@ Numbered scripts map to the official guide's section order. The **generic path**
 | Script | Purpose |
 |---|---|
 | `idp-keycloak-setup.ps1` | One run = a ready local Keycloak: installs a JDK if needed, downloads Keycloak, starts it (via `idp-keycloak-start.ps1`), then provisions the `edfi` realm, `edfiadminapp` client, and test user. |
-| `idp-keycloak-start.ps1` | Starts Keycloak in the background (bootstraps the master admin on first run, waits for readiness). Use to relaunch after a reboot. |
+| `idp-keycloak-start.ps1` | Starts Keycloak in the background (bootstraps the master admin on first run, waits for readiness). Does not require elevation. Use to relaunch Keycloak by hand. |
 
 ### Transversal
 
@@ -254,6 +254,40 @@ See the [Admin App User's Guide](https://docs.ed-fi.org/reference/admin-app/) fo
 
 `-OidcClientSecret` and `-TestUserPassword` are idempotently updatable on every re-run — both the Keycloak client and the `oidc` database row are reconciled (UPSERT) on each run, so a changed secret takes effect without a manual reset.
 
+### Surviving a reboot (local Keycloak)
+
+Keycloak runs as an ordinary background process, so it does not come back on its own after a reboot — and a stopped Keycloak breaks login in a way that is easy to misread. The Admin App API registers its OIDC strategies **once, when it starts, with no retry**. If the API starts before Keycloak is reachable, every login returns a 404 and the API log (`C:\inetpub\EdFi-AdminApp-API\logs\node-stdout*.log`) shows:
+
+```
+ERROR Error registering OIDC provider http://localhost:8080/realms/edfi: AggregateError
+ERROR Error: Unknown authentication strategy "oidc-1"
+```
+
+`idp-keycloak-setup.ps1` handles both halves by registering a Scheduled Task named **`Ed-Fi Admin App Keycloak`**, on by default. At boot, as `SYSTEM`, it runs a generated script (`C:\keycloak\edfi-keycloak-startup.ps1`) that:
+
+1. Sets `JAVA_HOME` to the JDK resolved at install time, so it works regardless of which `PATH` scope the JDK is on (a `SYSTEM` process sees only machine-scope variables).
+2. Starts `kc.bat start-dev`.
+3. Waits for `http://localhost:8080/realms/edfi/.well-known/openid-configuration` to answer — a realm-level health gate, not just an open port.
+4. Recycles the API app pool (`EdFi-AdminApp-API`) so the API re-registers its OIDC strategy against the now-running Keycloak. Skipped, with a log line, when the app pool is absent.
+
+Progress is logged to `C:\keycloak\keycloak-startup-task.log`; Keycloak's own output goes to `keycloak-startup.log`. Inspect or trigger the task with:
+
+```powershell
+schtasks /query /tn 'Ed-Fi Admin App Keycloak'          # elevated, for a SYSTEM task
+schtasks /run   /tn 'Ed-Fi Admin App Keycloak'
+```
+
+Use `schtasks`, not `Get-ScheduledTask`: the CIM cmdlets enumerate the whole task store before filtering, so they fail with `SCHED_E_INVALIDVALUE` (`0x80041318`) when any unrelated task on the machine has XML the CIM provider cannot parse, which is common on a Windows host.
+
+Opt out with `-SkipKeycloakStartupTask` on `install-all.ps1` (or `-SkipStartupTask` on `idp-keycloak-setup.ps1`). Without the task, after every reboot you must start Keycloak yourself and then recycle the app pool:
+
+```powershell
+C:\keycloak\bin\kc.bat start-dev          # leave this window open
+Restart-WebAppPool -Name 'EdFi-AdminApp-API'   # elevated; only if the API already started
+```
+
+Remove an existing task with `schtasks /delete /tn 'Ed-Fi Admin App Keycloak' /f` (`uninstall-keycloak.ps1` does this for you).
+
 ### Entra: "Invalid email from IdP" after sign-in
 
 The Admin App requires an `email` claim in the OIDC userinfo/token. If Entra authenticates the user but the app then errors with `Invalid email from IdP`, the app registration isn't emitting an email claim. In the Entra app registration, add an `email` optional claim (Token configuration) or a claim mapper, then sign in again. See the dedicated Entra setup guide for the full configuration rather than treating this as a one-off fix.
@@ -280,7 +314,8 @@ Restart-WebAppPool -Name "EdFi-AdminApp-API"
 
 - **Upstream TLS verification (adding an Environment)** — the API verifies the TLS certificate of the ODS/API and Admin API it connects to (`SSL_VERIFICATION` is on by default). If those use a self-signed or dev certificate — common for a local ODS/API — adding an Environment fails with a certificate error (`DEPTH_ZERO_SELF_SIGNED_CERT`) in the API log (`logs\node-stdout*.log`). For a local/dev install, either pass `-DisableSslVerification` to `install-all.ps1` / `05-deploy-api.ps1` (turns verification off — local dev only), or keep it on and make Node trust the upstream certificate via `NODE_EXTRA_CA_CERTS` (the certificate's `.pem` path) or `--use-system-ca` (Node 22.15+, honors the Windows certificate store). Leave verification on (no flag) for production, where upstreams should present trusted certificates.
 - **Production hardening** — real certificates, secrets management, log rotation, etc. The optional dockerized Yopass runs HTTP-only behind localhost and is not production-hardened.
-- **Keycloak in production mode** — the example identity provider runs in `start-dev` (HTTP, embedded H2 database, hostname strictness off) and is for local development only. For anything beyond local dev, run `kc.bat start` with `--hostname`, a real database (e.g. PostgreSQL), and TLS. By default Keycloak is started via `Start-Process` and does not survive a reboot; pass `-RegisterKeycloakStartupTask` to `install-all.ps1` (or `-RegisterStartupTask` to `idp-keycloak-start.ps1`, elevated) to register a startup task that relaunches it on boot.
+- **Keycloak in production mode** — the example identity provider runs in `start-dev` (HTTP, embedded H2 database, hostname strictness off) and is for local development only. For anything beyond local dev, run `kc.bat start` with `--hostname`, a real database (e.g. PostgreSQL), and TLS.
+- **Keycloak as a Windows service** — Keycloak ships no Windows service wrapper, so reboot survival is handled with a Scheduled Task (see [Surviving a reboot](#surviving-a-reboot-local-keycloak) above) rather than a real service. The task starts Keycloak at boot; it does not restart Keycloak if it stops afterwards.
 - **Secret rotation** — not enabled; the AdminApp has no automation to pick up rotated secrets.
 
 ---

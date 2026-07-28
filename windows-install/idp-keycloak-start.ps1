@@ -13,17 +13,12 @@ If Keycloak was previously bootstrapped with a different admin password, the env
 variables are ignored (Keycloak only honors them on first start) — use the existing
 admin credentials downstream.
 
-Does NOT require elevation, unless -RegisterStartupTask is used (registering a
-machine startup task needs an elevated shell).
+Does NOT require elevation. Making Keycloak survive a reboot is a separate,
+machine-level concern owned by idp-keycloak-setup.ps1, which registers the startup
+task (it needs the realm and API app pool names, and an elevated shell).
 
 .PARAMETER KeycloakInstallPath
 Where Keycloak is installed. Default: C:\keycloak.
-
-.PARAMETER RegisterStartupTask
-Switch -- register a Windows Scheduled Task that relaunches Keycloak (as SYSTEM,
-'kc.bat start-dev') at system startup so the example identity provider survives a reboot.
-Requires elevation. Off by default. Remove with
-schtasks /delete /tn 'Ed-Fi Admin App Keycloak' /f.
 
 .PARAMETER AdminUser
 Bootstrap admin username (first-run only). Default: admin.
@@ -49,13 +44,7 @@ param(
     [SecureString]$AdminPassword,
 
     [string]$BaseUrl = "http://localhost:8080",
-    [int]$ReadyTimeoutSeconds = 120,
-
-    # Opt-in: register a Windows Scheduled Task that relaunches Keycloak at system
-    # startup so the example identity provider survives a reboot (otherwise it must be restarted by
-    # re-running this script). Requires an elevated shell. Off by default to keep the
-    # local example lightweight.
-    [switch]$RegisterStartupTask
+    [int]$ReadyTimeoutSeconds = 120
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,33 +61,6 @@ function Resolve-KcBat {
         Select-Object -First 1
     if ($sub) { return "$($sub.FullName)\bin\kc.bat" }
     throw "kc.bat not found under $InstallPath. Run idp-keycloak-setup.ps1 first to download Keycloak."
-}
-
-# Register a startup Scheduled Task so Keycloak comes back after a reboot. Runs as
-# SYSTEM at boot (survives with no interactive logon; picks up the machine JAVA_HOME
-# that idp-keycloak-setup sets). Idempotent via -Force. Requires elevation.
-function Register-KeycloakStartupTask {
-    param(
-        [Parameter(Mandatory)][string]$KcBat,
-        [Parameter(Mandatory)][string]$LogPath
-    )
-    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $isAdmin) {
-        throw "-RegisterStartupTask requires an elevated (Administrator) PowerShell session to register a machine startup task."
-    }
-    $taskName = 'Ed-Fi Admin App Keycloak'
-    $action = New-ScheduledTaskAction -Execute 'cmd.exe' `
-        -Argument "/c `"`"$KcBat`" start-dev >> `"$LogPath`" 2>&1`"" `
-        -WorkingDirectory (Split-Path $KcBat -Parent)
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    # ExecutionTimeLimit = 0 -> no time limit, so Keycloak is not killed after the
-    # default 3-day task cap.
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-    Write-Host "Registered startup task '$taskName' (runs 'kc.bat start-dev' as SYSTEM at boot)." -ForegroundColor Green
-    Write-Host "  Remove it with: schtasks /delete /tn '$taskName' /f" -ForegroundColor DarkGray
 }
 
 # AdminPassword arrives as SecureString (kept off the command line); unwrap to a
@@ -123,7 +85,6 @@ try {
     $r = Invoke-RestMethod -Uri $discoveryUrl -TimeoutSec 5
     Write-Host "Keycloak already running at $BaseUrl" -ForegroundColor Green
     Write-Host "Issuer: $($r.issuer)"
-    if ($RegisterStartupTask) { Register-KeycloakStartupTask -KcBat (Resolve-KcBat $KeycloakInstallPath) -LogPath $startupLog }
     return
 } catch {
     Write-Host "Keycloak not responding yet — starting it..."
@@ -187,10 +148,8 @@ if (-not $ready) {
     throw "Keycloak did not become ready within $ReadyTimeoutSeconds seconds. Check the startup log at $startupLog (and $startupErr)."
 }
 
-if ($RegisterStartupTask) { Register-KeycloakStartupTask -KcBat $kcBat -LogPath $startupLog }
-
 Write-Host ""
 Write-Host "SUCCESS: Keycloak running at $BaseUrl" -ForegroundColor Green
 Write-Host "Admin user: $AdminUser (password as provided)"
 Write-Host "Process ID: $($proc.Id) — close this terminal or stop the process to shut down."
-Write-Host "To relaunch after a reboot: re-run this script, or (if you used -RegisterStartupTask) schtasks /run /tn 'Ed-Fi Admin App Keycloak'." -ForegroundColor DarkGray
+Write-Host "To have Keycloak relaunched automatically after a reboot, run idp-keycloak-setup.ps1 (it registers the startup task by default)." -ForegroundColor DarkGray
