@@ -107,7 +107,7 @@ to `accounts.google.com`. Register the redirect URI the installer prints:
 | `-DisableSslVerification` | Disable upstream TLS verification (local self-signed upstreams). On by default. |
 | `-HttpsApiPort` / `-HttpsFePort` | HTTPS ports (default 3443 / 4443). |
 | `-CertificateThumbprint` / `-CertificatePfxPath` / `-CertificatePassword` | Supply a real certificate instead of self-signed. |
-| `-RegisterKeycloakStartupTask` | Register a reboot-survival scheduled task for Keycloak. |
+| `-SkipKeycloakStartupTask` | Opt out of the Keycloak reboot-survival scheduled task. Registered by default. |
 | `-AcceptRisks` | Proceed past 00-check port RISK warnings. |
 
 `-HttpHandler` (`HttpBridge` default, or `HttpPlatformHandler`) lives on `01-prereqs-iis.ps1`

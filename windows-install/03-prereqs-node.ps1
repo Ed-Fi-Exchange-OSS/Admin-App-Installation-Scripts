@@ -45,7 +45,13 @@ non-interactive runs (CI, install-all -AutoUpgradeNode).
 param(
     [string]$SourcePath = $(
         $c = Split-Path $PSScriptRoot -Parent
-        if (Test-Path "$c\package.json") { $c } else { Join-Path (Split-Path $c -Parent) 'Ed-Fi-AdminApp' }
+        $r = Split-Path $c -Parent
+        if (Test-Path "$c\package.json") { $c }
+        elseif ($r) { Join-Path $r 'Ed-Fi-AdminApp' }
+        else {
+            Write-Warning "'$PSScriptRoot' has no grandparent directory; defaulting the Admin App source to $env:SystemDrive\Ed-Fi\Ed-Fi-AdminApp. Pass -SourcePath to choose a different location."
+            Join-Path (Join-Path $env:SystemDrive 'Ed-Fi') 'Ed-Fi-AdminApp'
+        }
     ),
     [int]$MinNodeMajor = 22,
     [string]$NodeLtsVersion = "22",

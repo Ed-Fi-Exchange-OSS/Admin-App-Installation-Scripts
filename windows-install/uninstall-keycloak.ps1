@@ -131,8 +131,9 @@ if (-not $kcStopped) {
 # ========================================================
 Write-Section "1b. Startup task"
 # ========================================================
-# Remove the opt-in reboot-survival task registered by idp-keycloak-start.ps1
-# -RegisterStartupTask (if it was ever created). Use schtasks.exe rather than the
+# Remove the reboot-survival task registered by idp-keycloak-setup.ps1 (unless it ran
+# with -SkipStartupTask). The startup script the task runs lives in the Keycloak install
+# directory, which section 2 deletes. Use schtasks.exe rather than the
 # Get/Unregister-ScheduledTask CIM cmdlets: those enumerate the whole task store and
 # throw (0x80041318) if ANY unrelated task on the machine has XML the CIM provider
 # can't parse, which would silently skip our teardown. schtasks targets the task by

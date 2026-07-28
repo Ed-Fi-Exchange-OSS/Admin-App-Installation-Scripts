@@ -112,8 +112,13 @@ param(
     [int]$HttpsApiPort = 3443,
     [int]$HttpsFePort = 4443,
     # Summary is written by install-all.ps1 to the parent of the repository directory
-    # (i.e. grandparent of windows-install\). Auto-resolve the same way.
-    [string]$SummaryPath = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "install-summary.txt"),
+    # (i.e. grandparent of windows-install\). Auto-resolve the same way, falling back to
+    # the documented default location when there is no grandparent directory.
+    [string]$SummaryPath = $(
+        $r = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        if (-not $r) { $r = Join-Path $env:SystemDrive 'Ed-Fi' }
+        Join-Path $r "install-summary.txt"
+    ),
 
     [switch]$KeepDatabase,
     [switch]$KeepNpmCache,
