@@ -447,7 +447,12 @@ if (-not $SourcePath) {
         $SourcePath = $colocated
         Write-Host "Using the Admin App source co-located with the scripts: $SourcePath"
     } else {
-        $SourcePath = Join-Path (Split-Path $colocated -Parent) 'Ed-Fi-AdminApp'
+        $container = Split-Path $colocated -Parent
+        if (-not $container) {
+            $container = Join-Path $env:SystemDrive 'Ed-Fi'
+            Write-Warning "'$scriptDir' has no grandparent directory, so the Admin App source cannot be placed beside the scripts repository. Defaulting to $container. Pass -SourcePath to choose a different location."
+        }
+        $SourcePath = Join-Path $container 'Ed-Fi-AdminApp'
     }
 }
 
