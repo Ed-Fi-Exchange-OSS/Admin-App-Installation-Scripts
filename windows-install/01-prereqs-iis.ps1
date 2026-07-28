@@ -105,6 +105,19 @@ function Install-VerifiedMsi {
     Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
 }
 
+# Global module presence is read with appcmd rather than Get-WebGlobalModule: appcmd
+# behaves identically in Windows PowerShell 5.1 and PowerShell 7, whereas
+# WebAdministration loads under 7 only through the Windows PowerShell compatibility
+# layer. This script never used the IIS:\ provider drive, so appcmd plus the existing
+# appcmd unlock call below removes its module dependency entirely.
+function Test-IisGlobalModule {
+    param([Parameter(Mandatory)][string]$Name)
+    $appcmdExe = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
+    if (-not (Test-Path $appcmdExe)) { return $false }
+    $registeredModules = & $appcmdExe list module 2>$null
+    return [bool]($registeredModules -match [regex]::Escape($Name))
+}
+
 # Precondition: the IIS web server role must already be installed
 # (setup-vm-prereqs.ps1 does that). This script only adds URL Rewrite + the httpPlatform handler.
 if (-not (Get-Service W3SVC -ErrorAction SilentlyContinue)) {
@@ -117,7 +130,6 @@ $iisMajor = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\InetStp" -Name MajorVers
 if ($iisMajor -and $iisMajor -lt 10) {
     throw "IIS $iisMajor detected; this install requires IIS 10 or newer (App Pool environment variables, used to scope the npm cache, were added in IIS 10). Use Windows 10/11 or Windows Server 2016+."
 }
-Import-Module WebAdministration
 
 # IIS URL Rewrite Module.
 # Still required by the web application web.config SPA fallback (06-deploy-fe.ps1 rewrites to
@@ -141,7 +153,7 @@ Write-Host "Unlocked system.webServer/handlers section."
 # httpPlatform handler. Both HttpBridge and Microsoft HttpPlatformHandler register
 # a global module named 'httpPlatformHandler'. Skip if already present (re-run safe;
 # switching handlers needs a manual uninstall first).
-if (Get-WebGlobalModule -Name 'httpPlatformHandler' -ErrorAction SilentlyContinue) {
+if (Test-IisGlobalModule -Name 'httpPlatformHandler') {
     # Both handlers register the same module name, so detect which MSI is installed
     # to tell whether it matches the requested -HttpHandler and warn if it does not
     # (switching handlers needs a manual uninstall of the current MSI first).
@@ -164,7 +176,7 @@ if (Get-WebGlobalModule -Name 'httpPlatformHandler' -ErrorAction SilentlyContinu
 } else {
     $h = $Handlers[$HttpHandler]
     Install-VerifiedMsi -Name $HttpHandler -Url $h.Url -Sha256 $h.Sha256 -FileName $h.File
-    if (-not (Get-WebGlobalModule -Name 'httpPlatformHandler' -ErrorAction SilentlyContinue)) {
+    if (-not (Test-IisGlobalModule -Name 'httpPlatformHandler')) {
         throw "$HttpHandler install completed but the 'httpPlatformHandler' global module is not registered. Check the MSI installed correctly."
     }
 }
