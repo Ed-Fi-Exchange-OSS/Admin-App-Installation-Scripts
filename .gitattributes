@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers (e.g. the PostgreSQL first-boot init
+# hook under windows-install/docker/init) and break on CRLF line endings, so keep
+# them LF in the working tree regardless of the committer's core.autocrlf setting.
+*.sh text eol=lf

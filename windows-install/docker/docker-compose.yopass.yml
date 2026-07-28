@@ -1,0 +1,53 @@
+# Yopass + memcached for the Ed-Fi Admin App.
+#
+# Yopass (https://github.com/jhaals/yopass) creates self-destructing,
+# one-time-use links for sharing newly-created Ed-Fi API client credentials
+# instead of displaying them inline in the AdminApp UI. It is a stateless Go
+# service that needs a key/value store (memcached here) to hold the encrypted,
+# expiring secrets.
+#
+# Brought up by yopass-docker.ps1 (or by install-all.ps1 -SetupYopassDocker).
+# Kept in its own compose project (name below) and file so it is independent of
+# the postgres stack in docker-compose.yml -- you can run Yopass with either DB
+# engine, or not at all.
+#
+# The AdminApp API (running under IIS on the Windows host) reaches Yopass over
+# the published host port: it POSTs to ${YOPASS_URL}/secret. The container
+# itself listens on port 80; the host port defaults to 8082 and is overridable
+# via the YOPASS_PORT environment variable (yopass-docker.ps1 sets it for you).
+#
+# Image and container port are pinned to match the AdminApp project's own
+# production compose (compose/adminapp-services.yml): jhaals/yopass:12.5.0
+# (with digest) listening on port 80. The newer yopass `:latest` tag has a
+# different API surface and POST /secret 404s against the AdminApp's
+# packages/api/src/utils/yopass.ts client.
+name: edfiadminapp-yopass
+
+services:
+  memcached:
+    # Backing store for the encrypted secrets. Internal only -- not published to
+    # the host. Yopass reaches it by service name on the compose network.
+    image: memcached:1.6-alpine
+    container_name: edfiadminapp-yopass-memcached
+    restart: unless-stopped
+    # Cap item size so a single secret can't exhaust memory; 10m is plenty for
+    # the small JSON credential payloads the AdminApp sends.
+    command: ["memcached", "-m", "64", "-I", "10m"]
+
+  yopass:
+    # Pin to the exact image the AdminApp project ships against. Do not change
+    # without verifying packages/api/src/utils/yopass.ts (POST /secret + GET
+    # /secret/:id at the server root) still matches.
+    image: jhaals/yopass:12.5.0@sha256:916a1cf45d3665dd7e6a1a2157c7b81a06bfebd87947ace731bca0145418c5b5
+    container_name: edfiadminapp-yopass
+    restart: unless-stopped
+    depends_on:
+      - memcached
+    # HTTP only (no --tls-*) and bound to 127.0.0.1 on the host: this is for the
+    # local AdminApp API to call, nothing else. Front it with TLS and lock down
+    # access for any real deployment.
+    command:
+      - "--memcached=memcached:11211"
+      - "--port=80"
+    ports:
+      - "127.0.0.1:${YOPASS_PORT:-8082}:80"
