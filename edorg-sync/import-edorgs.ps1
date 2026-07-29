@@ -25,11 +25,18 @@
       edfi.PostSecondaryInstitution, edfi.OrganizationDepartment, edfi.Other);
       other types are skipped with a warning.
     * an education organization that already exists in the scope (same
-      tenant + ODS + educationOrganizationId) is left untouched, so re-runs
-      are no-ops and never clobber rows written by the Admin App itself.
+      tenant + ODS + educationOrganizationId) keeps its row, but its name,
+      short name, and type are corrected to the CSV values when they differ --
+      the same three columns the Admin App's own sync maintains. This fixes
+      the 'Institution #<id>' / edfi.Other placeholder rows the Admin App
+      writes when an ODS is registered with allowed ed orgs. Re-runs are
+      no-ops.
     * the parent link is resolved inside the same scope, whether the parent
       came from this CSV or already existed; a parent that cannot be found
-      leaves the row a root (warned).
+      leaves the row a root (warned). Parent links on pre-existing rows are
+      never clobbered.
+    * the ids actually INSERTED are recorded in imported-ids.csv next to the
+      CSV; cleanup-edorgs.ps1 deletes only ids recorded there.
 
   The whole load runs in a single transaction: on any error nothing is
   imported.
@@ -37,6 +44,65 @@
   NOTE: on SQL Server the Admin App schema stores educationOrganizationId as
   a 32-bit int, so ids above 2,147,483,647 cannot be imported (the script
   stops and lists them). PostgreSQL stores bigint and has no such limit.
+
+.PARAMETER CsvPath
+  CSV produced by export-edorgs.ps1, or hand-authored with the same columns.
+
+.PARAMETER TenantName
+  Admin App tenant to import into (edfi_tenant.name); 'default' unless the
+  deployment renamed it.
+
+.PARAMETER EnvironmentName
+  Environment name (sb_environment.name); only needed when the same tenant
+  name exists in more than one environment.
+
+.PARAMETER OdsDbName
+  Which registered ODS to attach the ed orgs to (ods.dbName); only needed when
+  the tenant has more than one ODS registered.
+
+.PARAMETER DbEngine
+  Admin App database engine: 'mssql' (default) or 'pgsql'.
+
+.PARAMETER DatabaseName
+  The Admin App application database (default 'sbaa').
+
+.PARAMETER SqlServer
+  mssql only: the SQL Server to connect to (default 'tcp:localhost,1433').
+
+.PARAMETER DbUsername
+  mssql only: SQL login (default 'edfi_adminapp').
+
+.PARAMETER DbPassword
+  mssql only: password for -DbUsername; required unless -UseIntegratedSecurity.
+  Passed to sqlcmd through the SQLCMDPASSWORD environment variable, never on a
+  command line.
+
+.PARAMETER UseIntegratedSecurity
+  mssql only: connect with Windows integrated authentication instead of
+  -DbUsername/-DbPassword.
+
+.PARAMETER PostgresAppPassword
+  pgsql only: password for -PostgresAppUser; required when -DbEngine is
+  'pgsql'. Passed to psql through the PGPASSWORD environment variable, never
+  on a command line.
+
+.PARAMETER PostgresHost
+  pgsql only: PostgreSQL host (default 'localhost'). Ignored with
+  -UsePostgresDocker.
+
+.PARAMETER PostgresPort
+  pgsql only: PostgreSQL port (default 5432). Ignored with -UsePostgresDocker.
+
+.PARAMETER PostgresAppUser
+  pgsql only: PostgreSQL login (default 'edfiadminapp').
+
+.PARAMETER UsePostgresDocker
+  pgsql only: run psql inside the Admin App Docker stack's database container
+  instead of a host psql.
+
+.PARAMETER PostgresContainerName
+  pgsql only: the Docker database container name (default
+  'edfiadminapp-postgres'). Only used with -UsePostgresDocker.
 
 .EXAMPLE
   # SQL Server (default engine), default tenant, single registered ODS:
@@ -75,7 +141,7 @@ param(
 
     # --- mssql -----------------------------------------------------------------
     [string]$SqlServer = 'tcp:localhost,1433',
-    [string]$DbUsername = 'sa',
+    [string]$DbUsername = 'edfi_adminapp',
     [string]$DbPassword,                         # required for -DbEngine mssql unless -UseIntegratedSecurity
     [switch]$UseIntegratedSecurity,
 
@@ -104,8 +170,10 @@ if ($DbEngine -eq 'mssql')
 {
     # The @(...) wrap is load-bearing: assignment from an if-expression unrolls
     # a one-element array to a scalar string, and splatting a scalar to a
-    # native command garbles the argument list.
-    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $DbUsername, '-P', $DbPassword })
+    # native command garbles the argument list. The password travels via
+    # SQLCMDPASSWORD (set around each call), never as -P, so it stays off
+    # the sqlcmd process command line (visible in the process list).
+    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $DbUsername })
 }
 
 function Invoke-AdminAppSql
@@ -123,6 +191,7 @@ function Invoke-AdminAppSql
             # UTF-8 with BOM so sqlcmd decodes non-ASCII institution names
             # correctly ('utf8BOM' is not a valid encoding name on 5.1).
             Write-Utf8BomFile -Path $tempFile -Content $Sql
+            if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
             $out = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
             if ($LASTEXITCODE -ne 0)
             {
@@ -133,18 +202,29 @@ function Invoke-AdminAppSql
         }
         finally
         {
+            Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
             Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
         }
     }
 
-    if ($UsePostgresDocker)
+    # Pass the password through the environment, never on the command line:
+    # `docker exec -e PGPASSWORD` (no value) forwards it from this process, so
+    # the secret stays out of the docker argv; cleared in the finally.
+    $env:PGPASSWORD = $PostgresAppPassword
+    try
     {
-        $out = $Sql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+        if ($UsePostgresDocker)
+        {
+            $out = $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+        }
+        else
+        {
+            $out = $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+        }
     }
-    else
+    finally
     {
-        $env:PGPASSWORD = $PostgresAppPassword
-        $out = $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
     }
     if ($LASTEXITCODE -ne 0)
     {
@@ -203,6 +283,26 @@ if ($rows.Count -eq 0) { throw "No importable rows: every row in the CSV has an 
 
 $duplicates = @($rows | Group-Object EdOrgId | Where-Object Count -gt 1)
 if ($duplicates.Count -gt 0) { throw "Duplicate educationOrganizationId value(s) in the CSV: $(($duplicates | ForEach-Object Name) -join ', ')." }
+
+# Self-parents and parent cycles would only surface later as an opaque
+# recursion error from the closure CTE (SQL Server stops at MAXRECURSION 100;
+# PostgreSQL has no depth cap at all), so reject them during validation. The
+# CSV is hand-editable per the docs, which makes this reachable in practice.
+$parentOf = @{}
+foreach ($row in $rows) { $parentOf[$row.EdOrgId] = $row.ParentEdOrgId }
+$acyclic = [System.Collections.Generic.HashSet[long]]::new()
+foreach ($row in $rows)
+{
+    if ($row.ParentEdOrgId -eq $row.EdOrgId) { throw "Row with educationOrganizationId $($row.EdOrgId) lists itself as its parent." }
+    $walk = [System.Collections.Generic.HashSet[long]]::new()
+    $cur = $row.EdOrgId
+    while ($null -ne $cur -and $parentOf.ContainsKey($cur) -and -not $acyclic.Contains([long]$cur))
+    {
+        if (-not $walk.Add([long]$cur)) { throw "Parent cycle in the CSV involving educationOrganizationId(s): $(@($walk | Sort-Object) -join ', ')." }
+        $cur = $parentOf[$cur]
+    }
+    $acyclic.UnionWith($walk)
+}
 
 # On SQL Server the Admin App stores educationOrganizationId as a 32-bit int.
 if ($DbEngine -eq 'mssql')
@@ -301,7 +401,11 @@ Write-Host "  Environment '$resolvedEnvName' (id $sbEnvironmentId), tenant id $t
 function Get-StageValuesBatches
 {
     # Multi-row VALUES batches (SQL Server caps a VALUES list at 1000 rows).
-    param([string]$NullKeyword = 'NULL')
+    # LiteralPrefix is 'N' on SQL Server: without it the strings are non-Unicode
+    # literals and get converted to the database's code page before landing in
+    # the nvarchar columns, silently turning characters the code page cannot
+    # represent into '?'. PostgreSQL literals are already Unicode; no prefix.
+    param([string]$NullKeyword = 'NULL', [string]$LiteralPrefix = '')
     $batchSize = 500
     $batches = @()
     for ($i = 0; $i -lt $rows.Count; $i += $batchSize)
@@ -309,10 +413,10 @@ function Get-StageValuesBatches
         $values = foreach ($row in $rows[$i..([Math]::Min($i + $batchSize, $rows.Count) - 1)])
         {
             $name = $row.Name.Replace("'", "''")
-            $short = if ($row.ShortName) { "'" + $row.ShortName.Replace("'", "''") + "'" } else { $NullKeyword }
+            $short = if ($row.ShortName) { "$LiteralPrefix'" + $row.ShortName.Replace("'", "''") + "'" } else { $NullKeyword }
             $disc = $row.Discriminator.Replace("'", "''")
             $parent = if ($null -ne $row.ParentEdOrgId) { $row.ParentEdOrgId } else { $NullKeyword }
-            "($($row.EdOrgId), '$name', $short, '$disc', $parent)"
+            "($($row.EdOrgId), $LiteralPrefix'$name', $short, $LiteralPrefix'$disc', $parent)"
         }
         $batches += ($values -join ",`n")
     }
@@ -321,7 +425,7 @@ function Get-StageValuesBatches
 
 if ($DbEngine -eq 'mssql')
 {
-    $stageInserts = (Get-StageValuesBatches | ForEach-Object {
+    $stageInserts = (Get-StageValuesBatches -LiteralPrefix 'N' | ForEach-Object {
             "INSERT INTO #stage (edOrgId, name, shortName, disc, parentEdOrgId) VALUES`n$_;"
         }) -join "`n"
 
@@ -341,6 +445,15 @@ $stageInserts
 
 BEGIN TRANSACTION;
 
+-- Ids not in the scope yet, recorded before the insert: the run reports (and
+-- the manifest records) exactly what it created, as opposed to rows that
+-- already existed.
+SELECT s.edOrgId INTO #new
+FROM #stage s
+WHERE NOT EXISTS (SELECT 1 FROM [edorg] e
+                  WHERE e.[edfiTenantId] = $tenantId AND e.[odsId] = $odsId
+                      AND e.[educationOrganizationId] = s.edOrgId);
+
 INSERT INTO [edorg] ([created], [modified], [odsId], [odsDbName], [odsInstanceId],
                      [edfiTenantId], [sbEnvironmentId], [educationOrganizationId],
                      [nameOfInstitution], [shortNameOfInstitution], [discriminator])
@@ -348,10 +461,24 @@ SELECT GETDATE(), GETDATE(), $odsId, N'$odsDbNameSqlLit', $odsInstanceIdSql,
        $tenantId, $sbEnvironmentId, s.edOrgId,
        s.name, s.shortName, s.disc
 FROM #stage s
-WHERE NOT EXISTS (SELECT 1 FROM [edorg] e
-                  WHERE e.[edfiTenantId] = $tenantId AND e.[odsId] = $odsId
-                      AND e.[educationOrganizationId] = s.edOrgId);
-PRINT CONCAT('Inserted ', @@ROWCOUNT, ' new edorg row(s); the rest already existed.');
+WHERE s.edOrgId IN (SELECT edOrgId FROM #new);
+PRINT CONCAT('Inserted ', @@ROWCOUNT, ' new edorg row(s).');
+
+-- Existing rows whose name or type differs are corrected -- the same three
+-- columns the Admin App's own sync maintains (packages/api sync-ods.ts). In
+-- particular this fixes the 'Institution #<id>' / edfi.Other placeholder rows
+-- the Admin App writes when an ODS is registered with allowed ed orgs.
+UPDATE e SET [nameOfInstitution] = s.name,
+             [shortNameOfInstitution] = s.shortName,
+             [discriminator] = s.disc,
+             [modified] = GETDATE()
+FROM [edorg] e
+    INNER JOIN #stage s ON s.edOrgId = e.[educationOrganizationId]
+WHERE e.[edfiTenantId] = $tenantId AND e.[odsId] = $odsId
+    AND (e.[nameOfInstitution] <> s.name
+         OR COALESCE(e.[shortNameOfInstitution], N'') <> COALESCE(s.shortName, N'')
+         OR e.[discriminator] <> s.disc);
+PRINT CONCAT('Updated ', @@ROWCOUNT, ' existing row(s) whose name or type differed from the CSV.');
 
 -- Wire the hierarchy. Only rows without a parent are touched, so links
 -- written by the Admin App itself are never clobbered.
@@ -393,6 +520,7 @@ END
 
 COMMIT TRANSACTION;
 
+SELECT CONCAT('INSERTED|', edOrgId) FROM #new ORDER BY edOrgId;
 SELECT CONCAT('TOTAL|', COUNT(*)) FROM [edorg]
 WHERE [edfiTenantId] = $tenantId AND [odsId] = $odsId;
 "@
@@ -415,6 +543,16 @@ CREATE TEMP TABLE stage (
 ) ON COMMIT DROP;
 $stageInserts
 
+-- Ids not in the scope yet, recorded before the insert: the run reports (and
+-- the manifest records) exactly what it created, as opposed to rows that
+-- already existed.
+CREATE TEMP TABLE new_ids ON COMMIT DROP AS
+SELECT s.edorgid
+FROM stage s
+WHERE NOT EXISTS (SELECT 1 FROM edorg e
+                  WHERE e."edfiTenantId" = $tenantId AND e."odsId" = $odsId
+                      AND e."educationOrganizationId" = s.edorgid);
+
 INSERT INTO edorg (created, modified, "odsId", "odsDbName", "odsInstanceId",
                    "edfiTenantId", "sbEnvironmentId", "educationOrganizationId",
                    "nameOfInstitution", "shortNameOfInstitution", discriminator)
@@ -422,7 +560,31 @@ SELECT now(), now(), $odsId, '$odsDbNameSqlLit', $odsInstanceIdSql,
        $tenantId, $sbEnvironmentId, s.edorgid,
        s.name, s.shortname, s.disc
 FROM stage s
+WHERE s.edorgid IN (SELECT edorgid FROM new_ids)
 ON CONFLICT ("edfiTenantId", "odsId", "educationOrganizationId") DO NOTHING;
+SELECT CONCAT('MSG|Inserted ', COUNT(*), ' new edorg row(s).') FROM new_ids;
+
+-- Existing rows whose name or type differs are corrected -- the same three
+-- columns the Admin App's own sync maintains (packages/api sync-ods.ts). In
+-- particular this fixes the 'Institution #<id>' / edfi.Other placeholder rows
+-- the Admin App writes when an ODS is registered with allowed ed orgs.
+CREATE TEMP TABLE changed_ids ON COMMIT DROP AS
+SELECT s.edorgid
+FROM stage s
+    JOIN edorg e ON e."edfiTenantId" = $tenantId AND e."odsId" = $odsId
+        AND e."educationOrganizationId" = s.edorgid
+WHERE (e."nameOfInstitution", e."shortNameOfInstitution", e.discriminator)
+      IS DISTINCT FROM (s.name, s.shortname, s.disc);
+
+UPDATE edorg e SET "nameOfInstitution" = s.name,
+                   "shortNameOfInstitution" = s.shortname,
+                   discriminator = s.disc,
+                   modified = now()
+FROM stage s
+WHERE e."edfiTenantId" = $tenantId AND e."odsId" = $odsId
+    AND e."educationOrganizationId" = s.edorgid
+    AND s.edorgid IN (SELECT edorgid FROM changed_ids);
+SELECT CONCAT('MSG|Updated ', COUNT(*), ' existing row(s) whose name or type differed from the CSV.') FROM changed_ids;
 
 -- Wire the hierarchy. Only rows without a parent are touched, so links
 -- written by the Admin App itself are never clobbered.
@@ -450,6 +612,9 @@ INSERT INTO edorg_closure (id_ancestor, id_descendant)
 SELECT ancestor, descendant FROM chain
 ON CONFLICT (id_ancestor, id_descendant) DO NOTHING;
 
+-- Emitted before COMMIT: the temp tables are ON COMMIT DROP.
+SELECT CONCAT('INSERTED|', edorgid) FROM new_ids ORDER BY edorgid;
+
 COMMIT;
 
 SELECT CONCAT('TOTAL|', COUNT(*)) FROM edorg
@@ -459,15 +624,37 @@ WHERE "edfiTenantId" = $tenantId AND "odsId" = $odsId;
 
 Write-Host "`nImporting into edorg (tenant $tenantId, ods $odsId)..."
 $output = Invoke-AdminAppSql -Sql $sql -FailHint 'Nothing was imported (the load is transactional).'
-# Filter out psql command tags ('INSERT 0 5', 'COMMIT', ...) but keep the
-# PRINT/messages the batch emits.
+# Filter out psql command tags ('INSERT 0 5', 'COMMIT', ...) and the
+# machine-readable INSERTED|/TOTAL| rows, but keep the PRINT/MSG| messages.
 $output | Where-Object {
-    "$_".Trim() -and "$_" -notmatch '^TOTAL\|' -and
+    "$_".Trim() -and "$_" -notmatch '^(TOTAL|INSERTED)\|' -and
     "$_" -notmatch '^(INSERT 0 \d+$|UPDATE \d+$|BEGIN$|COMMIT$|CREATE TABLE$|SELECT \d+$)'
-} | ForEach-Object { Write-Host "  $_" }
+} | ForEach-Object { Write-Host "  $("$_" -replace '^MSG\|', '')" }
 $total = ($output | Where-Object { "$_" -match '^TOTAL\|' } | Select-Object -First 1) -replace '^TOTAL\|', ''
 
-Write-Host "`nSUCCESS: $($rows.Count) education organizations imported or already present ($total total in the scope)." -ForegroundColor Green
+# Manifest of the rows this run actually INSERTED (never the pre-existing
+# ones), keyed by scope. cleanup-edorgs.ps1 deletes only ids recorded here, so
+# rows the Admin App created itself -- e.g. the 'Institution #<id>' placeholders
+# from an ODS registration -- are never cleanup victims. Merged with any
+# existing manifest so multi-CSV imports accumulate.
+$insertedIds = @($output | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^INSERTED\|\d+$' } |
+        ForEach-Object { [long]($_ -replace '^INSERTED\|', '') })
+$manifestPath = Join-Path (Split-Path -Parent (Resolve-Path $CsvPath)) 'imported-ids.csv'
+if ($insertedIds.Count -gt 0)
+{
+    $manifestRows = @(if (Test-Path $manifestPath) { Import-Csv -Path $manifestPath -Encoding UTF8 })
+    $manifestKeys = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
+            $manifestRows | ForEach-Object { "$($_.tenantId)/$($_.odsId)/$($_.educationOrganizationId)" }))
+    $newManifestRows = @($insertedIds | Where-Object { -not $manifestKeys.Contains("$tenantId/$odsId/$_") } |
+            ForEach-Object { [pscustomobject]@{ educationOrganizationId = $_; tenantId = $tenantId; odsId = $odsId } })
+    if ($newManifestRows.Count -gt 0)
+    {
+        @($manifestRows) + $newManifestRows | Export-Csv -Path $manifestPath -NoTypeInformation -Encoding utf8
+    }
+    Write-Host "  Recorded the $($insertedIds.Count) inserted id(s) in $manifestPath (cleanup-edorgs.ps1 deletes only ids recorded there)."
+}
+
+Write-Host "`nSUCCESS: $($rows.Count) education organizations imported or updated ($total total in the scope)." -ForegroundColor Green
 Write-Host "Next:" -ForegroundColor Green
 Write-Host "  1. In the Admin App, create (or edit) an Application: the imported ed orgs"
 Write-Host "     now appear in the Education Organization dropdown for ODS '$resolvedOdsDbName'."

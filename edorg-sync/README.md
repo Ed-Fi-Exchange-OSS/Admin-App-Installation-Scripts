@@ -20,8 +20,8 @@ Full walkthrough (prerequisites, verification, troubleshooting):
 | --- | --- |
 | `run.ps1` | One-step entry point: loads `.env` and runs `export-edorgs.ps1` then `import-edorgs.ps1`. |
 | `export-edorgs.ps1` | Exports every education organization in an `EdFi_ODS` database to a CSV — id, name, short name, type (`discriminator`), and parent — deriving the parent per type (School → LEA, LEA → parent LEA / ESC / SEA, ESC → SEA, department → parent). Read-only. |
-| `import-edorgs.ps1` | Loads the CSV into the Admin App database: inserts the missing `edorg` rows under the configured tenant/ODS, wires the parent/child hierarchy, and fills the closure rows the Admin App's tree queries expect. Skips types the Admin App does not support, never touches existing rows, and runs in a single transaction. Idempotent. |
-| `cleanup-edorgs.ps1` | Deletes exactly the imported ids (from the same CSV) out of the Admin App database; children not in the CSV are kept and become roots. Idempotent. |
+| `import-edorgs.ps1` | Loads the CSV into the Admin App database: inserts the missing `edorg` rows under the configured tenant/ODS, corrects the name/type of existing rows that differ (e.g. the `Institution #<id>` placeholders the Admin App writes at ODS registration), wires the parent/child hierarchy, and fills the closure rows the Admin App's tree queries expect. Skips types the Admin App does not support, records the inserted ids in `imported-ids.csv`, and runs in a single transaction. Idempotent. |
+| `cleanup-edorgs.ps1` | Deletes exactly the rows the import inserted (from the `imported-ids.csv` manifest); children not being deleted are kept and become roots, and team access (ownership) rows referencing a deleted ed org are removed and reported. Idempotent. |
 | `load-dotenv.ps1` | Shared `.env` parser dot-sourced by `run.ps1` and `cleanup-edorgs.ps1`. |
 | `compat.ps1` | Shared Windows PowerShell 5.1 / PowerShell 7+ compatibility helpers dot-sourced by the other scripts. |
 
@@ -65,8 +65,17 @@ short name, and type (`discriminator`, e.g. `edfi.School`,
 registration it was attached to, plus the parent link and the
 ancestor/self closure rows that back the Admin App's hierarchy views. Ed org
 types the Admin App does not model (e.g. `edfi.CommunityOrganization`) are
-reported and skipped. Rows that already exist in the scope are left untouched,
-so the import never clobbers anything the Admin App wrote itself.
+reported and skipped. Rows that already exist in the scope keep their row and
+their parent link, but their name, short name, and type are corrected to the
+CSV values when they differ — the same three columns the Admin App's own sync
+maintains. In particular this fixes the `Institution #<id>` / `edfi.Other`
+placeholder rows the Admin App writes when an ODS is registered with allowed
+education organization ids.
+
+The ids the import actually inserts are recorded in `imported-ids.csv` next to
+the CSV (merged across runs, scoped per tenant/ODS). That manifest is what
+`cleanup-edorgs.ps1` deletes from, so keep it if you may want to undo the
+import later.
 
 On SQL Server the Admin App schema stores the education organization id as a
 32-bit integer: ids above 2,147,483,647 stop the import with a list of the
@@ -83,6 +92,20 @@ individual ed orgs.
 ```
 
 Reads the same `.env` for the connection and scope, and deletes exactly the
-`educationOrganizationId` values listed in `CSV_PATH` from that scope — so
-keep the CSV you imported with. Any parameter passed explicitly overrides the
+rows the import inserted there, taken from the `imported-ids.csv` manifest —
+rows the Admin App created itself (e.g. the placeholders written at ODS
+registration) are never deleted. On success the scope's manifest entries are
+consumed, so re-runs are no-ops. Any parameter passed explicitly overrides the
 `.env` value. Re-import at any time with `./run.ps1 -SkipExport`.
+
+Two behaviors to be aware of:
+
+- **Team access:** if a team was granted ownership of an imported ed org, the
+  `ownership → edorg` foreign key would block the delete, so the cleanup
+  removes those team-access rows in the same transaction and reports each
+  team/ed-org pair it removed. Re-grant access in Admin App → team access
+  after re-importing.
+- **Raw CSV mode:** passing `-CsvPath` explicitly bypasses the manifest and
+  deletes every listed id in the scope, including rows the Admin App created
+  itself. Use it only when the manifest is gone and you know the CSV contains
+  nothing but imported rows.

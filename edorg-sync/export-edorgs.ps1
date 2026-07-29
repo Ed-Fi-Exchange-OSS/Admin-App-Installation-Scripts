@@ -31,6 +31,56 @@
   This is a temporary bridge for Admin App v4.0 deployments whose ed orgs
   predate the Admin App; Admin App v4.1 is slated to sync ed orgs natively.
 
+.PARAMETER OdsDatabaseName
+  The ODS database to export from (e.g. EdFi_Ods_2026,
+  EdFi_Ods_Populated_Template).
+
+.PARAMETER OutputPath
+  Where to write the CSV (default edorgs.csv next to this script).
+
+.PARAMETER DbEngine
+  ODS database engine: 'mssql' (default) or 'pgsql'.
+
+.PARAMETER SqlServer
+  mssql only: the SQL Server to connect to (default 'tcp:localhost,1433'). The
+  ODS is provisioned by the ODS/API installation, so it may not be on this
+  machine.
+
+.PARAMETER DbUsername
+  mssql only: SQL login (default 'sa').
+
+.PARAMETER DbPassword
+  mssql only: password for -DbUsername; required unless -UseIntegratedSecurity.
+  Passed to sqlcmd through the SQLCMDPASSWORD environment variable, never on a
+  command line.
+
+.PARAMETER UseIntegratedSecurity
+  mssql only: connect with Windows integrated authentication instead of
+  -DbUsername/-DbPassword.
+
+.PARAMETER PostgresPassword
+  pgsql only: password for -PostgresUser; required when -DbEngine is 'pgsql'.
+  Passed to psql through the PGPASSWORD environment variable, never on a
+  command line.
+
+.PARAMETER PostgresHost
+  pgsql only: PostgreSQL host (default 'localhost'). Ignored with
+  -UsePostgresDocker.
+
+.PARAMETER PostgresPort
+  pgsql only: PostgreSQL port (default 5432). Ignored with -UsePostgresDocker.
+
+.PARAMETER PostgresUser
+  pgsql only: PostgreSQL login (default 'postgres').
+
+.PARAMETER UsePostgresDocker
+  pgsql only: run psql inside the ODS Docker stack's database container
+  instead of a host psql.
+
+.PARAMETER PostgresContainerName
+  pgsql only: the Docker database container name (default 'ed-fi-db-ods').
+  Only used with -UsePostgresDocker.
+
 .EXAMPLE
   # SQL Server (default engine):
   ./export-edorgs.ps1 -OdsDatabaseName 'EdFi_Ods_2026' -DbPassword 'EdFi-Local!2026'
@@ -102,8 +152,10 @@ if ($DbEngine -eq 'mssql')
 {
     # The @(...) wrap is load-bearing: assignment from an if-expression unrolls
     # a one-element array to a scalar string, and splatting a scalar to a
-    # native command garbles the argument list.
-    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $DbUsername, '-P', $DbPassword })
+    # native command garbles the argument list. The password travels via
+    # SQLCMDPASSWORD (set just before the call), never as -P, so it stays off
+    # the sqlcmd process command line (visible in the process list).
+    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $DbUsername })
 
     # FOR JSON sidesteps sqlcmd's column formatting entirely: the result is a
     # single JSON document (wrapped across output lines) that round-trips names
@@ -129,7 +181,15 @@ FOR JSON PATH, INCLUDE_NULL_VALUES;
     # -y 0 stops sqlcmd truncating the (long) JSON column (and excludes -h -1,
     # so a header line comes along); the document also arrives wrapped across
     # lines. Join everything and cut from the first '[' to the last ']'.
-    $raw = & sqlcmd -S $SqlServer @authArgs -d $OdsDatabaseName -b -y 0 -Q $sql
+    if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
+    try
+    {
+        $raw = & sqlcmd -S $SqlServer @authArgs -d $OdsDatabaseName -b -y 0 -Q $sql
+    }
+    finally
+    {
+        Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
+    }
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE). Check -SqlServer / -DbUsername / -DbPassword / -OdsDatabaseName." }
     $joined = @($raw) -join ''
     $start = $joined.IndexOf('[')
@@ -165,14 +225,24 @@ COPY (
     ORDER BY eo.educationorganizationid
 ) TO STDOUT WITH (FORMAT csv, HEADER true);
 "@
-    if ($UsePostgresDocker)
+    # Pass the password through the environment, never on the command line:
+    # `docker exec -e PGPASSWORD` (no value) forwards it from this process, so
+    # the secret stays out of the docker argv; cleared in the finally.
+    $env:PGPASSWORD = $PostgresPassword
+    try
     {
-        $raw = $sql | & docker exec -i -e "PGPASSWORD=$PostgresPassword" $PostgresContainerName psql -U $PostgresUser -d $OdsDatabaseName -v ON_ERROR_STOP=1
+        if ($UsePostgresDocker)
+        {
+            $raw = $sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresUser -d $OdsDatabaseName -v ON_ERROR_STOP=1
+        }
+        else
+        {
+            $raw = $sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresUser -d $OdsDatabaseName -v ON_ERROR_STOP=1
+        }
     }
-    else
+    finally
     {
-        $env:PGPASSWORD = $PostgresPassword
-        $raw = $sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresUser -d $OdsDatabaseName -v ON_ERROR_STOP=1
+        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
     }
     if ($LASTEXITCODE -ne 0) { throw "psql failed (exit $LASTEXITCODE). Check -PostgresPassword / -PostgresHost / -PostgresPort / -PostgresUser / -OdsDatabaseName." }
     if (@($raw).Count -gt 1) { $rows = @($raw | ConvertFrom-Csv) }

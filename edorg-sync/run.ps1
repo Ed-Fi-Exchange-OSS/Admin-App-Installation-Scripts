@@ -18,6 +18,15 @@
   the Admin App database. Register the environment, tenant, and ODS instances
   first through the Admin App UI.
 
+.PARAMETER EnvFile
+  Path to the .env file (copy .env.example and edit it).
+
+.PARAMETER SkipExport
+  Skip export-edorgs.ps1 and import an existing CSV_PATH.
+
+.PARAMETER SkipImport
+  Skip import-edorgs.ps1 and only export the CSV.
+
 .EXAMPLE
   ./run.ps1
 
@@ -169,7 +178,7 @@ if ($odsDbName) { $importArgs.OdsDbName = $odsDbName }
 if ($dbEngine -eq 'mssql')
 {
     $importArgs.SqlServer = Get-EnvValue 'SQL_SERVER' 'tcp:localhost,1433'
-    $importArgs.DbUsername = Get-EnvValue 'ADMIN_APP_DB_USER' 'sa'
+    $importArgs.DbUsername = Get-EnvValue 'ADMIN_APP_DB_USER' 'edfi_adminapp'
     if (Test-EnvTrue 'USE_INTEGRATED_SECURITY')
     {
         $importArgs.UseIntegratedSecurity = $true
