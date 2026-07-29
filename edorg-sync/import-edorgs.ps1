@@ -253,7 +253,9 @@ foreach ($required in 'educationOrganizationId', 'nameOfInstitution', 'discrimin
     if ($required -notin $csv[0].PSObject.Properties.Name) { throw "CSV is missing the '$required' column. Expected the columns written by export-edorgs.ps1." }
 }
 
-$rows = @()
+# List, not array +=: appending to an array reallocates it every time, which
+# is quadratic in CSV size.
+$rows = [System.Collections.Generic.List[object]]::new()
 $skippedByType = @{}
 foreach ($r in $csv)
 {
@@ -266,13 +268,13 @@ foreach ($r in $csv)
     }
     if ("$($r.educationOrganizationId)" -notmatch '^\d+$') { throw "Row with nameOfInstitution '$($r.nameOfInstitution)' has a non-numeric educationOrganizationId '$($r.educationOrganizationId)'." }
     if (-not "$($r.nameOfInstitution)".Trim()) { throw "Row with educationOrganizationId $($r.educationOrganizationId) has an empty nameOfInstitution." }
-    $rows += [pscustomobject]@{
-        EdOrgId       = [long]$r.educationOrganizationId
-        Name          = "$($r.nameOfInstitution)".Trim()
-        ShortName     = "$($r.shortNameOfInstitution)".Trim()
-        Discriminator = $disc
-        ParentEdOrgId = if ("$($r.parentEducationOrganizationId)" -match '^\d+$') { [long]$r.parentEducationOrganizationId } else { $null }
-    }
+    $rows.Add([pscustomobject]@{
+            EdOrgId       = [long]$r.educationOrganizationId
+            Name          = "$($r.nameOfInstitution)".Trim()
+            ShortName     = "$($r.shortNameOfInstitution)".Trim()
+            Discriminator = $disc
+            ParentEdOrgId = if ("$($r.parentEducationOrganizationId)" -match '^\d+$') { [long]$r.parentEducationOrganizationId } else { $null }
+        })
 }
 
 foreach ($entry in $skippedByType.GetEnumerator() | Sort-Object Key)
@@ -334,14 +336,19 @@ $tenantNameSql = $TenantName.Replace("'", "''")
 $envNameSql = $EnvironmentName.Replace("'", "''")
 $odsDbNameSql = $OdsDbName.Replace("'", "''")
 
+# The scope row comes back as ONE concatenated column with a multi-character
+# delimiter, so an environment or ODS name that itself contains '|' (the
+# sqlcmd/psql field separator) cannot shift the fields.
+$scopeDelim = '|~|'
 if ($DbEngine -eq 'mssql')
 {
     $envFilter = if ($EnvironmentName) { "AND e.[name] = N'$envNameSql'" } else { '' }
     $odsFilter = if ($OdsDbName) { "AND o.[dbName] = N'$odsDbNameSql'" } else { '' }
     $scopeSql = @"
 SET NOCOUNT ON;
-SELECT t.[id], t.[sbEnvironmentId], e.[name], o.[id], o.[dbName],
-       COALESCE(CAST(o.[odsInstanceId] AS nvarchar(20)), N'')
+SELECT CONCAT(t.[id], '$scopeDelim', t.[sbEnvironmentId], '$scopeDelim', e.[name], '$scopeDelim',
+              o.[id], '$scopeDelim', o.[dbName], '$scopeDelim',
+              COALESCE(CAST(o.[odsInstanceId] AS nvarchar(20)), N''))
 FROM [edfi_tenant] t
     INNER JOIN [sb_environment] e ON e.[id] = t.[sbEnvironmentId]
     INNER JOIN [ods] o ON o.[edfiTenantId] = t.[id]
@@ -355,8 +362,9 @@ else
     $envFilter = if ($EnvironmentName) { "AND e.name = '$envNameSql'" } else { '' }
     $odsFilter = if ($OdsDbName) { 'AND o."dbName" = ' + "'$odsDbNameSql'" } else { '' }
     $scopeSql = @"
-SELECT t.id, t."sbEnvironmentId", e.name, o.id, o."dbName",
-       COALESCE(CAST(o."odsInstanceId" AS varchar), '')
+SELECT CONCAT(t.id, '$scopeDelim', t."sbEnvironmentId", '$scopeDelim', e.name, '$scopeDelim',
+              o.id, '$scopeDelim', o."dbName", '$scopeDelim',
+              COALESCE(CAST(o."odsInstanceId" AS varchar), ''))
 FROM edfi_tenant t
     JOIN sb_environment e ON e.id = t."sbEnvironmentId"
     JOIN ods o ON o."edfiTenantId" = t.id
@@ -367,7 +375,7 @@ WHERE t.name = '$tenantNameSql'
 }
 
 $scopeRows = @(Invoke-AdminAppSql -Sql $scopeSql -FailHint 'Check the connection parameters and -DatabaseName.' |
-        ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -match '\|' })
+        ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_.Contains($scopeDelim) })
 
 if ($scopeRows.Count -eq 0)
 {
@@ -376,11 +384,11 @@ if ($scopeRows.Count -eq 0)
 }
 if ($scopeRows.Count -gt 1)
 {
-    $candidates = ($scopeRows | ForEach-Object { $p = $_ -split '\|'; "environment '$($p[2])' / ods dbName '$($p[4])'" }) -join '; '
+    $candidates = ($scopeRows | ForEach-Object { $p = $_ -split [regex]::Escape($scopeDelim); "environment '$($p[2])' / ods dbName '$($p[4])'" }) -join '; '
     throw "Tenant '$TenantName' matches more than one scope: $candidates. Disambiguate with -OdsDbName (and -EnvironmentName if needed)."
 }
 
-$parts = $scopeRows[0] -split '\|'
+$parts = $scopeRows[0] -split [regex]::Escape($scopeDelim)
 $tenantId = [int]$parts[0]
 $sbEnvironmentId = [int]$parts[1]
 $resolvedEnvName = $parts[2]

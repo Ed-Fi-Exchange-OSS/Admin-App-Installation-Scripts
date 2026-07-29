@@ -101,9 +101,18 @@
   ./cleanup-edorgs.ps1
 
 .EXAMPLE
+  # Show what would be deleted without touching anything:
+  ./cleanup-edorgs.ps1 -WhatIf
+
+.EXAMPLE
+  # Unattended run (skips the confirmation prompt):
+  ./cleanup-edorgs.ps1 -Confirm:$false
+
+.EXAMPLE
   ./cleanup-edorgs.ps1 -CsvPath ./edorgs.csv -DbPassword '...' -OdsDbName 'EdFi_Ods_2026'
 #>
 #requires -Version 5.1
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     # Path to the .env file used for defaults (copy .env.example and edit it).
     [string]$EnvFile = "$PSScriptRoot/.env",
@@ -229,8 +238,11 @@ function Invoke-AdminAppSql
         }
         finally
         {
-            Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
-            Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
+            # -WhatIf:$false -Confirm:$false: housekeeping must always run --
+            # the script's own SupportsShouldProcess would otherwise propagate
+            # -WhatIf here and leave the password in the environment.
+            Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
+            Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
         }
     }
 
@@ -251,7 +263,8 @@ function Invoke-AdminAppSql
     }
     finally
     {
-        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+        # Always runs (see the SQLCMDPASSWORD note above).
+        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
     }
     if ($LASTEXITCODE -ne 0)
     {
@@ -279,13 +292,17 @@ $tenantNameSql = $TenantName.Replace("'", "''")
 $envNameSql = $EnvironmentName.Replace("'", "''")
 $odsDbNameSql = $OdsDbName.Replace("'", "''")
 
+# The scope row comes back as ONE concatenated column with a multi-character
+# delimiter, so an environment or ODS name that itself contains '|' (the
+# sqlcmd/psql field separator) cannot shift the fields.
+$scopeDelim = '|~|'
 if ($DbEngine -eq 'mssql')
 {
     $envFilter = if ($EnvironmentName) { "AND e.[name] = N'$envNameSql'" } else { '' }
     $odsFilter = if ($OdsDbName) { "AND o.[dbName] = N'$odsDbNameSql'" } else { '' }
     $scopeSql = @"
 SET NOCOUNT ON;
-SELECT t.[id], o.[id], o.[dbName], e.[name]
+SELECT CONCAT(t.[id], '$scopeDelim', o.[id], '$scopeDelim', o.[dbName], '$scopeDelim', e.[name])
 FROM [edfi_tenant] t
     INNER JOIN [sb_environment] e ON e.[id] = t.[sbEnvironmentId]
     INNER JOIN [ods] o ON o.[edfiTenantId] = t.[id]
@@ -299,7 +316,7 @@ else
     $envFilter = if ($EnvironmentName) { "AND e.name = '$envNameSql'" } else { '' }
     $odsFilter = if ($OdsDbName) { 'AND o."dbName" = ' + "'$odsDbNameSql'" } else { '' }
     $scopeSql = @"
-SELECT t.id, o.id, o."dbName", e.name
+SELECT CONCAT(t.id, '$scopeDelim', o.id, '$scopeDelim', o."dbName", '$scopeDelim', e.name)
 FROM edfi_tenant t
     JOIN sb_environment e ON e.id = t."sbEnvironmentId"
     JOIN ods o ON o."edfiTenantId" = t.id
@@ -310,7 +327,7 @@ WHERE t.name = '$tenantNameSql'
 }
 
 $scopeRows = @(Invoke-AdminAppSql -Sql $scopeSql -FailHint 'Check the connection parameters and -DatabaseName.' |
-        ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -match '\|' })
+        ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_.Contains($scopeDelim) })
 if ($scopeRows.Count -eq 0)
 {
     Write-Host "Nothing to do: no registered ODS found for tenant '$TenantName'$(if ($OdsDbName) { " with dbName '$OdsDbName'" })." -ForegroundColor Yellow
@@ -318,10 +335,10 @@ if ($scopeRows.Count -eq 0)
 }
 if ($scopeRows.Count -gt 1)
 {
-    $candidates = ($scopeRows | ForEach-Object { $p = $_ -split '\|'; "environment '$($p[3])' / ods dbName '$($p[2])'" }) -join '; '
+    $candidates = ($scopeRows | ForEach-Object { $p = $_ -split [regex]::Escape($scopeDelim); "environment '$($p[3])' / ods dbName '$($p[2])'" }) -join '; '
     throw "Tenant '$TenantName' matches more than one scope: $candidates. Disambiguate with -OdsDbName (and -EnvironmentName if needed)."
 }
-$parts = $scopeRows[0] -split '\|'
+$parts = $scopeRows[0] -split [regex]::Escape($scopeDelim)
 $tenantId = [int]$parts[0]
 $odsId = [int]$parts[1]
 Write-Host "  Scope: tenant id $tenantId, ODS '$($parts[2])' (id $odsId)."
@@ -345,6 +362,14 @@ else
     if ($ids.Count -eq 0) { throw "No educationOrganizationId values found in $CsvPath." }
 }
 Write-Host "Deleting up to $($ids.Count) education organizations listed in $CsvPath..."
+
+# -WhatIf reports the intent and stops here; the default interactive run asks
+# for confirmation first (ConfirmImpact High). Pass -Confirm:$false to skip
+# the prompt in unattended runs.
+if (-not $PSCmdlet.ShouldProcess("tenant '$TenantName', ODS '$($parts[2])' in $DbEngine db '$DatabaseName'", "Delete $($ids.Count) education organization(s) and their team-access rows"))
+{
+    return
+}
 
 # ---- Step 3: delete -----------------------------------------------------------
 # Order of operations, all in one transaction:
@@ -388,7 +413,7 @@ FROM [edorg] e
 WHERE e.[edfiTenantId] = $tenantId AND e.[odsId] = $odsId
     AND e.[educationOrganizationId] IN (SELECT edOrgId FROM #victim_ids);
 
-SELECT CONCAT('OWNERSHIP|', COALESCE(t.[name], '(unknown team)'), '|', e.[educationOrganizationId], '|', e.[nameOfInstitution])
+SELECT CONCAT('OWNERSHIP$scopeDelim', COALESCE(t.[name], '(unknown team)'), '$scopeDelim', e.[educationOrganizationId], '$scopeDelim', e.[nameOfInstitution])
 FROM [ownership] o
     INNER JOIN #victims v ON v.[id] = o.[edorgId]
     INNER JOIN [edorg] e ON e.[id] = o.[edorgId]
@@ -439,7 +464,7 @@ FROM edorg e
 WHERE e."edfiTenantId" = $tenantId AND e."odsId" = $odsId
     AND e."educationOrganizationId" IN (SELECT edorgid FROM victim_ids);
 
-SELECT CONCAT('OWNERSHIP|', COALESCE(t.name, '(unknown team)'), '|', e."educationOrganizationId", '|', e."nameOfInstitution")
+SELECT CONCAT('OWNERSHIP$scopeDelim', COALESCE(t.name, '(unknown team)'), '$scopeDelim', e."educationOrganizationId", '$scopeDelim', e."nameOfInstitution")
 FROM ownership o
     JOIN victims v ON v.id = o."edorgId"
     JOIN edorg e ON e.id = o."edorgId"
@@ -480,11 +505,11 @@ COMMIT;
 }
 
 $output = Invoke-AdminAppSql -Sql $sql -FailHint 'Nothing was deleted (the cleanup is transactional).'
-$owned = @($output | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^OWNERSHIP\|' })
+$owned = @($output | ForEach-Object { "$_".Trim() } | Where-Object { $_ -like "OWNERSHIP$scopeDelim*" })
 if ($owned.Count -gt 0)
 {
     Write-Host "WARNING: team access was removed for $($owned.Count) grant(s) (grant it again in Admin App > team access if re-importing):" -ForegroundColor Yellow
-    $owned | ForEach-Object { $p = $_ -split '\|'; Write-Host "  team '$($p[1])' lost access to $($p[3]) ($($p[2]))" -ForegroundColor Yellow }
+    $owned | ForEach-Object { $p = $_ -split [regex]::Escape($scopeDelim); Write-Host "  team '$($p[1])' lost access to $($p[3]) ($($p[2]))" -ForegroundColor Yellow }
 }
 $output | Where-Object { "$_".Trim() -and "$_" -match '^(MSG\|)?(Deleted|Removed)' } |
     ForEach-Object { Write-Host "  $("$_" -replace '^MSG\|', '')" }
@@ -504,7 +529,8 @@ if ($isManifest)
     }
     else
     {
-        Remove-Item -Path $CsvPath -Force
+        # Part of the operation the user already confirmed via ShouldProcess.
+        Remove-Item -Path $CsvPath -Force -WhatIf:$false -Confirm:$false
         Write-Host "  Manifest removed: $CsvPath (all entries consumed)."
     }
 }

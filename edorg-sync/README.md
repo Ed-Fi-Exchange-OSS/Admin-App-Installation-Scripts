@@ -91,6 +91,10 @@ individual ed orgs.
 ./cleanup-edorgs.ps1
 ```
 
+Interactive runs ask for confirmation before deleting; use `-WhatIf` to
+preview the operation without touching anything, or `-Confirm:$false` for
+unattended runs.
+
 Reads the same `.env` for the connection and scope, and deletes exactly the
 rows the import inserted there, taken from the `imported-ids.csv` manifest —
 rows the Admin App created itself (e.g. the placeholders written at ODS
