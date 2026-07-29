@@ -758,28 +758,48 @@ if (-not (Test-Path $NpmCachePath)) {
 # the admin-only applicationHost.config, not the site's production.js, so it is never
 # echoed here. Each variable is removed before being added so a re-run replaces rather
 # than duplicates it.
+#
+# Attributes are set through SetAttributeValue rather than the element's indexer.
+# Measured on Windows 11 22621, elevated, both editions: assigning the NODE_CONFIG
+# JSON through the indexer succeeds under PowerShell 7 and fails under Windows
+# PowerShell 5.1 with "Type mismatch. (Exception from HRESULT: 0x80020005
+# (DISP_E_TYPEMISMATCH))". A short string literal assigned the same way succeeds in
+# both editions, which is why an earlier probe using a literal did not catch this.
+# SetAttributeValue works in both editions. The explicit [string] casts document
+# that these attributes are strings and keep a non-string value from reaching the
+# native configuration layer.
+#
+# $environmentStage names the operation in progress so a failure below reports
+# which call broke instead of only that something in this block did.
 $environmentManager = $null
+$environmentStage = 'connect to IIS'
 try {
     $environmentManager = New-IisServerManager
+    $environmentStage = "find App Pool '$AppPoolName'"
     $environmentPool = $environmentManager.ApplicationPools[$AppPoolName]
     if (-not $environmentPool) { throw "App Pool '$AppPoolName' not found." }
+    $environmentStage = 'read the environmentVariables collection'
     $environmentVariables = $environmentPool.GetCollection('environmentVariables')
+    $environmentStage = 'remove stale variables'
     foreach ($variableName in @('NPM_CONFIG_CACHE', 'NODE_CONFIG')) {
         foreach ($stale in @($environmentVariables | Where-Object { $_.GetAttributeValue('name') -eq $variableName })) {
             $environmentVariables.Remove($stale)
         }
     }
+    $environmentStage = 'add NPM_CONFIG_CACHE'
     $cacheVariable = $environmentVariables.CreateElement('add')
-    $cacheVariable['name']  = 'NPM_CONFIG_CACHE'
-    $cacheVariable['value'] = $NpmCachePath
+    $cacheVariable.SetAttributeValue('name', 'NPM_CONFIG_CACHE')
+    $cacheVariable.SetAttributeValue('value', [string]$NpmCachePath)
     $environmentVariables.Add($cacheVariable) | Out-Null
+    $environmentStage = 'add NODE_CONFIG'
     $configVariable = $environmentVariables.CreateElement('add')
-    $configVariable['name']  = 'NODE_CONFIG'
-    $configVariable['value'] = $nodeConfigJson
+    $configVariable.SetAttributeValue('name', 'NODE_CONFIG')
+    $configVariable.SetAttributeValue('value', [string]$nodeConfigJson)
     $environmentVariables.Add($configVariable) | Out-Null
+    $environmentStage = 'commit the changes'
     $environmentManager.CommitChanges()
 } catch {
-    throw "Failed to set NPM_CONFIG_CACHE and NODE_CONFIG on the App Pool '$AppPoolName'. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
+    throw "Failed to set NPM_CONFIG_CACHE and NODE_CONFIG on the App Pool '$AppPoolName' while trying to $environmentStage. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
 } finally {
     if ($environmentManager) { $environmentManager.Dispose() }
 }
