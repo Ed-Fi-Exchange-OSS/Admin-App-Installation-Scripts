@@ -389,8 +389,9 @@ if ($ready) {
         $apiAppPool = $serverManager.ApplicationPools[$apiAppPoolName]
         if ($apiAppPool) {
             # Recycle is a runtime operation, so it takes effect immediately and needs no
-            # CommitChanges call.
-            $apiAppPool.Recycle()
+            # CommitChanges call. It returns the resulting ObjectState, which is discarded
+            # so it does not leak into the task's output.
+            $null = $apiAppPool.Recycle()
             Write-TaskLog "Recycled app pool '$apiAppPoolName'."
         } else {
             Write-TaskLog "App pool '$apiAppPoolName' not found; skipping the recycle (Keycloak-only install)."

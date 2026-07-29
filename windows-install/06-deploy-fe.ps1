@@ -147,7 +147,10 @@ try {
     $poolStateManager = New-IisServerManager
     $statePool = $poolStateManager.ApplicationPools[$AppPoolName]
     if ($statePool -and $statePool.State -ne 'Started') {
-        $statePool.Start()
+        # Start() returns the resulting ObjectState. Discard it: the Start-WebAppPool call
+        # this replaced piped to Out-Null, and without the assignment the state string is
+        # emitted into the script's output.
+        $null = $statePool.Start()
         Write-Host "Started App Pool '$AppPoolName'."
     }
 } finally {
