@@ -1,4 +1,5 @@
 #Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Reverses the Ed-Fi Admin App install. Leaves Node.js, JDK, SQL Server, and IIS

@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Read-only pre-flight check. Reports the state of every prerequisite the install

@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Deploys the Ed-Fi Admin App frontend to IIS.

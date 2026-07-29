@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Master installer for the Ed-Fi Admin App on Windows IIS. Fully automated.

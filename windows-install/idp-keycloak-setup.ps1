@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Optional local Identity Provider example. Installs a JDK if needed, downloads

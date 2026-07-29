@@ -1,4 +1,5 @@
 #Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Installs the IIS URL Rewrite Module and an httpPlatform handler (HttpBridge or
