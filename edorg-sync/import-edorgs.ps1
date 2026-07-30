@@ -192,7 +192,7 @@ function Invoke-AdminAppSql
             # correctly ('utf8BOM' is not a valid encoding name on 5.1).
             Write-Utf8BomFile -Path $tempFile -Content $Sql
             if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
-            $out = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            $out = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -C -b -h -1 -W -s '|' -i $tempFile
             if ($LASTEXITCODE -ne 0)
             {
                 $out | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }

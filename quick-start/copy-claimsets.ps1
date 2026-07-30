@@ -119,7 +119,7 @@ if ($ClaimSetNames.Count -eq 0)
     if ($DbEngine -eq 'mssql')
     {
         $listSql = 'SET NOCOUNT ON; SELECT ClaimSetName FROM dbo.ClaimSets WHERE IsEdfiPreset = 1 AND ForApplicationUseOnly = 0 ORDER BY ClaimSetId;'
-        $raw = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -Q $listSql
+        $raw = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -C -b -h -1 -W -Q $listSql
         if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed listing claimsets (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName." }
     }
     else
@@ -206,7 +206,7 @@ END
 "@
         # -b makes sqlcmd exit nonzero on SQL errors; without it $LASTEXITCODE
         # stays 0 and failures would pass silently.
-        & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -Q $sql
+        & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -C -b -Q $sql
         if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed for claimset '$name' (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName." }
     }
     else

@@ -184,7 +184,7 @@ FOR JSON PATH, INCLUDE_NULL_VALUES;
     if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
     try
     {
-        $raw = & sqlcmd -S $SqlServer @authArgs -d $OdsDatabaseName -b -y 0 -Q $sql
+        $raw = & sqlcmd -S $SqlServer @authArgs -d $OdsDatabaseName -C -b -y 0 -Q $sql
     }
     finally
     {

@@ -312,7 +312,7 @@ if ($DbEngine -eq 'mssql' -and $sqlService -and $sqlService.Status -eq 'Running'
     }
 
     # sbaa database
-    $dbCheck = & sqlcmd -S "(local)" -E -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE name = N'$DatabaseName'" -h-1 2>&1
+    $dbCheck = & sqlcmd -S "(local)" -E -C -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE name = N'$DatabaseName'" -h-1 2>&1
     if ($LASTEXITCODE -eq 0 -and $dbCheck -match $DatabaseName) {
         Write-Check PASS "Database '$DatabaseName' exists"
     } else {
@@ -384,7 +384,7 @@ Write-Section "EXISTING STATE THAT WILL BE MODIFIED (collision risk check)"
 # three. Skip the entire RISK probe when -DbEngine pgsql --
 # the SQL Server install won't be touched at all in that mode.
 if ($DbEngine -eq 'mssql' -and $sqlService) {
-    $userDbs = & sqlcmd -S "(local)" -E -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND name <> N'$DatabaseName'" 2>$null |
+    $userDbs = & sqlcmd -S "(local)" -E -C -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND name <> N'$DatabaseName'" 2>$null |
         Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\(' }
     if ($userDbs -and $userDbs.Count -gt 0) {
         $preview = ($userDbs | Select-Object -First 3) -join ', '

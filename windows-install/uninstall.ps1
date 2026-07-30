@@ -379,7 +379,7 @@ IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$safeUserLiteral' 
         # require server-level privilege the app login (db_owner only) lacks, so
         # the teardown runs as the current sysadmin account.
         try {
-            & sqlcmd -S "(local)" -E -Q $dropQuery -t 30 2>&1 | Out-Null
+            & sqlcmd -S "(local)" -E -C -Q $dropQuery -t 30 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "OK" "Windows Authentication"
             } else {

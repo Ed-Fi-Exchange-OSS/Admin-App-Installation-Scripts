@@ -171,7 +171,9 @@ if ($registryChanged) {
 # NativeCommandError records and the script-wide Stop preference treats those
 # as terminating, so we temporarily relax the preference around the call.
 # Every call gets a query timeout (-t) so we never hang on a partially-up
-# server.
+# server, and -C (trust server certificate): the sqlcmd shipped with SQL
+# Server 2025 enforces an encrypted connection by default, which fails
+# certificate validation against the instance's self-signed certificate.
 function Invoke-Sqlcmd-Quiet {
     param(
         [string[]]$SqlArgs,
@@ -212,7 +214,10 @@ function Invoke-Sqlcmd-Quiet {
         $SqlArgs += @('-i', $queryFile)
     }
     try {
-        & sqlcmd @SqlArgs -t 10 2>&1 | Out-Null
+        # Keep the output (stderr folded in) so a failing caller can show WHY
+        # sqlcmd failed. SQL error messages never echo the statement text, so
+        # secrets in $QueryText don't leak through it.
+        $script:LastSqlcmdOutput = (& sqlcmd @SqlArgs -t 10 -C 2>&1 | ForEach-Object { "$_" }) -join [Environment]::NewLine
     } finally {
         $ErrorActionPreference = $prev
         if ($Password) { Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue }
@@ -232,7 +237,7 @@ for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 2
 }
 if (-not $ready) {
-    throw "SQL Server did not become ready within ~60 seconds. Check the service is running."
+    throw "SQL Server did not become ready within ~60 seconds. Check the service is running. Last sqlcmd output: $script:LastSqlcmdOutput"
 }
 Write-Host "SQL Server is responding."
 
@@ -248,7 +253,7 @@ Write-Host "Ensuring database '$DatabaseName' exists..."
 $dbQuery = "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = N'$DatabaseName') CREATE DATABASE [$DatabaseName];"
 $ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "(local)", "-E", "-Q", $dbQuery) -FailOnSqlError
 if ($ec -ne 0) {
-    throw "Failed to create/verify database '$DatabaseName' (sqlcmd exit code $ec)."
+    throw "Failed to create/verify database '$DatabaseName' (sqlcmd exit code $ec). sqlcmd output: $script:LastSqlcmdOutput"
 }
 
 Write-Host "Database '$DatabaseName' is present."
@@ -277,13 +282,13 @@ ALTER ROLE db_owner ADD MEMBER [$safeUser];
 "@
 $ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "(local)", "-E") -QueryText $provisionQuery -FailOnSqlError
 if ($ec -ne 0) {
-    throw "Failed to provision the Admin App login '$AppDbUsername' (sqlcmd exit code $ec). A CHECK_POLICY failure here means the password is too weak; supply a stronger -AppDbPassword."
+    throw "Failed to provision the Admin App login '$AppDbUsername' (sqlcmd exit code $ec). A CHECK_POLICY failure here means the password is too weak; supply a stronger -AppDbPassword. sqlcmd output: $script:LastSqlcmdOutput"
 }
 
 # Verify the app login can connect over TCP with SQL authentication (how the app connects).
 $ec = Invoke-Sqlcmd-Quiet -SqlArgs @("-S", "tcp:localhost,1433", "-U", $AppDbUsername, "-d", $DatabaseName, "-Q", "SELECT 1") -Password $AppDbPasswordPlain
 if ($ec -ne 0) {
-    throw "The Admin App login '$AppDbUsername' could not connect over TCP to '$DatabaseName' (sqlcmd exit code $ec)."
+    throw "The Admin App login '$AppDbUsername' could not connect over TCP to '$DatabaseName' (sqlcmd exit code $ec). sqlcmd output: $script:LastSqlcmdOutput"
 }
 Write-Host "Admin App login '$AppDbUsername' is provisioned (db_owner on '$DatabaseName', non-sysadmin) and verified."
 

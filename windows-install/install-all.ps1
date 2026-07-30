@@ -811,7 +811,7 @@ if ($apiOk) {
                 # SQLCMDPASSWORD instead of -P keeps the password off the sqlcmd
                 # process command line; cleared in the finally below.
                 $env:SQLCMDPASSWORD = $AppDbPasswordPlain
-                & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
+                & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
             } else {
                 # Probe via the container's psql (postgres-only -- avoids
                 # requiring psql.exe on the host) when docker is in play;
@@ -862,7 +862,7 @@ UPDATE [user] SET roleId = 2, isActive = 1
 "@
         $env:SQLCMDPASSWORD = $AppDbPasswordPlain
         try {
-            & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -Q $upsertQuery 1>$null 2>$null
+            & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -Q $upsertQuery 1>$null 2>$null
             $upsertExit = $LASTEXITCODE
         } finally {
             Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
@@ -919,7 +919,7 @@ UPDATE "user" SET "roleId" = 2, "isActive" = true
     if ($DbEngine -eq 'mssql') {
         $env:SQLCMDPASSWORD = $AppDbPasswordPlain
         try {
-            $idOut = & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -h -1 -W -Q "SET NOCOUNT ON; SELECT TOP 1 id FROM [oidc] WHERE clientId = '$oidcClientIdSql';" 2>$null
+            $idOut = & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -h -1 -W -Q "SET NOCOUNT ON; SELECT TOP 1 id FROM [oidc] WHERE clientId = '$oidcClientIdSql';" 2>$null
             if ($LASTEXITCODE -eq 0 -and "$idOut" -match '(\d+)') { $oidcRowId = [int]$Matches[1] }
         } finally { Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue }
     } else {

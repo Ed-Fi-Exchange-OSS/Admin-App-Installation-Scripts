@@ -217,7 +217,7 @@ DELETE FROM [team] WHERE [name] = N'$teamNameSql';
 DELETE FROM [user]
  WHERE [username] = N'$machineUser' AND [userType] = N'machine';
 "@
-    & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -Q $cleanupSql
+    & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -C -Q $cleanupSql
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername'. Check -AppDbUsername / -AppDbPassword / -DatabaseName." }
 }
 else
@@ -300,7 +300,7 @@ WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
     # Count first so the outcome is honest: a blanket "removed" message when
     # nothing matched reads as a successful delete of copies that were never there.
     $countSql = "SET NOCOUNT ON; SELECT COUNT(*) FROM dbo.ClaimSets cs WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;"
-    $matched = @(& sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -b -h -1 -W -Q $countSql | Where-Object { "$_".Trim() })[0]
+    $matched = @(& sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -C -b -h -1 -W -Q $countSql | Where-Object { "$_".Trim() })[0]
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed counting the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME." }
     if ([int]"$matched" -eq 0)
     {
@@ -308,7 +308,7 @@ WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
     }
     else
     {
-        & sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -b -Q $claimsetSql
+        & sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -C -b -Q $claimsetSql
         if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed removing the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME." }
         Write-Host "Removed $matched claimset copies from '$securityDatabaseName'." -ForegroundColor Green
     }
