@@ -115,6 +115,12 @@ param(
     [string]$DbUsername = 'sa',
     [string]$DbPassword,                         # required for -DbEngine mssql unless -UseIntegratedSecurity
     [switch]$UseIntegratedSecurity,
+    # Trust the server certificate without validating it. Applied automatically
+    # for a loopback -SqlServer (the local self-signed instance); required only
+    # to reach a REMOTE server whose certificate is self-signed or otherwise
+    # not chain-trusted. It disables validation, so the connection becomes
+    # vulnerable to a machine-in-the-middle -- prefer a trusted certificate.
+    [switch]$TrustServerCertificate,
 
     # --- pgsql -----------------------------------------------------------------
     [string]$PostgresPassword,                   # required for -DbEngine pgsql
@@ -157,6 +163,10 @@ if ($DbEngine -eq 'mssql')
     # the sqlcmd process command line (visible in the process list).
     $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $DbUsername })
 
+    # -C (trust server certificate) only where it is safe: a loopback target or
+    # an explicit opt-in. Same @(...) rule as $authArgs above.
+    $trustArgs = @(Get-SqlcmdTrustArgs -SqlServer $SqlServer -TrustServerCertificate:$TrustServerCertificate)
+
     # FOR JSON sidesteps sqlcmd's column formatting entirely: the result is a
     # single JSON document (wrapped across output lines) that round-trips names
     # containing commas or quotes safely.
@@ -184,13 +194,13 @@ FOR JSON PATH, INCLUDE_NULL_VALUES;
     if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
     try
     {
-        $raw = & sqlcmd -S $SqlServer @authArgs -d $OdsDatabaseName -C -b -y 0 -Q $sql
+        $raw = & sqlcmd -S $SqlServer @authArgs @trustArgs -d $OdsDatabaseName -b -y 0 -Q $sql
     }
     finally
     {
         Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
     }
-    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE). Check -SqlServer / -DbUsername / -DbPassword / -OdsDatabaseName." }
+    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE). Check -SqlServer / -DbUsername / -DbPassword / -OdsDatabaseName. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
     $joined = @($raw) -join ''
     $start = $joined.IndexOf('[')
     $end = $joined.LastIndexOf(']')

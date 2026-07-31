@@ -311,7 +311,9 @@ if ($DbEngine -eq 'mssql' -and $sqlService -and $sqlService.Status -eq 'Running'
         Write-Check INFO "Nothing listening on TCP 1433" "02-prereqs-sql.ps1 will enable TCP/IP"
     }
 
-    # sbaa database
+    # sbaa database. -C (trust server certificate) is safe unconditionally here:
+    # -S is the hardcoded loopback '(local)', never a parameterized remote host.
+    # SQL Server 2025's sqlcmd otherwise rejects the instance's self-signed cert.
     $dbCheck = & sqlcmd -S "(local)" -E -C -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE name = N'$DatabaseName'" -h-1 2>&1
     if ($LASTEXITCODE -eq 0 -and $dbCheck -match $DatabaseName) {
         Write-Check PASS "Database '$DatabaseName' exists"

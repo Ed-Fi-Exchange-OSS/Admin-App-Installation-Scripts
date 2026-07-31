@@ -529,6 +529,8 @@ if ($freshKeyGenerated -and $DbEngine -eq 'mssql' -and -not $ForceKeyRotation) {
     # sqlcmd process command line; cleared in the finally.
     $env:SQLCMDPASSWORD = $AppDbPasswordPlain
     try {
+        # -C (trust server certificate) is safe unconditionally: -S is the
+        # hardcoded loopback, never a parameterized remote host.
         $out = & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -h -1 -W -t 10 `
             -Q "SET NOCOUNT ON; IF OBJECT_ID('sb_environment','U') IS NOT NULL SELECT COUNT(*) FROM sb_environment ELSE SELECT 0;" 2>$null
         if ($LASTEXITCODE -eq 0 -and $out) { $envCount = [int]("$($out | Select-Object -First 1)").Trim() }

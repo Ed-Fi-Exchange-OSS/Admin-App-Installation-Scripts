@@ -174,6 +174,12 @@ if ($registryChanged) {
 # server, and -C (trust server certificate): the sqlcmd shipped with SQL
 # Server 2025 enforces an encrypted connection by default, which fails
 # certificate validation against the instance's self-signed certificate.
+# -C is unconditional here (unlike quick-start/ and edorg-sync/, which decide
+# per target via Get-SqlcmdTrustArgs) because every caller in this folder
+# hardcodes a loopback -S: '(local)' or 'tcp:localhost,1433'. There is no
+# parameterized host to reach a remote server -- -InstanceName only selects the
+# local registry key and service to restart. If a remote target is ever added,
+# switch these calls to the loopback-or-explicit-opt-in helper instead.
 function Invoke-Sqlcmd-Quiet {
     param(
         [string[]]$SqlArgs,

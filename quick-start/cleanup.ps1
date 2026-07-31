@@ -77,6 +77,13 @@ param(
     # Not needed when SECURITY_USE_INTEGRATED_SECURITY=true.
     [string]$SecurityDbUsername,
     [string]$SecurityDbPassword,
+    # Trust the EdFi_Security server's certificate without validating it.
+    # Applied automatically for a loopback -SecuritySqlServer (the local
+    # self-signed instance); required only to reach a REMOTE server whose
+    # certificate is self-signed or otherwise not chain-trusted. It disables
+    # validation, so the connection becomes vulnerable to a
+    # machine-in-the-middle -- prefer a trusted certificate.
+    [switch]$TrustServerCertificate,
     # Skip removing the claimset copies from EdFi_Security.
     [switch]$SkipClaimsets,
 
@@ -131,6 +138,7 @@ if (-not $PSBoundParameters.ContainsKey('ClaimSetPrefix')) { $ClaimSetPrefix = G
 if (-not $PSBoundParameters.ContainsKey('SecuritySqlServer')) { $SecuritySqlServer = Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433' }
 if (-not $PSBoundParameters.ContainsKey('SecurityDbUsername')) { $SecurityDbUsername = Get-EnvValue 'SECURITY_DB_USERNAME' }
 if (-not $PSBoundParameters.ContainsKey('SecurityDbPassword')) { $SecurityDbPassword = Get-EnvValue 'SECURITY_DB_PASSWORD' }
+if (-not $TrustServerCertificate) { $TrustServerCertificate = (Get-EnvValue 'SQL_TRUST_SERVER_CERTIFICATE') -in @('true', 'True', 'TRUE', '1', 'yes') }
 $securityDatabaseName = Get-EnvValue 'SECURITY_DATABASE_NAME' 'EdFi_Security'
 $securityUseIntegratedSecurity = (Get-EnvValue 'SECURITY_USE_INTEGRATED_SECURITY') -in @('true', 'True', 'TRUE', '1', 'yes')
 $securityPostgresContainer = Get-EnvValue 'SECURITY_POSTGRES_CONTAINER' 'ed-fi-db-admin'
@@ -217,6 +225,9 @@ DELETE FROM [team] WHERE [name] = N'$teamNameSql';
 DELETE FROM [user]
  WHERE [username] = N'$machineUser' AND [userType] = N'machine';
 "@
+    # -C (trust server certificate) is safe unconditionally: -S is the hardcoded
+    # loopback. The EdFi_Security calls below take -SecuritySqlServer instead and
+    # decide per target via Get-SqlcmdTrustArgs.
     & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -C -Q $cleanupSql
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername'. Check -AppDbUsername / -AppDbPassword / -DatabaseName." }
 }
@@ -297,18 +308,21 @@ WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
     # @(...) wrap is load-bearing: a one-element if-expression result is a scalar
     # string, and splatting a scalar garbles the native argument list.
     $secAuthArgs = @(if ($securityUseIntegratedSecurity) { '-E' } else { '-U', $SecurityDbUsername, '-P', $SecurityDbPassword })
+    # -C (trust server certificate) only where it is safe: a loopback target or
+    # an explicit opt-in. Same @(...) rule as $secAuthArgs above.
+    $secTrustArgs = @(Get-SqlcmdTrustArgs -SqlServer $SecuritySqlServer -TrustServerCertificate:$TrustServerCertificate)
     # Count first so the outcome is honest: a blanket "removed" message when
     # nothing matched reads as a successful delete of copies that were never there.
     $countSql = "SET NOCOUNT ON; SELECT COUNT(*) FROM dbo.ClaimSets cs WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;"
-    $matched = @(& sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -C -b -h -1 -W -Q $countSql | Where-Object { "$_".Trim() })[0]
-    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed counting the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME." }
+    $matched = @(& sqlcmd -S $SecuritySqlServer @secAuthArgs @secTrustArgs -d $securityDatabaseName -b -h -1 -W -Q $countSql | Where-Object { "$_".Trim() })[0]
+    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed counting the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
     if ([int]"$matched" -eq 0)
     {
         Write-Host "No claimset copies matched in '$securityDatabaseName' (nothing to remove -- were they created?)." -ForegroundColor Yellow
     }
     else
     {
-        & sqlcmd -S $SecuritySqlServer @secAuthArgs -d $securityDatabaseName -C -b -Q $claimsetSql
+        & sqlcmd -S $SecuritySqlServer @secAuthArgs @secTrustArgs -d $securityDatabaseName -b -Q $claimsetSql
         if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed removing the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME." }
         Write-Host "Removed $matched claimset copies from '$securityDatabaseName'." -ForegroundColor Green
     }

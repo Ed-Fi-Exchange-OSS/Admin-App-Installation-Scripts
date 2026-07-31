@@ -809,7 +809,9 @@ if ($apiOk) {
         try {
             if ($DbEngine -eq 'mssql') {
                 # SQLCMDPASSWORD instead of -P keeps the password off the sqlcmd
-                # process command line; cleared in the finally below.
+                # process command line; cleared in the finally below. -C (trust
+                # server certificate) is safe unconditionally in this folder:
+                # every -S is the hardcoded loopback, never a remote host.
                 $env:SQLCMDPASSWORD = $AppDbPasswordPlain
                 & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
             } else {

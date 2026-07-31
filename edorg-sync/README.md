@@ -45,7 +45,16 @@ Every `.env` variable is documented in [.env.example](.env.example). Passwords
 `POSTGRES_APP_PASSWORD`) may be left out of `.env` — `run.ps1` and
 `cleanup-edorgs.ps1` prompt for the ones they need, with the input masked; set
 them in the file only for unattended runs. Both
-scripts are idempotent, so re-running `run.ps1` is safe. To review (or trim)
+scripts are idempotent, so re-running `run.ps1` is safe.
+
+On SQL Server, a loopback `ODS_SQL_SERVER` / `SQL_SERVER` is connected to with
+`sqlcmd -C` (trust server certificate), because a local instance presents a
+self-signed certificate that the sqlcmd shipped with SQL Server 2025 rejects by
+default. A **remote** server keeps validating its certificate; if it is
+self-signed, either install a trusted certificate on it (preferred) or set
+`SQL_TRUST_SERVER_CERTIFICATE=true` (equivalently, pass
+`-TrustServerCertificate`), which disables validation and exposes the
+connection to a machine-in-the-middle. To review (or trim)
 the CSV before anything is written to the Admin App, split the run:
 
 ```powershell
