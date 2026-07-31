@@ -227,6 +227,9 @@ else
     if ($securityDbEngine -eq 'mssql')
     {
         $claimsetArgs.SqlServer = Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433'
+        # Only needed for a REMOTE server with a self-signed certificate: a
+        # loopback target already trusts it without this (see compat.ps1).
+        if (Test-EnvTrue 'SQL_TRUST_SERVER_CERTIFICATE') { $claimsetArgs.TrustServerCertificate = $true }
         if (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY')
         {
             $claimsetArgs.UseIntegratedSecurity = $true

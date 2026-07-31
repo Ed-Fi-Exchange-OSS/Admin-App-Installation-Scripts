@@ -301,7 +301,10 @@ IF NOT EXISTS (SELECT 1 FROM [user] WHERE username = '$userNameSql' OR clientId 
 UPDATE [user] SET roleId = $AdminAppRoleId, isActive = 1, userType = 'machine', clientId = '$clientIdSql'
     WHERE username = '$userNameSql';
 "@
-    & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -Q $userSql
+    # -C (trust server certificate) is safe unconditionally: -S is the hardcoded
+    # loopback, never a parameterized remote host (contrast copy-claimsets.ps1,
+    # which takes -SqlServer and decides via Get-SqlcmdTrustArgs).
+    & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -C -Q $userSql
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername'. Check -AppDbUsername / -AppDbPassword / -DatabaseName." }
 }
 else

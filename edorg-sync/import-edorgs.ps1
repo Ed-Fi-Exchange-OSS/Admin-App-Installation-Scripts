@@ -144,6 +144,12 @@ param(
     [string]$DbUsername = 'edfi_adminapp',
     [string]$DbPassword,                         # required for -DbEngine mssql unless -UseIntegratedSecurity
     [switch]$UseIntegratedSecurity,
+    # Trust the server certificate without validating it. Applied automatically
+    # for a loopback -SqlServer (the local self-signed instance); required only
+    # to reach a REMOTE server whose certificate is self-signed or otherwise
+    # not chain-trusted. It disables validation, so the connection becomes
+    # vulnerable to a machine-in-the-middle -- prefer a trusted certificate.
+    [switch]$TrustServerCertificate,
 
     # --- pgsql -----------------------------------------------------------------
     [string]$PostgresAppPassword,                # required for -DbEngine pgsql
@@ -174,6 +180,10 @@ if ($DbEngine -eq 'mssql')
     # SQLCMDPASSWORD (set around each call), never as -P, so it stays off
     # the sqlcmd process command line (visible in the process list).
     $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $DbUsername })
+
+    # -C (trust server certificate) only where it is safe: a loopback target or
+    # an explicit opt-in. Same @(...) rule as $authArgs above.
+    $trustArgs = @(Get-SqlcmdTrustArgs -SqlServer $SqlServer -TrustServerCertificate:$TrustServerCertificate)
 }
 
 function Invoke-AdminAppSql
@@ -192,11 +202,11 @@ function Invoke-AdminAppSql
             # correctly ('utf8BOM' is not a valid encoding name on 5.1).
             Write-Utf8BomFile -Path $tempFile -Content $Sql
             if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
-            $out = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            $out = & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
             if ($LASTEXITCODE -ne 0)
             {
                 $out | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
-                throw "sqlcmd failed (exit $LASTEXITCODE). $FailHint"
+                throw "sqlcmd failed (exit $LASTEXITCODE). $FailHint If the output above reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)."
             }
             return $out
         }

@@ -76,6 +76,16 @@ runs. All the scripts are idempotent, so re-running `run.ps1` is safe; if the ma
 and machine user are already in place, re-run only the provisioning half with
 `./run.ps1 -SkipBootstrap`.
 
+On SQL Server, a loopback `SECURITY_SQL_SERVER` is connected to with `sqlcmd -C`
+(trust server certificate), because a local instance presents a self-signed
+certificate that the sqlcmd shipped with SQL Server 2025 rejects by default. A
+**remote** EdFi_Security server keeps validating its certificate; if it is
+self-signed, either install a trusted certificate on it (preferred) or set
+`SQL_TRUST_SERVER_CERTIFICATE=true` (equivalently, pass
+`-TrustServerCertificate`), which disables validation and exposes the connection
+to a machine-in-the-middle. This is the database counterpart of
+`SKIP_CERTIFICATE_CHECK`, which covers the web calls only.
+
 Individual scripts can also be run directly with parameters — see each
 script's comment-based help (`Get-Help ./bootstrap.ps1 -Full`).
 

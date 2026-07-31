@@ -131,6 +131,9 @@ else
     {
         $exportArgs.SqlServer = Get-EnvValue 'ODS_SQL_SERVER' 'tcp:localhost,1433'
         $exportArgs.DbUsername = Get-EnvValue 'ODS_DB_USERNAME' 'sa'
+        # Only needed for a REMOTE server with a self-signed certificate: a
+        # loopback target already trusts it without this (see compat.ps1).
+        if (Test-EnvTrue 'SQL_TRUST_SERVER_CERTIFICATE') { $exportArgs.TrustServerCertificate = $true }
         if (Test-EnvTrue 'ODS_USE_INTEGRATED_SECURITY')
         {
             $exportArgs.UseIntegratedSecurity = $true
@@ -179,6 +182,9 @@ if ($dbEngine -eq 'mssql')
 {
     $importArgs.SqlServer = Get-EnvValue 'SQL_SERVER' 'tcp:localhost,1433'
     $importArgs.DbUsername = Get-EnvValue 'ADMIN_APP_DB_USER' 'edfi_adminapp'
+    # Only needed for a REMOTE server with a self-signed certificate: a
+    # loopback target already trusts it without this (see compat.ps1).
+    if (Test-EnvTrue 'SQL_TRUST_SERVER_CERTIFICATE') { $importArgs.TrustServerCertificate = $true }
     if (Test-EnvTrue 'USE_INTEGRATED_SECURITY')
     {
         $importArgs.UseIntegratedSecurity = $true

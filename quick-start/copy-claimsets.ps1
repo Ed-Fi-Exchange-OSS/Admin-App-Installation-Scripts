@@ -82,6 +82,12 @@ param(
     [string]$SqlUser,                            # required for -DbEngine mssql unless -UseIntegratedSecurity
     [string]$SqlPassword,                        # required for -DbEngine mssql unless -UseIntegratedSecurity
     [switch]$UseIntegratedSecurity,
+    # Trust the server certificate without validating it. Applied automatically
+    # for a loopback -SqlServer (the local self-signed instance); required only
+    # to reach a REMOTE server whose certificate is self-signed or otherwise
+    # not chain-trusted. It disables validation, so the connection becomes
+    # vulnerable to a machine-in-the-middle -- prefer a trusted certificate.
+    [switch]$TrustServerCertificate,
 
     # --- pgsql -----------------------------------------------------------------
     [string]$PostgresPassword,                   # required for -DbEngine pgsql
@@ -109,6 +115,10 @@ if ($DbEngine -eq 'mssql')
     # a one-element array to a scalar string, and splatting a scalar to a
     # native command garbles the argument list.
     $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $SqlUser, '-P', $SqlPassword })
+
+    # -C (trust server certificate) only where it is safe: a loopback target or
+    # an explicit opt-in. Same @(...) rule as $authArgs above.
+    $trustArgs = @(Get-SqlcmdTrustArgs -SqlServer $SqlServer -TrustServerCertificate:$TrustServerCertificate)
 }
 
 # No -ClaimSetNames: discover every built-in claimset, excluding internal-use
@@ -119,8 +129,8 @@ if ($ClaimSetNames.Count -eq 0)
     if ($DbEngine -eq 'mssql')
     {
         $listSql = 'SET NOCOUNT ON; SELECT ClaimSetName FROM dbo.ClaimSets WHERE IsEdfiPreset = 1 AND ForApplicationUseOnly = 0 ORDER BY ClaimSetId;'
-        $raw = & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -h -1 -W -Q $listSql
-        if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed listing claimsets (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName." }
+        $raw = & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -Q $listSql
+        if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed listing claimsets (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
     }
     else
     {
@@ -206,7 +216,7 @@ END
 "@
         # -b makes sqlcmd exit nonzero on SQL errors; without it $LASTEXITCODE
         # stays 0 and failures would pass silently.
-        & sqlcmd -S $SqlServer @authArgs -d $DatabaseName -b -Q $sql
+        & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -Q $sql
         if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed for claimset '$name' (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName." }
     }
     else
