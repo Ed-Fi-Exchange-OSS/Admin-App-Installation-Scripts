@@ -1,4 +1,5 @@
 #Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Reverses the Ed-Fi Admin App install. Leaves Node.js, JDK, SQL Server, and IIS
@@ -182,48 +183,70 @@ if (-not $Force) {
 # ========================================================
 Write-Section "1. IIS teardown"
 # ========================================================
+# IIS is managed through the Microsoft.Web.Administration ServerManager API, loaded
+# directly from inetsrv, because the WebAdministration IIS:\ provider drive does not
+# exist under PowerShell 7 and the IISAdministration module fails to import there.
+# See 05-deploy-api.ps1 for the full rationale. Removals must be committed.
+function New-IisServerManager {
+    if (-not ('Microsoft.Web.Administration.ServerManager' -as [type])) {
+        Add-Type -Path "$env:SystemRoot\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
+    }
+    New-Object Microsoft.Web.Administration.ServerManager
+}
+
 $iisAvailable = $false
 try {
-    Import-Module WebAdministration -ErrorAction Stop
+    $probeManager = New-IisServerManager
+    $probeManager.Dispose()
     $iisAvailable = $true
 } catch {
-    Record "Load WebAdministration" "WARN" "IIS module unavailable -- skipping IIS steps"
+    Record "Load the IIS management API" "WARN" "IIS unavailable -- skipping IIS steps: $($_.Exception.Message)"
 }
 
 if ($iisAvailable) {
     # Remove the two standalone AdminApp sites (API named after the App Pool, web application).
+    # Sites.Remove works on a Started site, so there is no separate stop step.
     foreach ($siteName in @($AppPoolName, $StandaloneFeSiteName)) {
+        $siteManager = $null
         try {
-            $site = Get-Website -Name $siteName -ErrorAction SilentlyContinue
+            $siteManager = New-IisServerManager
+            $site = $siteManager.Sites[$siteName]
             if ($site) {
-                if ($site.State -eq 'Started') {
-                    Stop-Website -Name $siteName -ErrorAction SilentlyContinue
-                }
-                Remove-Website -Name $siteName -ErrorAction Stop
+                $siteManager.Sites.Remove($site)
+                $siteManager.CommitChanges()
                 Record "Remove IIS site '$siteName'" "OK"
             } else {
                 Record "IIS site '$siteName'" "SKIP" "Not present"
             }
         } catch {
             Record "Remove IIS site '$siteName'" "FAIL" $_.Exception.Message
+        } finally {
+            if ($siteManager) { $siteManager.Dispose() }
         }
     }
 
-    # TLS teardown: Remove-Website above dropped each site's https binding, but the
-    # HTTP.sys SSL certificate registration (IIS:\SslBindings) persists separately --
-    # remove it so a reinstall rebinds cleanly. Then delete the self-signed certificate we
-    # generated (matched by FriendlyName); a user-supplied certificate is left untouched.
+    # TLS teardown: removing the sites above dropped each site's https binding, but the
+    # HTTP.sys SSL certificate registration persists separately -- remove it so a reinstall
+    # rebinds cleanly. Then delete the self-signed certificate we generated (matched by
+    # FriendlyName); a user-supplied certificate is left untouched.
+    #
+    # netsh is used here rather than the IIS:\SslBindings provider path, which does not
+    # exist under PowerShell 7, and the ServerManager API does not expose HTTP.sys
+    # registrations. Presence is decided by netsh's exit code rather than by matching its
+    # output text, which is localized.
     foreach ($httpsPort in @($HttpsApiPort, $HttpsFePort)) {
-        $sslPath = "IIS:\SslBindings\0.0.0.0!$httpsPort"
+        $ipPort = "0.0.0.0:$httpsPort"
         try {
-            if (Test-Path $sslPath) {
-                Remove-Item $sslPath -Force -ErrorAction Stop
-                Record "Remove SSL binding 0.0.0.0:$httpsPort" "OK"
+            & netsh http show sslcert ipport=$ipPort 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                & netsh http delete sslcert ipport=$ipPort 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "netsh http delete sslcert exited with code $LASTEXITCODE." }
+                Record "Remove SSL binding $ipPort" "OK"
             } else {
-                Record "SSL binding 0.0.0.0:$httpsPort" "SKIP" "Not present"
+                Record "SSL binding $ipPort" "SKIP" "Not present"
             }
         } catch {
-            Record "Remove SSL binding 0.0.0.0:$httpsPort" "FAIL" $_.Exception.Message
+            Record "Remove SSL binding $ipPort" "FAIL" $_.Exception.Message
         }
     }
     # Remove our self-signed certificate from BOTH the personal store (My, where it's
@@ -271,39 +294,46 @@ if ($iisAvailable) {
         Record "Revoke App Pool grant on node directory" "SKIP" "node directory not resolved"
     }
 
-    # Stop + remove App Pool
+    # Remove the API App Pool. ApplicationPools.Remove works on a Started pool, so there
+    # is no separate stop step.
+    $apiPoolManager = $null
     try {
-        if (Test-Path "IIS:\AppPools\$AppPoolName") {
-            $state = (Get-WebAppPoolState -Name $AppPoolName -ErrorAction SilentlyContinue).Value
-            if ($state -eq 'Started') {
-                Stop-WebAppPool -Name $AppPoolName -ErrorAction SilentlyContinue
-            }
-            Remove-WebAppPool -Name $AppPoolName -ErrorAction Stop
+        $apiPoolManager = New-IisServerManager
+        $apiPool = $apiPoolManager.ApplicationPools[$AppPoolName]
+        if ($apiPool) {
+            $apiPoolManager.ApplicationPools.Remove($apiPool)
+            $apiPoolManager.CommitChanges()
             Record "Remove App Pool '$AppPoolName'" "OK"
         } else {
             Record "App Pool '$AppPoolName'" "SKIP" "Not present"
         }
     } catch {
         Record "Remove App Pool '$AppPoolName'" "FAIL" $_.Exception.Message
+    } finally {
+        if ($apiPoolManager) { $apiPoolManager.Dispose() }
     }
 
-    # Stop + remove the dedicated web application App Pool (06-deploy-fe.ps1 creates it so the
+    # Remove the dedicated web application App Pool (06-deploy-fe.ps1 creates it so the
     # SPA no longer rides DefaultAppPool). Guarded so we never touch DefaultAppPool.
+    $fePoolManager = $null
     try {
         if ($StandaloneFeAppPoolName -eq 'DefaultAppPool') {
             Record "Remove web application App Pool" "SKIP" "Refusing to remove DefaultAppPool"
-        } elseif (Test-Path "IIS:\AppPools\$StandaloneFeAppPoolName") {
-            $feState = (Get-WebAppPoolState -Name $StandaloneFeAppPoolName -ErrorAction SilentlyContinue).Value
-            if ($feState -eq 'Started') {
-                Stop-WebAppPool -Name $StandaloneFeAppPoolName -ErrorAction SilentlyContinue
-            }
-            Remove-WebAppPool -Name $StandaloneFeAppPoolName -ErrorAction Stop
-            Record "Remove App Pool '$StandaloneFeAppPoolName'" "OK"
         } else {
-            Record "App Pool '$StandaloneFeAppPoolName'" "SKIP" "Not present"
+            $fePoolManager = New-IisServerManager
+            $fePool = $fePoolManager.ApplicationPools[$StandaloneFeAppPoolName]
+            if ($fePool) {
+                $fePoolManager.ApplicationPools.Remove($fePool)
+                $fePoolManager.CommitChanges()
+                Record "Remove App Pool '$StandaloneFeAppPoolName'" "OK"
+            } else {
+                Record "App Pool '$StandaloneFeAppPoolName'" "SKIP" "Not present"
+            }
         }
     } catch {
         Record "Remove App Pool '$StandaloneFeAppPoolName'" "FAIL" $_.Exception.Message
+    } finally {
+        if ($fePoolManager) { $fePoolManager.Dispose() }
     }
 }
 

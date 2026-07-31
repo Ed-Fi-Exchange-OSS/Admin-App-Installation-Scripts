@@ -35,6 +35,7 @@ How long to wait for Keycloak to be reachable. Default: 120.
 .EXAMPLE
 .\idp-keycloak-start.ps1 -AdminPassword 'admin'
 #>
+#requires -Version 5.1
 
 param(
     [string]$KeycloakInstallPath = "C:\keycloak",

@@ -1,4 +1,5 @@
 #Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Installs the OS-level prerequisites that the Admin App install scripts assume

@@ -48,6 +48,7 @@ http://localhost:8080/realms/edfi/account/.
 .\04-build.ps1 -SkipInstall
 .\04-build.ps1 -Force
 #>
+#requires -Version 5.1
 
 param(
     [string]$SourcePath = $(

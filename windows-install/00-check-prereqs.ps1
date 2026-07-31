@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Read-only pre-flight check. Reports the state of every prerequisite the install
@@ -107,6 +108,31 @@ function Write-Section {
     Write-Host ""
     Write-Host $Title -ForegroundColor Cyan
     Write-Host ("-" * $Title.Length) -ForegroundColor Cyan
+}
+
+# IIS is read through the Microsoft.Web.Administration ServerManager API, loaded
+# directly from inetsrv. Neither PowerShell module is usable across both editions:
+#
+#   - WebAdministration's IIS:\ provider drive does not exist under PowerShell 7, and
+#     Test-Path against a missing drive returns $false rather than failing, so
+#     drive-based checks silently report "not present" for things that are present.
+#     The module itself loads there only through the Windows PowerShell compatibility
+#     layer, which hands back deserialized objects.
+#   - IISAdministration declares CompatiblePSEditions Desktop and Core, but importing
+#     it under PowerShell 7 fails with "Assembly with same name is already loaded"
+#     unless a compatibility session happens to exist already. Import by name and by
+#     -RequiredVersion both fail; import by PSModuleInfo appears to succeed while
+#     exporting no usable commands.
+#
+# The assembly below is the one both modules wrap, and it behaves identically in
+# Windows PowerShell 5.1 and PowerShell 7. Note that an unelevated caller gets a
+# partial view with no error, so this must only be relied on when elevated (this
+# script requires elevation).
+function New-IisServerManager {
+    if (-not ('Microsoft.Web.Administration.ServerManager' -as [type])) {
+        Add-Type -Path "$env:SystemRoot\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
+    }
+    New-Object Microsoft.Web.Administration.ServerManager
 }
 
 # ============================================================
@@ -249,11 +275,15 @@ if ($rewrite) {
 
 # httpPlatform handler (HttpBridge or Microsoft HttpPlatformHandler). Registered
 # as the global module 'httpPlatformHandler'. 01-prereqs-iis.ps1 installs it.
+# Read with appcmd rather than Get-WebGlobalModule: appcmd behaves identically in
+# Windows PowerShell and PowerShell 7, whereas WebAdministration loads under 7
+# through the Windows PowerShell compatibility layer.
 $httpPlatform = $false
-try {
-    Import-Module WebAdministration -ErrorAction Stop
-    if (Get-WebGlobalModule -Name 'httpPlatformHandler' -ErrorAction SilentlyContinue) { $httpPlatform = $true }
-} catch { }
+$appcmdExe = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
+if (Test-Path $appcmdExe) {
+    $globalModules = & $appcmdExe list module 2>$null
+    if ($globalModules -match 'httpPlatformHandler') { $httpPlatform = $true }
+}
 if ($httpPlatform) {
     Write-Check PASS "httpPlatform handler"
 } else {
@@ -344,30 +374,34 @@ if (Test-Path $feIndex) {
     Write-Check INFO "Web application not built yet" "04-build.ps1 will run build:fe"
 }
 
-# IIS state
+# IIS state. See New-IisServerManager above for why this does not use either the
+# WebAdministration provider drive or the IISAdministration module. The collection
+# indexers return $null for a name that does not exist.
+$serverManager = $null
 try {
-    Import-Module WebAdministration -ErrorAction Stop
-    $apiSite = Get-Website -Name "EdFi-AdminApp-API" -ErrorAction SilentlyContinue
+    $serverManager = New-IisServerManager
+    $apiSite = $serverManager.Sites["EdFi-AdminApp-API"]
     if ($apiSite) {
         Write-Check PASS "IIS site 'EdFi-AdminApp-API' present" "State: $($apiSite.State)"
     } else {
         Write-Check INFO "IIS site 'EdFi-AdminApp-API' not present" "05-deploy-api.ps1 will create (HTTP :3333 -> HTTPS :3443)"
     }
-    $feSite = Get-Website -Name "EdFi-AdminApp-FE" -ErrorAction SilentlyContinue
+    $feSite = $serverManager.Sites["EdFi-AdminApp-FE"]
     if ($feSite) {
         Write-Check PASS "IIS site 'EdFi-AdminApp-FE' present"
     } else {
         Write-Check INFO "IIS site 'EdFi-AdminApp-FE' not present" "06-deploy-fe.ps1 will create (HTTP :4200 -> HTTPS :4443)"
     }
-    $apiPool = Get-Item "IIS:\AppPools\EdFi-AdminApp-API" -ErrorAction SilentlyContinue
+    $apiPool = $serverManager.ApplicationPools["EdFi-AdminApp-API"]
     if ($apiPool) {
-        $loadProfile = (Get-ItemProperty "IIS:\AppPools\EdFi-AdminApp-API" -Name "processModel.loadUserProfile").Value
-        Write-Check PASS "App Pool 'EdFi-AdminApp-API' present" "LoadUserProfile: $loadProfile"
+        Write-Check PASS "App Pool 'EdFi-AdminApp-API' present" "LoadUserProfile: $($apiPool.ProcessModel.LoadUserProfile)"
     } else {
         Write-Check INFO "App Pool 'EdFi-AdminApp-API' not present" "05-deploy-api.ps1 will create"
     }
 } catch {
-    Write-Check INFO "IIS checks skipped" "WebAdministration module unavailable (is IIS installed?)"
+    Write-Check INFO "IIS checks skipped" "Could not read IIS configuration (is IIS installed?): $($_.Exception.Message)"
+} finally {
+    if ($serverManager) { $serverManager.Dispose() }
 }
 
 # ============================================================
@@ -403,14 +437,22 @@ $portChecks = @(
     @{ Port = 3443; Site = 'EdFi-AdminApp-API'; Role = 'API (HTTPS)' },
     @{ Port = 4443; Site = 'EdFi-AdminApp-FE';  Role = 'Web application (HTTPS)'  }
 )
+# Resolve our own site names once instead of per port, so the loop does not re-open
+# the IIS configuration on every iteration.
+$existingSiteNames = @()
+$portSiteManager = $null
+try {
+    $portSiteManager = New-IisServerManager
+    $existingSiteNames = @($portSiteManager.Sites | Select-Object -ExpandProperty Name)
+} catch {
+    Write-Check INFO "Port ownership check degraded" "Could not read IIS sites, so a port held by our own site may be reported as a collision: $($_.Exception.Message)"
+} finally {
+    if ($portSiteManager) { $portSiteManager.Dispose() }
+}
 foreach ($pc in $portChecks) {
     $listener = Get-NetTCPConnection -LocalPort $pc.Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $listener) { continue }
-    $ours = $false
-    try {
-        Import-Module WebAdministration -ErrorAction Stop
-        if (Get-Website -Name $pc.Site -ErrorAction SilentlyContinue) { $ours = $true }
-    } catch { }
+    $ours = $existingSiteNames -contains $pc.Site
     if (-not $ours) {
         $procName = (Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue).ProcessName
         Write-Check RISK "Port $($pc.Port) ($($pc.Role)) already in use ($procName)" "05/06-deploy will fail to bind the '$($pc.Site)' site -- free the port first"

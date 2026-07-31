@@ -1,4 +1,5 @@
 #Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Tears down the optional local Keycloak identity provider that idp-keycloak-setup.ps1 stands up:

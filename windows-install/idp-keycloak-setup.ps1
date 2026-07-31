@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Optional local Identity Provider example. Installs a JDK if needed, downloads
@@ -371,16 +372,34 @@ if ($ready) {
     Write-TaskLog "Keycloak ready at $discoveryUrl"
     # Recycling kills any Node process that started before Keycloak was reachable; the
     # next request spawns one that discovers the realm successfully.
+    # IIS is reached through the Microsoft.Web.Administration ServerManager API rather than
+    # the WebAdministration IIS:\ provider drive, matching the rest of the suite. The drive
+    # does not exist under PowerShell 7 and, worse, Test-Path against a missing drive
+    # returns $false instead of failing, which would make this step log "app pool not
+    # found" and report success while skipping the one action it exists to perform.
+    # Verified working as SYSTEM from a boot-triggered task: the assembly loads, the
+    # ServerManager sees the full IIS configuration rather than a partial view, and
+    # Recycle() succeeds.
+    $serverManager = $null
     try {
-        Import-Module WebAdministration -ErrorAction Stop
-        if (Test-Path "IIS:\AppPools\$apiAppPoolName") {
-            Restart-WebAppPool -Name $apiAppPoolName
+        if (-not ('Microsoft.Web.Administration.ServerManager' -as [type])) {
+            Add-Type -Path "$env:SystemRoot\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
+        }
+        $serverManager = New-Object Microsoft.Web.Administration.ServerManager
+        $apiAppPool = $serverManager.ApplicationPools[$apiAppPoolName]
+        if ($apiAppPool) {
+            # Recycle is a runtime operation, so it takes effect immediately and needs no
+            # CommitChanges call. It returns the resulting ObjectState, which is discarded
+            # so it does not leak into the task's output.
+            $null = $apiAppPool.Recycle()
             Write-TaskLog "Recycled app pool '$apiAppPoolName'."
         } else {
             Write-TaskLog "App pool '$apiAppPoolName' not found; skipping the recycle (Keycloak-only install)."
         }
     } catch {
         Write-TaskLog "Could not recycle app pool '$apiAppPoolName': $($_.Exception.Message)"
+    } finally {
+        if ($serverManager) { $serverManager.Dispose() }
     }
 } else {
     Write-TaskLog "Keycloak did not answer $discoveryUrl within $readyTimeoutSeconds seconds; skipping the API app pool recycle. Keycloak is left running."
@@ -457,6 +476,14 @@ function Register-KeycloakStartupTask {
     # default 3-day cap; it runs for as long as Keycloak does.
     # RestartOnFailure is kept as a best-effort safety net on the boot path. Do not rely
     # on it: Task Scheduler was measured not to act on a non-zero action result.
+    # The action is pinned to Windows PowerShell 5.1, and the generated script is
+    # edition-agnostic, so this is a deliberate choice rather than a limitation:
+    #   - powershell.exe ships with every supported Windows; pwsh.exe does not, and a boot
+    #     task with no interpreter is a silent failure at the worst possible moment.
+    #   - Where pwsh IS present it is often the Microsoft Store package, whose executable
+    #     lives under Program Files\WindowsApps behind an ACL a SYSTEM task cannot use.
+    #     Measured: a SYSTEM task pointed at a Store pwsh fails with Win32 error 1920,
+    #     "The file cannot be accessed by the system", before running a single line.
     $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $escapedCommand = [System.Security.SecurityElement]::Escape($powerShellPath)
     $escapedArguments = [System.Security.SecurityElement]::Escape(

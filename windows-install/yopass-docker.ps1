@@ -1,4 +1,5 @@
 #Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Stands up a local Yopass service (Yopass + memcached) via docker compose so the
