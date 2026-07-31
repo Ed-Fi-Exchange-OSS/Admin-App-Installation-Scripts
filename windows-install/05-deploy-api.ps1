@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Deploys the Ed-Fi Admin App API to IIS via the httpPlatform handler.
@@ -168,13 +169,31 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Precondition: IIS + the WebAdministration module must be available
-# (01-prereqs-iis.ps1 installs the IIS pieces). Fail early with an actionable
-# message instead of a cryptic Import-Module error.
+# IIS is managed through the Microsoft.Web.Administration ServerManager API, loaded
+# directly from inetsrv. Neither PowerShell module works across both editions:
+# WebAdministration's IIS:\ provider drive does not exist under PowerShell 7 (and
+# Test-Path against a missing drive returns $false rather than failing, so checks
+# silently report the wrong answer), while IISAdministration fails to import under
+# PowerShell 7 with an assembly conflict unless a Windows PowerShell compatibility
+# session happens to exist already. This assembly behaves identically in Windows
+# PowerShell 5.1 and PowerShell 7. WET-duplicated in 06-deploy-fe.ps1.
+#
+# Every mutation below must end in CommitChanges(): ServerManager buffers changes and
+# drops them silently if they are never committed.
+function New-IisServerManager {
+    if (-not ('Microsoft.Web.Administration.ServerManager' -as [type])) {
+        Add-Type -Path "$env:SystemRoot\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
+    }
+    New-Object Microsoft.Web.Administration.ServerManager
+}
+
+# Precondition: IIS must be available (01-prereqs-iis.ps1 installs the IIS pieces).
+# Fail early with an actionable message instead of a cryptic type-load error.
 try {
-    Import-Module WebAdministration -ErrorAction Stop
+    $preflightManager = New-IisServerManager
+    $preflightManager.Dispose()
 } catch {
-    throw "IIS / the WebAdministration module isn't available. Ensure IIS is installed (setup-vm-prereqs.ps1) and run 01-prereqs-iis.ps1 before deploying."
+    throw "IIS isn't available (the IIS management API could not be loaded). Ensure IIS is installed (setup-vm-prereqs.ps1) and run 01-prereqs-iis.ps1 before deploying. Original: $($_.Exception.Message)"
 }
 
 # Engine-specific required arg validation. Each engine needs its own password
@@ -261,31 +280,45 @@ Write-Host "Copying node_modules (this takes a minute)..."
 & robocopy "$SourcePath\node_modules" "$DestPath\node_modules" /E /NFL /NDL /NJH /NJS | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Failed to copy node_modules from $SourcePath\node_modules to $DestPath\node_modules (robocopy exit $LASTEXITCODE). Check free disk space." }
 
-# App Pool
+# App Pool. The collection indexer returns $null for a name that does not exist.
+$appPoolManager = $null
 try {
-    if (-not (Test-Path "IIS:\AppPools\$AppPoolName")) {
+    $appPoolManager = New-IisServerManager
+    $appPool = $appPoolManager.ApplicationPools[$AppPoolName]
+    if (-not $appPool) {
         Write-Host "Creating App Pool '$AppPoolName'..."
-        New-WebAppPool -Name $AppPoolName | Out-Null
+        $appPool = $appPoolManager.ApplicationPools.Add($AppPoolName)
     }
-    Set-ItemProperty -Path "IIS:\AppPools\$AppPoolName" -Name "processModel.loadUserProfile" -Value $true
-    Set-ItemProperty -Path "IIS:\AppPools\$AppPoolName" -Name "managedRuntimeVersion" -Value ""
+    $appPool.ProcessModel.LoadUserProfile = $true
+    $appPool.ManagedRuntimeVersion = ''
+    $appPoolManager.CommitChanges()
     Write-Host "App Pool '$AppPoolName' configured (LoadUserProfile=true)."
 } catch {
     throw "Failed to create/configure the IIS App Pool '$AppPoolName'. Is IIS running and the WAS service started? Original: $($_.Exception.Message)"
+} finally {
+    if ($appPoolManager) { $appPoolManager.Dispose() }
 }
 
-# IIS standalone HTTP site (named after the App Pool, e.g. EdFi-AdminApp-API)
+# IIS standalone HTTP site (named after the App Pool, e.g. EdFi-AdminApp-API).
+# Sites.Add starts the site on commit, matching the previous New-Website behaviour.
+$siteManager = $null
 try {
-    if (Get-Website -Name $AppPoolName -ErrorAction SilentlyContinue) {
+    $siteManager = New-IisServerManager
+    $site = $siteManager.Sites[$AppPoolName]
+    if ($site) {
         Write-Host "Site '$AppPoolName' exists. Updating physical path..."
-        Set-ItemProperty -Path "IIS:\Sites\$AppPoolName" -Name "physicalPath" -Value $DestPath
-        Set-ItemProperty -Path "IIS:\Sites\$AppPoolName" -Name "applicationPool" -Value $AppPoolName
+        $site.Applications['/'].VirtualDirectories['/'].PhysicalPath = $DestPath
+        $site.Applications['/'].ApplicationPoolName = $AppPoolName
     } else {
-        New-Website -Name $AppPoolName -Port $StandalonePort -PhysicalPath $DestPath -ApplicationPool $AppPoolName | Out-Null
+        $site = $siteManager.Sites.Add($AppPoolName, 'http', "*:${StandalonePort}:", $DestPath)
+        $site.Applications['/'].ApplicationPoolName = $AppPoolName
         Write-Host "Standalone site '$AppPoolName' created on HTTP port $StandalonePort."
     }
+    $siteManager.CommitChanges()
 } catch {
     throw "Failed to create/update the IIS site '$AppPoolName' on port $StandalonePort. Is the port already in use by another site (check 00-check-prereqs.ps1)? Original: $($_.Exception.Message)"
+} finally {
+    if ($siteManager) { $siteManager.Dispose() }
 }
 
 # Resolve the TLS certificate for the HTTPS binding. Precedence: an explicit
@@ -369,14 +402,26 @@ function Set-HttpsBinding {
         [Parameter(Mandatory)][int]$HttpsPort,
         [Parameter(Mandatory)][string]$Thumbprint
     )
-    if (-not (Get-WebBinding -Name $SiteName -Protocol https -Port $HttpsPort -ErrorAction SilentlyContinue)) {
-        New-WebBinding -Name $SiteName -Protocol https -Port $HttpsPort -SslFlags 0 | Out-Null
-        Write-Host "Added HTTPS binding on port $HttpsPort to site '$SiteName'."
+    $certificate = Get-Item "Cert:\LocalMachine\My\$Thumbprint" -ErrorAction Stop
+    $bindingInformation = "*:${HttpsPort}:"
+    $bindingManager = $null
+    try {
+        $bindingManager = New-IisServerManager
+        $site = $bindingManager.Sites[$SiteName]
+        if (-not $site) { throw "site '$SiteName' does not exist." }
+        # Removed and re-added rather than reassigning the hash on an existing binding, so
+        # a replaced or rotated certificate always takes effect. Adding a binding with a
+        # certificate hash also registers it with HTTP.sys, which the IIS:\SslBindings
+        # path had to do as a separate step.
+        foreach ($stale in @($site.Bindings | Where-Object { $_.Protocol -eq 'https' -and $_.BindingInformation -eq $bindingInformation })) {
+            $site.Bindings.Remove($stale)
+        }
+        $site.Bindings.Add($bindingInformation, $certificate.GetCertHash(), 'My') | Out-Null
+        $bindingManager.CommitChanges()
+    } finally {
+        if ($bindingManager) { $bindingManager.Dispose() }
     }
-    $sslPath = "IIS:\SslBindings\0.0.0.0!$HttpsPort"
-    if (Test-Path $sslPath) { Remove-Item $sslPath -ErrorAction SilentlyContinue }
-    Get-Item "Cert:\LocalMachine\My\$Thumbprint" | New-Item -Path $sslPath | Out-Null
-    Write-Host "Bound certificate $Thumbprint to 0.0.0.0:$HttpsPort."
+    Write-Host "Bound certificate $Thumbprint to the HTTPS binding on port $HttpsPort for site '$SiteName'."
 }
 
 # TLS (always-on): resolve the certificate and add the HTTPS binding. The HTTP site created
@@ -710,21 +755,55 @@ if (-not (Test-Path $NpmCachePath)) {
     New-Item -ItemType Directory -Path $NpmCachePath -Force | Out-Null
 }
 & icacls $NpmCachePath /grant "${appPoolIdentity}:(OI)(CI)M" /T | Out-Null
-$envVarsFilter = "system.applicationHost/applicationPools/add[@name='$AppPoolName']/environmentVariables"
-Remove-WebConfigurationProperty -PSPath "MACHINE/WEBROOT/APPHOST" -Filter $envVarsFilter -Name "." -AtElement @{ name = 'NPM_CONFIG_CACHE' } -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-Remove-WebConfigurationProperty -PSPath "MACHINE/WEBROOT/APPHOST" -Filter $envVarsFilter -Name "." -AtElement @{ name = 'NODE_CONFIG' } -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-try {
-    Add-WebConfigurationProperty -PSPath "MACHINE/WEBROOT/APPHOST" -Filter $envVarsFilter -Name "." -Value @{ name = 'NPM_CONFIG_CACHE'; value = $NpmCachePath }
-} catch {
-    throw "Failed to set NPM_CONFIG_CACHE on the App Pool '$AppPoolName'. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
-}
 # NODE_CONFIG carries the structured app configuration (database credentials, URLs, OIDC,
-# yopass, admin user); node-config deep-merges it over production.js at boot.
-# Lives in the admin-only applicationHost.config, not the site's production.js.
+# yopass, admin user); node-config deep-merges it over production.js at boot. It lives in
+# the admin-only applicationHost.config, not the site's production.js, so it is never
+# echoed here. Each variable is removed before being added so a re-run replaces rather
+# than duplicates it.
+#
+# Attributes are set through SetAttributeValue rather than the element's indexer.
+# Measured on Windows 11 22621, elevated, both editions: assigning the NODE_CONFIG
+# JSON through the indexer succeeds under PowerShell 7 and fails under Windows
+# PowerShell 5.1 with "Type mismatch. (Exception from HRESULT: 0x80020005
+# (DISP_E_TYPEMISMATCH))". A short string literal assigned the same way succeeds in
+# both editions, which is why an earlier probe using a literal did not catch this.
+# SetAttributeValue works in both editions. The explicit [string] casts document
+# that these attributes are strings and keep a non-string value from reaching the
+# native configuration layer.
+#
+# $environmentStage names the operation in progress so a failure below reports
+# which call broke instead of only that something in this block did.
+$environmentManager = $null
+$environmentStage = 'connect to IIS'
 try {
-    Add-WebConfigurationProperty -PSPath "MACHINE/WEBROOT/APPHOST" -Filter $envVarsFilter -Name "." -Value @{ name = 'NODE_CONFIG'; value = $nodeConfigJson }
+    $environmentManager = New-IisServerManager
+    $environmentStage = "find App Pool '$AppPoolName'"
+    $environmentPool = $environmentManager.ApplicationPools[$AppPoolName]
+    if (-not $environmentPool) { throw "App Pool '$AppPoolName' not found." }
+    $environmentStage = 'read the environmentVariables collection'
+    $environmentVariables = $environmentPool.GetCollection('environmentVariables')
+    $environmentStage = 'remove stale variables'
+    foreach ($variableName in @('NPM_CONFIG_CACHE', 'NODE_CONFIG')) {
+        foreach ($stale in @($environmentVariables | Where-Object { $_.GetAttributeValue('name') -eq $variableName })) {
+            $environmentVariables.Remove($stale)
+        }
+    }
+    $environmentStage = 'add NPM_CONFIG_CACHE'
+    $cacheVariable = $environmentVariables.CreateElement('add')
+    $cacheVariable.SetAttributeValue('name', 'NPM_CONFIG_CACHE')
+    $cacheVariable.SetAttributeValue('value', [string]$NpmCachePath)
+    $environmentVariables.Add($cacheVariable) | Out-Null
+    $environmentStage = 'add NODE_CONFIG'
+    $configVariable = $environmentVariables.CreateElement('add')
+    $configVariable.SetAttributeValue('name', 'NODE_CONFIG')
+    $configVariable.SetAttributeValue('value', [string]$nodeConfigJson)
+    $environmentVariables.Add($configVariable) | Out-Null
+    $environmentStage = 'commit the changes'
+    $environmentManager.CommitChanges()
 } catch {
-    throw "Failed to set NODE_CONFIG on the App Pool '$AppPoolName'. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
+    throw "Failed to set NPM_CONFIG_CACHE and NODE_CONFIG on the App Pool '$AppPoolName' while trying to $environmentStage. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
+} finally {
+    if ($environmentManager) { $environmentManager.Dispose() }
 }
 Write-Host "Permissions granted to $appPoolIdentity; NPM_CONFIG_CACHE and NODE_CONFIG set on App Pool."
 

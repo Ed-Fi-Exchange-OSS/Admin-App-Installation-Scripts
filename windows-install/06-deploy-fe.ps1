@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Deploys the Ed-Fi Admin App frontend to IIS.
@@ -62,12 +63,30 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Precondition: IIS + the WebAdministration module must be available
-# (01-prereqs-iis.ps1 installs the IIS pieces).
+# IIS is managed through the Microsoft.Web.Administration ServerManager API, loaded
+# directly from inetsrv. Neither PowerShell module works across both editions:
+# WebAdministration's IIS:\ provider drive does not exist under PowerShell 7 (and
+# Test-Path against a missing drive returns $false rather than failing, so checks
+# silently report the wrong answer), while IISAdministration fails to import under
+# PowerShell 7 with an assembly conflict unless a Windows PowerShell compatibility
+# session happens to exist already. This assembly behaves identically in Windows
+# PowerShell 5.1 and PowerShell 7. WET-duplicated in 05-deploy-api.ps1.
+#
+# Every mutation below must end in CommitChanges(): ServerManager buffers changes and
+# drops them silently if they are never committed.
+function New-IisServerManager {
+    if (-not ('Microsoft.Web.Administration.ServerManager' -as [type])) {
+        Add-Type -Path "$env:SystemRoot\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
+    }
+    New-Object Microsoft.Web.Administration.ServerManager
+}
+
+# Precondition: IIS must be available (01-prereqs-iis.ps1 installs the IIS pieces).
 try {
-    Import-Module WebAdministration -ErrorAction Stop
+    $preflightManager = New-IisServerManager
+    $preflightManager.Dispose()
 } catch {
-    throw "IIS / the WebAdministration module isn't available. Ensure IIS is installed (setup-vm-prereqs.ps1) and run 01-prereqs-iis.ps1 before deploying."
+    throw "IIS isn't available (the IIS management API could not be loaded). Ensure IIS is installed (setup-vm-prereqs.ps1) and run 01-prereqs-iis.ps1 before deploying. Original: $($_.Exception.Message)"
 }
 
 if (-not (Test-Path "$SourcePath\index.html")) {
@@ -79,35 +98,63 @@ New-Item -ItemType Directory -Path $DestPath -Force | Out-Null
 & robocopy $SourcePath $DestPath /MIR /NFL /NDL /NJH /NJS | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
 
-# Dedicated App Pool for the FE. Without one, New-Website binds the site to
-# DefaultAppPool, which is often Stopped after a reboot or recycle -> the SPA 503s
-# until it is started by hand. A dedicated pool (autoStart on by default) started
-# explicitly here keeps the FE reachable on its own.
+# Dedicated App Pool for the FE. Without one, a new site lands in DefaultAppPool,
+# which is often Stopped after a reboot or recycle -> the SPA 503s until it is started
+# by hand. A dedicated pool (autoStart on by default) started explicitly here keeps the
+# FE reachable on its own.
+$appPoolManager = $null
 try {
-    if (-not (Test-Path "IIS:\AppPools\$AppPoolName")) {
+    $appPoolManager = New-IisServerManager
+    $appPool = $appPoolManager.ApplicationPools[$AppPoolName]
+    if (-not $appPool) {
         Write-Host "Creating App Pool '$AppPoolName'..."
-        New-WebAppPool -Name $AppPoolName | Out-Null
+        $appPool = $appPoolManager.ApplicationPools.Add($AppPoolName)
     }
     # Static content -- no managed runtime needed.
-    Set-ItemProperty -Path "IIS:\AppPools\$AppPoolName" -Name "managedRuntimeVersion" -Value ""
+    $appPool.ManagedRuntimeVersion = ''
+    $appPoolManager.CommitChanges()
     Write-Host "App Pool '$AppPoolName' configured."
 } catch {
     throw "Failed to create/configure the IIS App Pool '$AppPoolName'. Is IIS running and the WAS service started? Original: $($_.Exception.Message)"
+} finally {
+    if ($appPoolManager) { $appPoolManager.Dispose() }
 }
 
-if (Get-Website -Name $SiteName -ErrorAction SilentlyContinue) {
-    Write-Host "Site '$SiteName' exists. Updating physical path and app pool..."
-    Set-ItemProperty -Path "IIS:\Sites\$SiteName" -Name "physicalPath" -Value $DestPath
-    Set-ItemProperty -Path "IIS:\Sites\$SiteName" -Name "applicationPool" -Value $AppPoolName
-} else {
-    New-Website -Name $SiteName -Port $Port -PhysicalPath $DestPath -ApplicationPool $AppPoolName | Out-Null
-    Write-Host "Site '$SiteName' created on HTTP port $Port (App Pool '$AppPoolName')."
+# Sites.Add starts the site on commit, matching the previous New-Website behaviour.
+$siteManager = $null
+try {
+    $siteManager = New-IisServerManager
+    $site = $siteManager.Sites[$SiteName]
+    if ($site) {
+        Write-Host "Site '$SiteName' exists. Updating physical path and app pool..."
+        $site.Applications['/'].VirtualDirectories['/'].PhysicalPath = $DestPath
+        $site.Applications['/'].ApplicationPoolName = $AppPoolName
+    } else {
+        $site = $siteManager.Sites.Add($SiteName, 'http', "*:${Port}:", $DestPath)
+        $site.Applications['/'].ApplicationPoolName = $AppPoolName
+        Write-Host "Site '$SiteName' created on HTTP port $Port (App Pool '$AppPoolName')."
+    }
+    $siteManager.CommitChanges()
+} finally {
+    if ($siteManager) { $siteManager.Dispose() }
 }
 
-# Ensure the pool is running so the site serves immediately.
-if ((Get-WebAppPoolState -Name $AppPoolName -ErrorAction SilentlyContinue).Value -ne 'Started') {
-    Start-WebAppPool -Name $AppPoolName | Out-Null
-    Write-Host "Started App Pool '$AppPoolName'."
+# Ensure the pool is running so the site serves immediately. Start() is a runtime
+# operation on an already-committed pool, not a configuration change, so it is not
+# part of a CommitChanges batch.
+$poolStateManager = $null
+try {
+    $poolStateManager = New-IisServerManager
+    $statePool = $poolStateManager.ApplicationPools[$AppPoolName]
+    if ($statePool -and $statePool.State -ne 'Started') {
+        # Start() returns the resulting ObjectState. Discard it: the Start-WebAppPool call
+        # this replaced piped to Out-Null, and without the assignment the state string is
+        # emitted into the script's output.
+        $null = $statePool.Start()
+        Write-Host "Started App Pool '$AppPoolName'."
+    }
+} finally {
+    if ($poolStateManager) { $poolStateManager.Dispose() }
 }
 
 # Resolve the TLS certificate for the HTTPS binding. Precedence: an explicit
@@ -192,14 +239,26 @@ function Set-HttpsBinding {
         [Parameter(Mandatory)][int]$HttpsPort,
         [Parameter(Mandatory)][string]$Thumbprint
     )
-    if (-not (Get-WebBinding -Name $SiteName -Protocol https -Port $HttpsPort -ErrorAction SilentlyContinue)) {
-        New-WebBinding -Name $SiteName -Protocol https -Port $HttpsPort -SslFlags 0 | Out-Null
-        Write-Host "Added HTTPS binding on port $HttpsPort to site '$SiteName'."
+    $certificate = Get-Item "Cert:\LocalMachine\My\$Thumbprint" -ErrorAction Stop
+    $bindingInformation = "*:${HttpsPort}:"
+    $bindingManager = $null
+    try {
+        $bindingManager = New-IisServerManager
+        $site = $bindingManager.Sites[$SiteName]
+        if (-not $site) { throw "site '$SiteName' does not exist." }
+        # Removed and re-added rather than reassigning the hash on an existing binding, so
+        # a replaced or rotated certificate always takes effect. Adding a binding with a
+        # certificate hash also registers it with HTTP.sys, which the IIS:\SslBindings
+        # path had to do as a separate step.
+        foreach ($stale in @($site.Bindings | Where-Object { $_.Protocol -eq 'https' -and $_.BindingInformation -eq $bindingInformation })) {
+            $site.Bindings.Remove($stale)
+        }
+        $site.Bindings.Add($bindingInformation, $certificate.GetCertHash(), 'My') | Out-Null
+        $bindingManager.CommitChanges()
+    } finally {
+        if ($bindingManager) { $bindingManager.Dispose() }
     }
-    $sslPath = "IIS:\SslBindings\0.0.0.0!$HttpsPort"
-    if (Test-Path $sslPath) { Remove-Item $sslPath -ErrorAction SilentlyContinue }
-    Get-Item "Cert:\LocalMachine\My\$Thumbprint" | New-Item -Path $sslPath | Out-Null
-    Write-Host "Bound certificate $Thumbprint to 0.0.0.0:$HttpsPort."
+    Write-Host "Bound certificate $Thumbprint to the HTTPS binding on port $HttpsPort for site '$SiteName'."
 }
 
 # TLS (always-on): resolve the certificate and add the HTTPS binding. The HTTP site created

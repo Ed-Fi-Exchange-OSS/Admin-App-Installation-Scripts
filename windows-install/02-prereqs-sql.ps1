@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Configures SQL Server for the Ed-Fi Admin App: enables Mixed Mode authentication and the

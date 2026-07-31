@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Master installer for the Ed-Fi Admin App on Windows IIS. Fully automated.
@@ -415,6 +416,18 @@ function Write-Phase {
     Write-Host $Title -ForegroundColor Cyan
     Write-Host ("=" * 70) -ForegroundColor Cyan
 }
+
+# Environment banner. These scripts support both Windows PowerShell 5.1 and PowerShell 7,
+# so every run states which edition produced it. Validation covers several combinations of
+# edition, database engine and identity provider, and the resulting transcripts are
+# otherwise difficult to tell apart after the fact.
+Write-Phase "Ed-Fi Admin App install"
+Write-Host "PowerShell      : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
+Write-Host "Operating system: $((Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption) (build $([Environment]::OSVersion.Version.Build))"
+Write-Host "Host            : $([Environment]::MachineName)"
+Write-Host "Database engine  : $DbEngine"
+Write-Host "Identity provider: $IdpProvider"
+Write-Host "Started         : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
 # Resolve the newest stable Admin App release tag when auto-fetching. An explicit
 # tag/branch in -AdminAppRef wins; 'latest' queries the GitHub releases API (which
@@ -961,8 +974,8 @@ UPDATE "user" SET "roleId" = 2, "isActive" = true
     Write-Host "API is NOT responding after ~60s of retries." -ForegroundColor Red
     Write-Host "Check the API stdout log:" -ForegroundColor Yellow
     Write-Host "  Get-Content C:\inetpub\EdFi-AdminApp-API\logs\node-stdout.log -Tail 30"
-    Write-Host "And the IIS app pool state:" -ForegroundColor Yellow
-    Write-Host "  Get-WebAppPoolState -Name EdFi-AdminApp-API"
+    Write-Host "And the IIS app pool state (works in both PowerShell editions):" -ForegroundColor Yellow
+    Write-Host "  & `"`$env:SystemRoot\System32\inetsrv\appcmd.exe`" list apppool EdFi-AdminApp-API"
     Write-Host ""
     throw "Install completed but the API smoke test failed. Fix the underlying issue and re-run install-all (idempotent), or run 05-deploy-api.ps1 directly to redeploy."
 }
