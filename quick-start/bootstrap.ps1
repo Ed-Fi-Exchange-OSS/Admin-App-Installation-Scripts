@@ -93,7 +93,7 @@
   # Auth0. No Keycloak calls; seeds the user and (because -MachineClientSecret is
   # given) verifies a real client_credentials token's iss/aud/scope/client_id.
   # -MachineClientId/-MachineClientSecret are the Auth0 MACHINE TO MACHINE
-  # application's credentials (not the Regular Web Application used for human login).
+  # application's credentials (not the Single Page Application used for human login).
   ./bootstrap.ps1 -Provider auth0 `
     -Auth0Issuer 'https://your-tenant.us.auth0.com' `
     -MachineClientId '<M2M-application-Client-ID>' `

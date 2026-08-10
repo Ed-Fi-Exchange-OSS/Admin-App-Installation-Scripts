@@ -214,14 +214,14 @@ Default 8082. Becomes the YOPASS_URL the API is configured with.
   -AdminUsername 'you@yourtenant.onmicrosoft.com'
 
 .EXAMPLE
-# External OIDC (Auth0). Create a Regular Web Application in the Auth0 dashboard first,
-# and make sure an Auth0 user exists whose email matches -AdminUsername. Either slash
-# form of the issuer works -- the installer derives the discovery (no-slash) and
+# External OIDC (Auth0). Create a Single Page Web Application in the Auth0 dashboard
+# first, and make sure an Auth0 user exists whose email matches -AdminUsername. Either
+# slash form of the issuer works -- the installer derives the discovery (no-slash) and
 # machine-to-machine (with-slash) forms itself.
 .\install-all.ps1 -IdpProvider auth0 `
   -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password') `
   -OidcIssuer 'https://your-tenant.us.auth0.com' `
-  -OidcClientId '<Regular-Web-App-Client-ID>' `
+  -OidcClientId '<Single-Page-App-Client-ID>' `
   -OidcClientSecret (Read-Host -AsSecureString 'Auth0 client secret') `
   -AdminUsername 'you@yourorg.com'
 #>
@@ -775,7 +775,7 @@ if ($idpIsKeycloak) {
     if ($IdpProvider -eq 'auth0') {
         # Same three URLs as the generic case, labeled with the exact Auth0
         # application-settings field names so they can be pasted without mapping.
-        Write-Host "Register these in your Auth0 Regular Web Application (Settings) before logging in:" -ForegroundColor Yellow
+        Write-Host "Register these in your Auth0 Single Page Application (Settings) before logging in:" -ForegroundColor Yellow
         Write-Host "  Allowed Callback URLs:  $ApiUrl/api/auth/callback/<id>  (exact id confirmed at the end of this install)"
         Write-Host "  Allowed Logout URLs:    $ApiUrl/api/auth/post-logout"
         Write-Host "  Allowed Web Origins:    $FeUrl"

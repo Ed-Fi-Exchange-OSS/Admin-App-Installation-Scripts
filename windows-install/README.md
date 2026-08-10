@@ -156,7 +156,7 @@ You can also drive the per-section scripts manually (`00`→`06`), passing `-Oid
 
 Human login and machine-to-machine (M2M) access both work with `-IdpProvider auth0`; set up the tenant in the Auth0 dashboard first:
 
-1. **Human login — Applications → Create Application → Regular Web Applications.** Note the **Domain** (→ `-OidcIssuer` as `https://<domain>`), **Client ID** (→ `-OidcClientId`) and **Client Secret** (→ `-OidcClientSecret`). After the install prints the resolved callback id, register in the application's Settings exactly what it printed:
+1. **Human login — Applications → Create Application → Single Page Web Application.** Note the **Domain** (→ `-OidcIssuer` as `https://<domain>`), **Client ID** (→ `-OidcClientId`) and **Client Secret** (→ `-OidcClientSecret`). After the install prints the resolved callback id, register in the application's Settings exactly what it printed:
    | Auth0 field | Value (defaults) |
    | --- | --- |
    | Allowed Callback URLs | `https://localhost:3443/api/auth/callback/<id>` |
