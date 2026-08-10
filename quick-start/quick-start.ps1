@@ -28,15 +28,20 @@
   and that the token grants "login:app" -- not a specific vendor. It requires a
   matching "machine" user in the Admin App (see the guide's Prerequisites).
 
-  The provider differences are entirely in the token request, which -Scope
-  absorbs (Google Workspace M2M is NOT supported -- its tokens cannot carry
-  "login:app"):
+  The provider differences are entirely in the token request, which -Scope and
+  -Audience absorb (Google Workspace M2M is NOT supported -- its tokens cannot
+  carry "login:app"):
     * Keycloak -- request -Scope 'login:app' (the default); the grant
       arrives in the token's `scope` claim.
     * Entra ID -- request -Scope '<resource>/.default' (NOT 'login:app'); the
       `login:app` app role is granted via admin consent and arrives in the
       token's `roles` claim, and the caller id arrives in `azp` (v2) / `appid`
       (v1) rather than `client_id`.
+    * Auth0    -- pass -Audience '<Auth0-API-identifier>' (its token endpoint
+      requires an explicit audience for client_credentials; without it the
+      token doesn't carry aud = MACHINE_AUDIENCE); leave -Scope at the default,
+      the granted `login:app` permission arrives in `scope` automatically. The
+      Auth0 API must use the RFC 9068 JWT profile so `client_id` is present.
 
   NOTE: the bootstrap user's username/password CANNOT be passed directly -- the
   Admin App has no password endpoint; all human login goes through the OIDC
@@ -69,6 +74,15 @@
     -OAuthClientSecret '<secret>' `
     -Scope 'api://edfiadminapp-api/.default'
 
+.EXAMPLE
+  # Auth0: tenant token endpoint + the Auth0 API identifier as the audience.
+  # -OAuthClientId/-OAuthClientSecret are the Machine to Machine application's.
+  ./quick-start.ps1 `
+    -TokenUrl 'https://your-tenant.us.auth0.com/oauth/token' `
+    -OAuthClientId '<M2M-application-Client-ID>' `
+    -OAuthClientSecret '<secret>' `
+    -Audience 'edfiadminapp-api'
+
 .NOTES
   Requires Windows PowerShell 5.1 or PowerShell 7+. The ODS instance ids AND
   names passed in -Odss must
@@ -94,6 +108,11 @@ param(
     [string]$OAuthClientSecret,             # e.g. edfi-machine-secret-456
     # Keycloak: 'login:app' (default). Entra: '<resource>/.default'.
     [string]$Scope = "login:app",
+    # Auth0 only: the API identifier to request the token for (its token endpoint
+    # requires an explicit audience for client_credentials). Must equal the Admin
+    # App's MACHINE_AUDIENCE. Empty (default) omits the parameter, which is
+    # correct for Keycloak/Entra.
+    [string]$Audience = "",
 
     # Team + membership for the calling (machine) user.
     [string]$TeamName = "Quick Start",
@@ -166,6 +185,9 @@ $tokenArgs = @{
         scope         = $Scope
     }
 }
+# Auth0 requires an explicit audience for client_credentials; other providers
+# don't take the parameter, so it is only sent when supplied.
+if ($Audience) { $tokenArgs.Body.audience = $Audience }
 if ($script:useSkipCertParam) { $tokenArgs.SkipCertificateCheck = $true }
 if ($script:allowInsecureRedirect) { $tokenArgs.AllowInsecureRedirect = $true }
 try

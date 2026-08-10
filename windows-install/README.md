@@ -133,7 +133,7 @@ Numbered scripts map to the official guide's section order. The **generic path**
 
 ## Other identity providers
 
-The Admin App's authentication engine is provider-agnostic (generic OIDC discovery). Keycloak is only the example identity provider. To use an external provider, run `install-all.ps1` with `-IdpProvider microsoft | google | other`: it deploys everything and **skips** the local Keycloak step, configuring the API against your provider instead.
+The Admin App's authentication engine is provider-agnostic (generic OIDC discovery). Keycloak is only the example identity provider. To use an external provider, run `install-all.ps1` with `-IdpProvider microsoft | google | auth0 | other`: it deploys everything and **skips** the local Keycloak step, configuring the API against your provider instead.
 
 ```powershell
 .\install-all.ps1 -IdpProvider microsoft `
@@ -144,12 +144,27 @@ The Admin App's authentication engine is provider-agnostic (generic OIDC discove
   -AdminUsername 'you@yourtenant.onmicrosoft.com'
 ```
 
-- `keycloak`/`google` default `-OidcIssuer`; `microsoft`/`other` require it. `-ViteIdpAccountUrl` is defaulted per provider (`other` requires it). `-OidcScope` defaults to `openid email profile`.
-- **Where to find `-OidcIssuer`:** for Entra, the App Registration → *Endpoints* → "OpenID Connect metadata document" URL, minus the trailing `/.well-known/openid-configuration` (typically `https://login.microsoftonline.com/<tenant-id>/v2.0`). For Google it's `https://accounts.google.com` (the default).
+- `keycloak`/`google` default `-OidcIssuer`; `microsoft`/`auth0`/`other` require it. `-ViteIdpAccountUrl` is defaulted per provider (`other` requires it; `auth0` defaults it to the tenant URL, since Auth0 has no hosted account page). `-OidcScope` defaults to `openid email profile`.
+- **Where to find `-OidcIssuer`:** for Entra, the App Registration → *Endpoints* → "OpenID Connect metadata document" URL, minus the trailing `/.well-known/openid-configuration` (typically `https://login.microsoftonline.com/<tenant-id>/v2.0`). For Google it's `https://accounts.google.com` (the default). For Auth0 it's the tenant **Domain** shown on the application's Settings page, as a URL (e.g. `https://your-tenant.us.auth0.com`).
+- `-MachineAudience` (default `edfiadminapp-api`) sets the audience the API expects on machine-to-machine bearer tokens (`AUTH0_CONFIG_SECRET_VALUE.MACHINE_AUDIENCE`) — align it with your provider's API identifier without editing config files on the server.
 - **You register the OIDC client yourself** in the provider's portal (no script can provision Entra/Google). `install-all` validates the issuer's discovery endpoint and, at the end of the install, prints the exact URIs to register. The redirect URI is `https://localhost:3443/api/auth/callback/<id>`, where `<id>` is the `oidc` database row id `install-all` resolves and prints ("OIDC redirect callback id resolved to `<id>`") — register `callback/<that id>`, not a hardcoded `callback/1`. Post-logout is `https://localhost:3443/api/auth/post-logout` and the allowed origin is `https://localhost:4443`.
 - A user must exist in the provider whose **email/username claim equals `-AdminUsername`** — the script seeds that user in the `[user]` table with the admin role, but the identity lives in your identity provider. For Entra specifically, the app registration must emit an `email` claim; see [Entra: "Invalid email from IdP" after sign-in](#entra-invalid-email-from-idp-after-sign-in).
 
 You can also drive the per-section scripts manually (`00`→`06`), passing `-Oidc*` to `05-deploy-api.ps1` and `-ViteIdpAccountUrl` to `04-build.ps1`. When you do, the OIDC **client secret, issuer, client id, and admin username must match** between the identity-provider step (`idp-keycloak-setup.ps1` or your external provider) and `05-deploy-api.ps1` — a mismatch surfaces as a login failure, not an install error. Open a **fresh** elevated PowerShell after `03-prereqs-node.ps1` installs Node, so the updated `PATH` is in effect before `04-build.ps1` runs.
+
+### Auth0
+
+Human login and machine-to-machine (M2M) access both work with `-IdpProvider auth0`; set up the tenant in the Auth0 dashboard first:
+
+1. **Human login — Applications → Create Application → Regular Web Applications.** Note the **Domain** (→ `-OidcIssuer` as `https://<domain>`), **Client ID** (→ `-OidcClientId`) and **Client Secret** (→ `-OidcClientSecret`). After the install prints the resolved callback id, register in the application's Settings exactly what it printed:
+   | Auth0 field | Value (defaults) |
+   | --- | --- |
+   | Allowed Callback URLs | `https://localhost:3443/api/auth/callback/<id>` |
+   | Allowed Logout URLs | `https://localhost:3443/api/auth/post-logout` |
+   | Allowed Web Origins | `https://localhost:4443` |
+2. **Users need an email.** Every person who will log in must exist as an Auth0 user **with an email address** — the Admin App requires an `email` claim from the IdP, and the default `-OidcScope` (`openid email profile`) is what makes Auth0 emit it; don't change it. `-AdminUsername` must exactly match the initial admin's Auth0 email.
+3. **M2M — Applications → APIs → Create API** with **Identifier** equal to `-MachineAudience` (default `edfiadminapp-api`) and its **JSON Web Token (JWT) Profile set to RFC 9068** — the legacy "Auth0" profile omits the `client_id` claim from client-credentials tokens, which only Admin App builds with the EDFI-2780 `azp` fallback tolerate (v4.0.1 and earlier then fail every bearer call with 401; RFC 9068 works on every version). Add a **`login:app`** permission on the API. Then **Create Application → Machine to Machine**, authorize it for that API with `login:app` granted. Seed the machine user with `quick-start/bootstrap.ps1 -Provider auth0` (it also verifies a real token's claims) or create it in the web app using the M2M application's Client ID.
+4. **Trailing slash — handled for you.** Auth0 needs the issuer in two forms: OIDC discovery requires **no** trailing slash (a slash 404s the discovery URL), while M2M verification exact-matches the token's `iss` claim, which Auth0 always emits **with** the slash. `-IdpProvider auth0` derives both forms from `-OidcIssuer` (either form accepted) and writes each to its destination — no post-install `NODE_CONFIG` surgery. With `-IdpProvider other` you get one raw value for both and Auth0 M2M cannot work without that manual fix (which every re-run of the installer reverts) — use `auth0`.
 
 ---
 
@@ -292,6 +307,13 @@ Remove an existing task with `schtasks /delete /tn 'Ed-Fi Admin App Keycloak' /f
 
 The Admin App requires an `email` claim in the OIDC userinfo/token. If Entra authenticates the user but the app then errors with `Invalid email from IdP`, the app registration isn't emitting an email claim. In the Entra app registration, add an `email` optional claim (Token configuration) or a claim mapper, then sign in again. See the dedicated Entra setup guide for the full configuration rather than treating this as a one-off fix.
 
+### Auth0: login and M2M troubleshooting
+
+- **"It looks like your login was not successful" in the browser** is generic — the real reason is in the API log (`C:\inetpub\EdFi-AdminApp-API\logs\node-stdout*.log`). `Invalid email from IdP` there means the Auth0 user has no email address (or the requested scope was changed from the `openid email profile` default).
+- **Callback/logout mismatch errors surface on the Auth0 side** (an Auth0 error page naming the offending URL), not in the app — Auth0 enforces *Allowed Callback URLs* / *Allowed Logout URLs* strictly. Register exactly what the installer printed, including the resolved `<id>` in `callback/<id>`.
+- **`Error registering OIDC provider ...` at API startup + `Unknown authentication strategy "oidc-1"` on login** means OIDC discovery failed — usually an issuer problem (typo, or a trailing slash that reached the `oidc` DB row from a manual/`other`-mode install; `-IdpProvider auth0` strips it).
+- **M2M bearer calls return 401** even though a token is issued: decode the token (jwt.io) and check, in order — `iss` equals the deployed `AUTH0_CONFIG_SECRET_VALUE.ISSUER` exactly (including Auth0's trailing slash), `aud` equals `-MachineAudience`, the caller id matches a machine user in the Admin App (`client_id` with the RFC 9068 profile; a legacy-profile token carries only `azp`, which requires an Admin App build with the EDFI-2780 fallback), and `scope` includes `login:app`. `quick-start/bootstrap.ps1 -Provider auth0` automates these checks.
+
 ### Rate limit can trip during heavy debugging
 
 Default in `production.js` is 10 requests / 60s. Recycle the App Pool to clear state, or bump it for dev:
@@ -329,6 +351,7 @@ Restart-WebAppPool -Name "EdFi-AdminApp-API"
 | `-AdminAppRef` | `latest` (newest stable `Ed-Fi-AdminApp` release; pass a tag such as `v4.0.1` to pin) |
 | `-DatabaseName` | `sbaa` |
 | `-AdminUsername` | `admin@example.com` |
+| `-MachineAudience` | `edfiadminapp-api` (the audience expected on machine-to-machine bearer tokens) |
 | `-PostgresHost` / `-PostgresPort` / `-PostgresAppUser` | `localhost` / `5432` / `edfiadminapp` *(pgsql only)* |
 
 Per-script parameters (ports, OIDC settings, Keycloak install path, etc.) have defaults documented in each script's `param()` block — run `Get-Help .\<script>.ps1 -Full`.
