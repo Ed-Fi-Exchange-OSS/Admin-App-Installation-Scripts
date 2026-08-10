@@ -109,6 +109,19 @@ param(
 
     [string]$DatabaseName = "sbaa",
 
+    # SQL Server / Azure SQL host the app connects to (mssql only). Default
+    # 'localhost'; set to a remote FQDN (for example an Azure SQL Database,
+    # myserver.database.windows.net) to target a managed server. A non-loopback host
+    # switches the mssql path to remote mode: DB_TRUST_CERTIFICATE defaults to false
+    # (the server certificate is validated) and the installer's sqlcmd calls validate too.
+    [string]$SqlServerHost = "localhost",
+    [int]$SqlServerPort = 1433,
+    # Trust the SQL server certificate instead of validating it. Implied for a local
+    # loopback target (its auto-generated certificate is not CA-issued); set it for a
+    # remote server that presents a self-signed/dev certificate. Controls both
+    # DB_TRUST_CERTIFICATE (the app's runtime connection) and the installer's sqlcmd -C.
+    [switch]$TrustServerCertificate,
+
     # PostgreSQL connection details. Required only when -DbEngine is 'pgsql'.
     # Defaults match the docker-compose setup at windows-install\docker\ where
     # the dedicated app user 'edfiadminapp' is provisioned by init/01-...sh.
@@ -242,6 +255,25 @@ function Test-DbPasswordUrlSafe {
     }
 }
 
+# Decide whether the mssql target is a local instance (loopback) or a remote server
+# such as a managed Azure SQL Database. A remote target validates the server
+# certificate and (via 02-prereqs-sql.ps1) is provisioned as a contained user.
+# Mirrors the loopback normalization in Get-SqlcmdTrustArgs (quick-start/ and
+# edorg-sync/ compat.ps1) and Test-IsRemoteSqlTarget in 02-prereqs-sql.ps1.
+function Test-IsRemoteSqlTarget {
+    param([string]$SqlServerHost)
+    if ([string]::IsNullOrWhiteSpace($SqlServerHost)) { return $false }
+    $value = $SqlServerHost.Trim()
+    # Local named pipes (\\.\pipe\..., optionally np:-prefixed) are loopback by
+    # definition and would otherwise normalize to an empty host below.
+    if ($value -match '^(np:)?\\\\(\.|localhost|127\.0\.0\.1)\\') { return $false }
+    $target = ($value -replace '^(tcp|np|lpc|admin):', '') -split '[,\\]' | Select-Object -First 1
+    $target = $target.Trim().Trim('(', ')')
+    $loopback = @('local', 'localhost', '.', '127.0.0.1', '::1', '[::1]')
+    if ($env:COMPUTERNAME) { $loopback += $env:COMPUTERNAME }
+    return ($target -notin $loopback)
+}
+
 # Secrets arrive as SecureString (kept off the command line); unwrap the ones
 # supplied to plaintext locals for sqlcmd -P and the production.js patch.
 # Point-of-use plaintext is unavoidable. DbEncryptionKey stays a plain string:
@@ -258,6 +290,18 @@ if ($DbEngine -eq 'mssql') { Test-DbPasswordUrlSafe -Password $AppDbPasswordPlai
 if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbPasswordPlain  -Label "Postgres app user (-PgDbPassword)" }
 if ($DbEngine -eq 'mssql') { Test-DbPasswordUrlSafe -Password $AppDbUsername -Label "Admin App DB username (-AppDbUsername)" }
 if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbUsername   -Label "Postgres app username (-PgDbUsername)" }
+
+# Remote/Azure SQL target (mssql only). A non-loopback -SqlServerHost switches to
+# remote mode: the app validates the server certificate (DB_TRUST_CERTIFICATE=false)
+# and the installer's sqlcmd calls validate too (no -C), unless -TrustServerCertificate
+# is set. $script:SqlTrustArgs is appended to the raw sqlcmd calls (key guard, OIDC
+# reconcile) below; DB_TRUST_CERTIFICATE is derived from the same decision.
+$isRemoteSql = ($DbEngine -eq 'mssql') -and (Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost)
+# @(...) wrapper is required: `if (...) { @() } else { @('-C') }` unwraps the single-
+# element array to the bare string '-C', and splatting a string iterates its characters
+# ('-','C'), so sqlcmd sees a bogus '-' option. @(...) forces a real (possibly empty) array.
+$script:SqlTrustArgs = @(if ($isRemoteSql -and -not $TrustServerCertificate) { } else { '-C' })
+if ($isRemoteSql) { Write-Host "Remote SQL target: $SqlServerHost,$SqlServerPort (server certificate $(if ($TrustServerCertificate) { 'trusted (-TrustServerCertificate)' } else { 'validated' }))." }
 
 $apiBuildDir = "$SourcePath\dist\packages\api"
 if (-not (Test-Path "$apiBuildDir\main.js")) {
@@ -593,9 +637,10 @@ if ($freshKeyGenerated -and $DbEngine -eq 'mssql' -and -not $ForceKeyRotation) {
     # sqlcmd process command line; cleared in the finally.
     $env:SQLCMDPASSWORD = $AppDbPasswordPlain
     try {
-        # -C (trust server certificate) is safe unconditionally: -S is the
-        # hardcoded loopback, never a parameterized remote host.
-        $out = & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -h -1 -W -t 10 `
+        # Server-certificate trust follows the resolved target ($script:SqlTrustArgs):
+        # a loopback (or an explicit -TrustServerCertificate) trusts with -C; a remote
+        # target (e.g. Azure SQL) validates the certificate.
+        $out = & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -h -1 -W -t 10 `
             -Q "SET NOCOUNT ON; IF OBJECT_ID('sb_environment','U') IS NOT NULL SELECT COUNT(*) FROM sb_environment ELSE SELECT 0;" 2>$null
         if ($LASTEXITCODE -eq 0 -and $out) { $envCount = [int]("$($out | Select-Object -First 1)").Trim() }
     } catch {
@@ -683,9 +728,13 @@ $nodeConfig = @{
 }
 if ($DbEngine -eq 'mssql') {
     $nodeConfig.DB_ENGINE            = 'mssql'
-    $nodeConfig.DB_TRUST_CERTIFICATE = $true
+    # A local/loopback target (or an explicit -TrustServerCertificate) trusts the
+    # instance's self-signed certificate; a remote target (e.g. Azure SQL) presents
+    # a CA-issued certificate, so validate it (DB_TRUST_CERTIFICATE=false).
+    $nodeConfig.DB_TRUST_CERTIFICATE = ($TrustServerCertificate -or -not $isRemoteSql)
     $nodeConfig.DB_SECRET_VALUE      = @{
-        MSSQL_DB_HOST     = 'localhost'
+        MSSQL_DB_HOST     = $SqlServerHost
+        MSSQL_DB_PORT     = $SqlServerPort
         MSSQL_DB_DATABASE = $DatabaseName
         MSSQL_DB_USERNAME = $AppDbUsername
         MSSQL_DB_PASSWORD = $AppDbPasswordPlain
@@ -876,9 +925,13 @@ END
         # terminating NativeCommandError under $ErrorActionPreference='Stop', so
         # catch it and fall through to the warning. -l 30 gives the login headroom
         # under load.
+        # -I (QUOTED_IDENTIFIER ON) is required: the [oidc]/[user] schema carries
+        # filtered/computed-column indexes whose INSERT/UPDATE errors with Msg 1934
+        # under sqlcmd's default QUOTED_IDENTIFIER OFF. Trust follows the resolved
+        # target ($script:SqlTrustArgs): loopback/opt-in trusts, remote validates.
         $oidcUpsertExit = 1
         try {
-            & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -b -l 30 -i $oidcQueryFile 1>$null 2>$null
+            & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -I -b -l 30 -i $oidcQueryFile 1>$null 2>$null
             $oidcUpsertExit = $LASTEXITCODE
         } catch {
             $oidcUpsertExit = 1

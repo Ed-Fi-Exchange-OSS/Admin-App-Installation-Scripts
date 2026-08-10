@@ -58,6 +58,24 @@ The dedicated least-privilege SQL login the Admin App connects as at runtime
 -DbEngine is 'mssql'. -AppDbUsername defaults to 'edfi_adminapp'. Written into
 production.js as MSSQL_DB_USERNAME / MSSQL_DB_PASSWORD.
 
+.PARAMETER SqlServerHost / -SqlServerPort
+SQL host/port the Admin App connects to (mssql only). Default 'localhost'/1433
+targets a local instance. Set -SqlServerHost to a remote FQDN (e.g. an Azure SQL
+Database, myserver.database.windows.net) to deploy against a managed server. A
+remote target validates the server certificate and requires the database to already
+exist: create the logical server (SQL authentication enabled), a firewall rule for
+this client's IP, and an empty database named after -DatabaseName through the Azure
+control plane first. The app self-migrates its schema on first boot.
+
+.PARAMETER SqlAdminUsername / -SqlAdminPassword
+SQL admin login used to provision the '$AppDbUsername' contained user on a REMOTE
+target (Windows Authentication is unavailable on Azure SQL). Required when
+-SqlServerHost is remote; prompted if omitted. Used only for provisioning.
+
+.PARAMETER TrustServerCertificate
+Trust the SQL server certificate instead of validating it. Implied for a local
+loopback target; set only for a remote server presenting a self-signed/dev certificate.
+
 .PARAMETER IdpProvider
 Identity provider (mandatory): keycloak | microsoft | google | auth0 | other. 'keycloak'
 stands up the local example identity provider and provisions the realm/client/user. The others
@@ -224,6 +242,19 @@ Default 8082. Becomes the YOPASS_URL the API is configured with.
   -OidcClientId '<Single-Page-App-Client-ID>' `
   -OidcClientSecret (Read-Host -AsSecureString 'Auth0 client secret') `
   -AdminUsername 'you@yourorg.com'
+
+.EXAMPLE
+# Managed Azure SQL Database (local Keycloak). Create the logical server (SQL auth
+# enabled), a firewall rule for this client's IP, and an empty 'sbaa' database in
+# Azure first; the app self-migrates on first boot.
+.\install-all.ps1 -IdpProvider keycloak `
+  -SqlServerHost 'myserver.database.windows.net' `
+  -SqlAdminUsername 'sqladmin' `
+  -SqlAdminPassword (Read-Host -AsSecureString 'SQL admin password') `
+  -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password') `
+  -KeycloakAdminPassword (Read-Host -AsSecureString 'Keycloak admin password') `
+  -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
+  -TestUserPassword (Read-Host -AsSecureString 'test user password')
 #>
 
 param(
@@ -233,6 +264,20 @@ param(
 
     [string]$AppDbUsername = "edfi_adminapp",
     [SecureString]$AppDbPassword,
+
+    # Remote/Azure SQL target (mssql only). Default 'localhost' keeps the local
+    # instance path; set -SqlServerHost to a remote FQDN (e.g. an Azure SQL Database)
+    # to deploy against a managed server. A remote target is provisioned as the SQL
+    # admin below (Windows Authentication is unavailable on Azure SQL), validates the
+    # server certificate, and requires the database to already exist (create the
+    # logical server, a client firewall rule, and the empty database through the Azure
+    # control plane first).
+    [string]$SqlServerHost = "localhost",
+    [int]$SqlServerPort = 1433,
+    [string]$SqlAdminUsername = "",
+    [SecureString]$SqlAdminPassword,
+    [switch]$TrustServerCertificate,
+
     [SecureString]$PostgresAppPassword,
     [SecureString]$PostgresSuperuserPassword,
     [string]$PostgresHost = "localhost",
@@ -367,6 +412,60 @@ function Test-DbPasswordUrlSafe {
     }
 }
 
+# A managed Azure SQL target rejects a database password that contains the login name
+# -- or any 3+ character alphanumeric part of it -- failing CREATE USER with an opaque
+# "Msg 40632 ... not complex enough". Local SQL Server does not enforce this, so the
+# caller applies it only for a remote target (keeping local example passwords valid).
+# Mirrors Test-DbPasswordNotUsername in 02-prereqs-sql.ps1.
+function Test-DbPasswordNotUsername {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
+        [Parameter(Mandatory = $true)][string]$Username
+    )
+    foreach ($token in @($Username) + ($Username -split '[^A-Za-z0-9]+')) {
+        if ($token.Length -ge 3 -and $Password -match [regex]::Escape($token)) {
+            throw "The Admin App DB password must not contain the login name or a part of it ('$token'): a managed Azure SQL target rejects such a password (Msg 40632, 'not complex enough'). Choose a password with no 3+ character part of the username '$Username'."
+        }
+    }
+}
+
+# Decide whether the mssql target is a local instance (loopback) or a remote server
+# such as a managed Azure SQL Database. A remote target is provisioned as the SQL
+# admin and validates the server certificate. Mirrors Test-IsRemoteSqlTarget in
+# 02-prereqs-sql.ps1 / 05-deploy-api.ps1.
+function Test-IsRemoteSqlTarget {
+    param([string]$SqlServerHost)
+    if ([string]::IsNullOrWhiteSpace($SqlServerHost)) { return $false }
+    $value = $SqlServerHost.Trim()
+    # Local named pipes (\\.\pipe\..., optionally np:-prefixed) are loopback by
+    # definition and would otherwise normalize to an empty host below.
+    if ($value -match '^(np:)?\\\\(\.|localhost|127\.0\.0\.1)\\') { return $false }
+    $target = ($value -replace '^(tcp|np|lpc|admin):', '') -split '[,\\]' | Select-Object -First 1
+    $target = $target.Trim().Trim('(', ')')
+    $loopback = @('local', 'localhost', '.', '127.0.0.1', '::1', '[::1]')
+    if ($env:COMPUTERNAME) { $loopback += $env:COMPUTERNAME }
+    return ($target -notin $loopback)
+}
+# $script:SqlTrustArgs is appended to the post-boot sqlcmd calls (user-table probe,
+# admin-user upsert, OIDC-id read) so they trust a loopback (or opt-in) and validate
+# a remote certificate, matching how 02/05 connect.
+$isRemoteSql = ($DbEngine -eq 'mssql') -and (Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost)
+# @(...) wrapper is required: `if (...) { @() } else { @('-C') }` unwraps the single-
+# element array to the bare string '-C', and splatting a string iterates its characters
+# ('-','C'), so sqlcmd sees a bogus '-' option. @(...) forces a real (possibly empty) array.
+$script:SqlTrustArgs = @(if ($isRemoteSql -and -not $TrustServerCertificate) { } else { '-C' })
+
+# Announce a remote SQL target up front (before the admin credential prompt) so a
+# typo in -SqlServerHost -- anything that is not a loopback name is treated as remote
+# -- is caught before the install runs, not after it fails to connect.
+if ($isRemoteSql) {
+    Write-Host ""
+    Write-Host "Remote SQL target detected: '$SqlServerHost' is not a local instance." -ForegroundColor Cyan
+    Write-Host "  The install will provision a contained user on this managed server (e.g. Azure SQL)" -ForegroundColor Cyan
+    Write-Host "  and will NOT configure a local SQL Server. If you meant a LOCAL install, stop now" -ForegroundColor Cyan
+    Write-Host "  (Ctrl+C) and re-run without -SqlServerHost (or with -SqlServerHost localhost)." -ForegroundColor Cyan
+}
+
 # Engine-specific required-arg resolution. Credentials are conditionally required so
 # the same script can drive either engine without prompting for irrelevant ones. Each
 # secret is prompted (if omitted), unwrapped, and strength-checked, so validation is
@@ -376,6 +475,7 @@ function Test-DbPasswordUrlSafe {
 # SecureStrings unchanged. Locals are initialized so later references hold $null under
 # either engine.
 $AppDbPasswordPlain             = $null
+$SqlAdminPasswordPlain          = $null
 $PostgresAppPasswordPlain       = $null
 $PostgresSuperuserPasswordPlain = $null
 
@@ -385,6 +485,17 @@ if ($DbEngine -eq 'mssql') {
     Test-SqlPasswordComplexity -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
     Test-DbPasswordUrlSafe -Password $AppDbPasswordPlain -Label "Admin App DB login (-AppDbPassword)"
     Test-DbPasswordUrlSafe -Password $AppDbUsername -Label "Admin App DB username (-AppDbUsername)"
+    # Remote/Azure SQL: the contained user is provisioned as the SQL admin (no Windows
+    # Authentication on Azure SQL). Require the admin login and prompt for its password
+    # if omitted. It is used only for provisioning; the app connects as -AppDbUsername.
+    if ($isRemoteSql) {
+        # Fail fast on Azure's login-name-containment rule before any phase runs.
+        Test-DbPasswordNotUsername -Password $AppDbPasswordPlain -Username $AppDbUsername
+        if (-not $SqlAdminUsername) { throw "-SqlAdminUsername is required for a remote SQL target ('$SqlServerHost'). It provisions the '$AppDbUsername' contained user; the app still connects as -AppDbUsername at runtime." }
+        if (-not $SqlAdminPassword) { $SqlAdminPassword = Read-Host -AsSecureString "SQL admin '$SqlAdminUsername' password" }
+        $SqlAdminPasswordPlain = [System.Net.NetworkCredential]::new('', $SqlAdminPassword).Password
+        if (-not $SqlAdminPasswordPlain) { throw "The SQL admin password (-SqlAdminPassword) is empty." }
+    }
 }
 if ($DbEngine -eq 'pgsql') {
     if (-not $PostgresAppPassword) { $PostgresAppPassword = Read-Host -AsSecureString "Postgres app user '$PostgresAppUser' password" }
@@ -554,7 +665,7 @@ if ($AutoUpgradeNode) { $nodeArgs.AssumeYes = $true }
 #       prompt the user to confirm unless -AcceptRisks was passed
 if (-not $SkipPreflightCheck) {
     Write-Phase "Pre-flight check (00-check-prereqs.ps1)"
-    & "$scriptDir\00-check-prereqs.ps1" -SourcePath $SourcePath -DatabaseName $DatabaseName -DbEngine $DbEngine -SetupYopassDocker:$SetupYopassDocker -YopassPort $YopassPort
+    & "$scriptDir\00-check-prereqs.ps1" -SourcePath $SourcePath -DatabaseName $DatabaseName -DbEngine $DbEngine -SqlServerHost $SqlServerHost -SetupYopassDocker:$SetupYopassDocker -YopassPort $YopassPort
     $preflightExit = $LASTEXITCODE
     if ($preflightExit -eq 1) {
         throw "Pre-flight check failed. Fix the [FAIL] items above and re-run, or pass -SkipPreflightCheck to bypass (not recommended)."
@@ -581,7 +692,18 @@ if (-not $SkipPreflightCheck) {
 if (-not $SkipPhase1) {
     if ($DbEngine -eq 'mssql') {
         Write-Phase "Phase 1.1: SQL Server prerequisites (02-prereqs-sql.ps1)"
-        & "$scriptDir\02-prereqs-sql.ps1" -AppDbUsername $AppDbUsername -AppDbPassword $AppDbPassword -DatabaseName $DatabaseName
+        $sqlPrereqArgs = @{
+            AppDbUsername = $AppDbUsername
+            AppDbPassword = $AppDbPassword
+            DatabaseName  = $DatabaseName
+            SqlServerHost = $SqlServerHost
+            SqlServerPort = $SqlServerPort
+        }
+        # Remote/Azure only: forward the SQL admin credential and the trust opt-in.
+        if ($SqlAdminUsername)       { $sqlPrereqArgs.SqlAdminUsername = $SqlAdminUsername }
+        if ($SqlAdminPassword)       { $sqlPrereqArgs.SqlAdminPassword = $SqlAdminPassword }
+        if ($TrustServerCertificate) { $sqlPrereqArgs.TrustServerCertificate = $true }
+        & "$scriptDir\02-prereqs-sql.ps1" @sqlPrereqArgs
     } else {
         Write-Phase "Phase 1.1: PostgreSQL prerequisites"
         if ($UsePostgresDocker) {
@@ -827,6 +949,9 @@ if ($DisableSslVerification) { $apiArgs.DisableSslVerification = $true }
 if ($DbEngine -eq 'mssql') {
     $apiArgs.AppDbUsername = $AppDbUsername
     $apiArgs.AppDbPassword = $AppDbPassword
+    $apiArgs.SqlServerHost = $SqlServerHost
+    $apiArgs.SqlServerPort = $SqlServerPort
+    if ($TrustServerCertificate) { $apiArgs.TrustServerCertificate = $true }
 } else {
     $apiArgs.PgDbHost     = $PostgresHost
     $apiArgs.PgDbPort     = $PostgresPort
@@ -889,11 +1014,11 @@ if ($apiOk) {
         try {
             if ($DbEngine -eq 'mssql') {
                 # SQLCMDPASSWORD instead of -P keeps the password off the sqlcmd
-                # process command line; cleared in the finally below. -C (trust
-                # server certificate) is safe unconditionally in this folder:
-                # every -S is the hardcoded loopback, never a remote host.
+                # process command line; cleared in the finally below. Server-
+                # certificate trust follows the resolved target ($script:SqlTrustArgs):
+                # a loopback (or -TrustServerCertificate) trusts, a remote target validates.
                 $env:SQLCMDPASSWORD = $AppDbPasswordPlain
-                & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
+                & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
             } else {
                 # Probe via the container's psql (postgres-only -- avoids
                 # requiring psql.exe on the host) when docker is in play;
@@ -944,7 +1069,10 @@ UPDATE [user] SET roleId = 2, isActive = 1
 "@
         $env:SQLCMDPASSWORD = $AppDbPasswordPlain
         try {
-            & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -Q $upsertQuery 1>$null 2>$null
+            # -I (QUOTED_IDENTIFIER ON): the [user] table carries filtered/computed-
+            # column indexes whose INSERT/UPDATE errors with Msg 1934 under sqlcmd's
+            # default QUOTED_IDENTIFIER OFF. Trust follows the resolved target.
+            & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -I -Q $upsertQuery 1>$null 2>$null
             $upsertExit = $LASTEXITCODE
         } finally {
             Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
@@ -1001,7 +1129,7 @@ UPDATE "user" SET "roleId" = 2, "isActive" = true
     if ($DbEngine -eq 'mssql') {
         $env:SQLCMDPASSWORD = $AppDbPasswordPlain
         try {
-            $idOut = & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -h -1 -W -Q "SET NOCOUNT ON; SELECT TOP 1 id FROM [oidc] WHERE clientId = '$oidcClientIdSql';" 2>$null
+            $idOut = & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -h -1 -W -Q "SET NOCOUNT ON; SELECT TOP 1 id FROM [oidc] WHERE clientId = '$oidcClientIdSql';" 2>$null
             if ($LASTEXITCODE -eq 0 -and "$idOut" -match '(\d+)') { $oidcRowId = [int]$Matches[1] }
         } finally { Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue }
     } else {
@@ -1066,12 +1194,19 @@ Write-Phase "INSTALL COMPLETE"
 # Build the database-specific section of the summary first so the main here-string
 # below stays simple.
 if ($DbEngine -eq 'mssql') {
+    if ($isRemoteSql) {
+        $sqlServerLine = "$SqlServerHost,$SqlServerPort (remote / managed)"
+        $sqlSetupLine  = "SQL admin '$SqlAdminUsername' provisioned the contained user; certificate $(if ($TrustServerCertificate) { 'trusted' } else { 'validated' })"
+    } else {
+        $sqlServerLine = "(local) / tcp:localhost,1433"
+        $sqlSetupLine  = "Windows Authentication (the sa login is not used)"
+    }
     $dbSummary = @"
 SQL Server
-  Server:             (local) / tcp:localhost,1433
+  Server:             $sqlServerLine
   App login:          $AppDbUsername (db_owner on $DatabaseName, non-sysadmin -- the API connects as this)
   App password:       (the value you supplied via -AppDbPassword)
-  Server setup:       Windows Authentication (the sa login is not used)
+  Server setup:       $sqlSetupLine
   Database:           $DatabaseName
 "@
 } else {

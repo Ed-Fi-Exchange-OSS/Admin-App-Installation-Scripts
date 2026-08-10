@@ -45,6 +45,12 @@ param(
     [ValidateSet('mssql','pgsql')]
     [string]$DbEngine = 'mssql',
 
+    # SQL host the install will target (mssql only). Default 'localhost' checks the
+    # local instance; a non-loopback host (e.g. an Azure SQL Database) skips the
+    # local-instance checks -- the managed server, firewall, and database are
+    # operator prerequisites that cannot be verified here.
+    [string]$SqlServerHost = "localhost",
+
     # Yopass docker mode. When the install will run with -SetupYopassDocker,
     # also verify Docker is RUNNING (not just installed) and the publish port
     # is free, since the Yopass + memcached containers can't otherwise start.
@@ -53,6 +59,24 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+# Decide whether the mssql target is a local instance (loopback) or a remote server
+# such as a managed Azure SQL Database. A remote target has no local SQL Server to
+# check or configure. Mirrors Test-IsRemoteSqlTarget in the other install scripts.
+function Test-IsRemoteSqlTarget {
+    param([string]$SqlServerHost)
+    if ([string]::IsNullOrWhiteSpace($SqlServerHost)) { return $false }
+    $value = $SqlServerHost.Trim()
+    # Local named pipes (\\.\pipe\..., optionally np:-prefixed) are loopback by
+    # definition and would otherwise normalize to an empty host below.
+    if ($value -match '^(np:)?\\\\(\.|localhost|127\.0\.0\.1)\\') { return $false }
+    $target = ($value -replace '^(tcp|np|lpc|admin):', '') -split '[,\\]' | Select-Object -First 1
+    $target = $target.Trim().Trim('(', ')')
+    $loopback = @('local', 'localhost', '.', '127.0.0.1', '::1', '[::1]')
+    if ($env:COMPUTERNAME) { $loopback += $env:COMPUTERNAME }
+    return ($target -notin $loopback)
+}
+$isRemoteSql = ($DbEngine -eq 'mssql') -and (Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost)
 
 # Minimum versions enforced by the install scripts. The Node floor is
 # auto-detected from $SourcePath\package.json (engines.node) below when the
@@ -176,7 +200,19 @@ if ($w3svc) {
 # When the target is 'pgsql' instead, check for Docker so the docker-compose
 # postgres can come up.
 $sqlService = Get-Service MSSQLSERVER -ErrorAction SilentlyContinue
-if ($DbEngine -eq 'mssql') {
+if ($isRemoteSql) {
+    # Remote/managed target (e.g. Azure SQL): no local SQL Server engine is needed
+    # or configured. The provisioning + deploy scripts still use sqlcmd to reach the
+    # remote host, so require it here; the logical server, a client firewall rule,
+    # and an empty '$DatabaseName' database are operator prerequisites (see README)
+    # that this pre-flight cannot verify.
+    Write-Check INFO "Remote SQL target ($SqlServerHost)" "No local SQL Server required. Ensure the logical server, a firewall rule for this client, and an empty '$DatabaseName' database already exist."
+    if (Get-Command sqlcmd -ErrorAction SilentlyContinue) {
+        Write-Check PASS "sqlcmd on PATH" "Used to provision and verify the remote target"
+    } else {
+        Write-Check FAIL "sqlcmd not on PATH" "Install the SQL Server command-line tools; 02/05 use sqlcmd to reach the remote target"
+    }
+} elseif ($DbEngine -eq 'mssql') {
     if ($sqlService) {
         $verKey = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server" -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like "MSSQL*.MSSQLSERVER" } | Select-Object -First 1
         Write-Check PASS "SQL Server installed" "$($verKey.PSChildName), service status: $($sqlService.Status)"
@@ -319,7 +355,7 @@ if ($node) {
 Write-Section "CONFIGURED STATE (scripts will (re)apply these)"
 # ============================================================
 
-if ($DbEngine -eq 'mssql' -and $sqlService -and $sqlService.Status -eq 'Running') {
+if ($DbEngine -eq 'mssql' -and -not $isRemoteSql -and $sqlService -and $sqlService.Status -eq 'Running') {
     # SQL Mixed Mode
     $verKey = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server" -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like "MSSQL*.MSSQLSERVER" } | Select-Object -First 1
     if ($verKey) {
@@ -417,9 +453,10 @@ Write-Section "EXISTING STATE THAT WILL BE MODIFIED (collision risk check)"
 # SQL Server instance is shared with other databases?
 # 02-prereqs-sql.ps1 flips Mixed Mode, forces TCP/IP on 1433, and restarts the
 # MSSQLSERVER service. If the instance is hosting other apps, they'll feel all
-# three. Skip the entire RISK probe when -DbEngine pgsql --
-# the SQL Server install won't be touched at all in that mode.
-if ($DbEngine -eq 'mssql' -and $sqlService) {
+# three. Skip the entire RISK probe when -DbEngine pgsql (the SQL Server install
+# won't be touched) or when targeting a remote/Azure SQL host (02 configures no
+# local instance in that mode).
+if ($DbEngine -eq 'mssql' -and -not $isRemoteSql -and $sqlService) {
     $userDbs = & sqlcmd -S "(local)" -E -C -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND name <> N'$DatabaseName'" 2>$null |
         Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\(' }
     if ($userDbs -and $userDbs.Count -gt 0) {

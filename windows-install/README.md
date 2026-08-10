@@ -79,6 +79,37 @@ When `install-all.ps1` finishes, open `https://localhost:4443/` and sign in with
     -TestUserPassword (Read-Host -AsSecureString 'Keycloak test user password')
   ```
 
+#### SQL Server target: local instance or managed Azure SQL
+
+By default `-DbEngine mssql` targets a local SQL Server instance. Set `-SqlServerHost` to a remote FQDN to deploy the Admin App database on a **managed Azure SQL Database** instead. A non-loopback host switches the installer to remote mode: it skips the local-instance configuration (Mixed Mode, TCP/IP, service restart), provisions a contained database user as the SQL admin login, and validates the server certificate.
+
+**Prerequisites you must create in Azure first** (the installer does not create these — they require the Azure control plane, not `sqlcmd`):
+
+- A logical SQL server with **SQL authentication** enabled and an admin login.
+- A **firewall rule** allowing the public IP of the machine running the install.
+- An **empty database** named as `-DatabaseName` (default `sbaa`). The Admin App migrates its own schema on first boot, so no manual migration step is needed.
+
+**Parameters** *(mssql, remote target)*:
+
+- **`-SqlServerHost` / `-SqlServerPort`**: the Azure SQL host (e.g. `myserver.database.windows.net`) and port (default `1433`).
+- **`-SqlAdminUsername` / `-SqlAdminPassword`** *(`[SecureString]`)*: the logical server's SQL admin login, used only to provision the `edfi_adminapp` contained user. The app still connects at runtime as `-AppDbUsername`.
+- **`-TrustServerCertificate`**: only for a remote server presenting a self-signed/dev certificate; Azure SQL presents a valid CA certificate and is validated by default.
+
+> Azure SQL rejects a database password that contains the login name (`edfi_adminapp`) or a 3+ character part of it (e.g. `edfi`). The installer checks this up front for a remote target, so pick an `-AppDbPassword` with no part of the username.
+
+  ```powershell
+  .\install-all.ps1 -IdpProvider keycloak `
+    -SqlServerHost 'myserver.database.windows.net' `
+    -SqlAdminUsername 'sqladmin' `
+    -SqlAdminPassword (Read-Host -AsSecureString 'SQL admin password') `
+    -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password') `
+    -KeycloakAdminPassword (Read-Host -AsSecureString 'Keycloak admin password') `
+    -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') `
+    -TestUserPassword (Read-Host -AsSecureString 'Keycloak test user password')
+  ```
+
+  On a remote target, `uninstall.ps1` drops only the `edfi_adminapp` contained user (pass the same `-SqlServerHost`, `-SqlAdminUsername`, and `-SqlAdminPassword`); the managed database is left intact and is removed through the Azure control plane if desired.
+
 ---
 
 ## The scripts
@@ -91,7 +122,7 @@ Numbered scripts map to the official guide's section order. The **generic path**
 |---|---|
 | `00-check-prereqs.ps1` | Read-only diagnostic. `[PASS]`/`[FAIL]`/`[INFO]`/`[RISK]` per prerequisite. `[RISK]` flags collisions with existing software (shared SQL instance, older `java` on PATH, ports 3333/4200/3443/4443 in use). Exit 0 = clean, 1 = blocking, 2 = ready-with-risks. |
 | `01-prereqs-iis.ps1` | URL Rewrite Module + the HTTP hosting handler (HttpBridge by default, or HttpPlatformHandler via `-HttpHandler`); unlocks the `handlers` section. HTTPS bindings are added at deploy time by `05`/`06`. |
-| `02-prereqs-sql.ps1` | SQL Server config: Mixed Mode + TCP/IP + creates the `sbaa` database + provisions a dedicated least-privilege app login (`edfi_adminapp`, `db_owner` on `sbaa` only, not a server sysadmin) that the app connects as. All server-level work runs under Windows authentication; the `sa` login is never touched. |
+| `02-prereqs-sql.ps1` | SQL Server config: Mixed Mode + TCP/IP + creates the `sbaa` database + provisions a dedicated least-privilege app login (`edfi_adminapp`, `db_owner` on `sbaa` only, not a server sysadmin) that the app connects as. All server-level work runs under Windows authentication; the `sa` login is never touched. For a managed **Azure SQL** target, pass `-SqlServerHost` (see [SQL Server target](#sql-server-target-local-instance-or-managed-azure-sql)): it skips the local-instance steps and provisions a contained user as the SQL admin. |
 | `03-prereqs-node.ps1` | Node.js install (if missing) and nvm-windows remediation of a too-old version. No Java, no Keycloak. |
 | `04-build.ps1` | `npm ci --legacy-peer-deps`, then `build:api` and `build:fe`. Seeds `packages\fe\.env` (VITE_*) before building. Skips if artifacts are current (override with `-Force`). |
 | `05-deploy-api.ps1` | Deploys the API to the standalone site `EdFi-AdminApp-API` (HTTPS `3443`; HTTP `3333` redirects to it). Seeds/patches `production.js`, writes `web.config`, configures the App Pool, and sets `NPM_CONFIG_CACHE` on the App Pool. |
