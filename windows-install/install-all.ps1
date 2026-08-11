@@ -507,6 +507,9 @@ if ($DbEngine -eq 'pgsql') {
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') {
     throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'."
 }
+if ($DbEngine -ne 'mssql' -and $SqlServerHost -ne 'localhost') {
+    throw "-SqlServerHost only applies when -DbEngine is 'mssql' (it targets a remote SQL Server / Azure SQL Database). Remove it, or use -DbEngine mssql."
+}
 if ($UsePostgresDocker) {
     if (-not $PostgresSuperuserPassword) { $PostgresSuperuserPassword = Read-Host -AsSecureString "Postgres superuser password" }
     $PostgresSuperuserPasswordPlain = [System.Net.NetworkCredential]::new('', $PostgresSuperuserPassword).Password

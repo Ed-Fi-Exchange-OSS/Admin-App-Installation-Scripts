@@ -386,7 +386,15 @@ if ($isRemote) {
     # a blocked firewall, or a bad admin credential fails here with an actionable
     # message rather than mid-provision.
     Write-Host "Verifying SQL admin connectivity to '$DatabaseName' on $SqlServerHost..."
-    $ec = Invoke-Sqlcmd-Quiet -SqlArgs ($adminConnArgs + @('-d', $DatabaseName, '-Q', 'SELECT 1', '-l', '15')) -Password $adminConnPassword
+    # Retry: a serverless Azure SQL database that has auto-paused can take 30-60s to
+    # resume on the first connection -- longer than a single login timeout -- so a
+    # one-shot probe would wrongly report a resuming database as unreachable.
+    $ec = 1
+    for ($i = 0; $i -lt 6; $i++) {
+        $ec = Invoke-Sqlcmd-Quiet -SqlArgs ($adminConnArgs + @('-d', $DatabaseName, '-Q', 'SELECT 1', '-l', '30')) -Password $adminConnPassword
+        if ($ec -eq 0) { break }
+        Start-Sleep -Seconds 5
+    }
     if ($ec -ne 0) {
         throw @"
 Could not connect to database '$DatabaseName' on '$SqlServerHost' as '$SqlAdminUsername' (sqlcmd exit code $ec).
@@ -394,6 +402,7 @@ On a managed target (e.g. Azure SQL) this script does NOT create the database; p
   * the logical SQL server with SQL authentication enabled and an admin login,
   * a firewall rule allowing this client's public IP,
   * an empty database named '$DatabaseName'.
+If the database is serverless and was auto-paused, it may still be resuming -- wait a moment and re-run.
 Also verify -SqlAdminUsername/-SqlAdminPassword. sqlcmd output: $script:LastSqlcmdOutput
 "@
     }

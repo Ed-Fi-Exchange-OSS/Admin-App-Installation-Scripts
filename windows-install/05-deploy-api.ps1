@@ -236,6 +236,9 @@ if ($DbEngine -eq 'mssql' -and -not $AppDbPassword) {
 if ($DbEngine -eq 'pgsql' -and -not $PgDbPassword) {
     throw "-PgDbPassword is required when -DbEngine is 'pgsql'."
 }
+if ($DbEngine -ne 'mssql' -and $SqlServerHost -ne 'localhost') {
+    throw "-SqlServerHost only applies when -DbEngine is 'mssql'."
+}
 
 # The Admin App builds its database connection string as a URL and interpolates the database
 # credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
