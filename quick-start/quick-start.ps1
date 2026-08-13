@@ -92,7 +92,10 @@
 #>
 #requires -Version 5.1
 param(
-    # Base URL of the Admin App API (through the reverse proxy).
+    # Base URL of the Admin App API. The default is the Docker deployment's
+    # reverse-proxy path; on a windows-install/install-all.ps1 deployment the
+    # API is its own IIS site -- pass 'https://localhost:3443/api' (the
+    # deployed -HttpsApiPort).
     [string]$ApiBaseUrl = "https://localhost/adminapp-api/api",
 
     # Auth: fetch a service-account token via the OAuth2 client_credentials grant

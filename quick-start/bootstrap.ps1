@@ -56,8 +56,8 @@
   AUTH0_CONFIG_SECRET.ISSUER must be configured), aud must include the machine
   audience, scope must include `login:app`, and the caller id must match --
   client_id (RFC 9068), or azp alone (legacy profile), which passes with a
-  WARNING because only Admin App builds with the EDFI-2780 azp fallback accept
-  it. Any mismatch throws with the exact fix.
+  WARNING because only Admin App builds with the azp fallback (after v4.0.1)
+  accept it. Any mismatch throws with the exact fix.
 
   BOTH providers seed the matching machine USER row directly in the Admin App
   database -- required because a client_credentials token is only accepted once
@@ -329,11 +329,11 @@ if ($Provider -eq 'keycloak')
 }
 elseif ($Provider -eq 'microsoft')
 {
-    Write-Host "Provider 'microsoft': skipping Keycloak provisioning (app registration is done in the Microsoft Entra portal / Graph)." -ForegroundColor Yellow
+    Write-Host "Provider 'microsoft': no local identity provider to provision (the app registration is done in the Microsoft Entra portal / Graph). Seeding the machine user." -ForegroundColor Yellow
 }
 else
 {
-    Write-Host "Provider 'auth0': skipping Keycloak provisioning (the API + Machine to Machine application are created in the Auth0 dashboard)." -ForegroundColor Yellow
+    Write-Host "Provider 'auth0': no local identity provider to provision (the API and Machine to Machine application are created in the Auth0 dashboard). Seeding the machine user." -ForegroundColor Yellow
 }
 
 # ---- Seed the Admin App machine USER -----------------------------------------
@@ -460,7 +460,7 @@ elseif ($Provider -eq 'auth0')
             $problems += "scope '$($claims.scope)' does not include '$LoginScopeName'. Define the permission on the Auth0 API and grant it to the Machine to Machine application."
         }
         # Mirror the Admin App's caller-id resolution: client_id, falling back to
-        # azp on builds that include the EDFI-2780 fallback. A token that only
+        # azp on builds that include the fallback. A token that only
         # carries azp (the legacy 'Auth0' JWT profile) therefore passes, but with
         # a warning -- Admin App versions WITHOUT that fallback (v4.0.1 and
         # earlier) still 401 it, and RFC 9068 works on every version.
@@ -486,7 +486,7 @@ elseif ($Provider -eq 'auth0')
         if ($azpFallbackInUse)
         {
             Write-Host "WARNING: the token has no client_id claim (legacy 'Auth0' JWT profile); the caller id was matched via the azp fallback." -ForegroundColor Yellow
-            Write-Host "         This only authenticates against Admin App builds that include the EDFI-2780 azp fallback -- v4.0.1 and earlier 401 it." -ForegroundColor Yellow
+            Write-Host "         This only authenticates against Admin App builds that include the azp fallback (after v4.0.1) -- earlier versions 401 it." -ForegroundColor Yellow
             Write-Host "         Setting the Auth0 API's JSON Web Token (JWT) Profile to RFC 9068 works on every Admin App version." -ForegroundColor Yellow
         }
     }
@@ -496,7 +496,7 @@ elseif ($Provider -eq 'auth0')
     }
     Write-Host "Next:" -ForegroundColor Green
     Write-Host "  1. Confirm the Admin App's AUTH0_CONFIG_SECRET.ISSUER == '$auth0Base/' (WITH the trailing slash; install-all.ps1 -IdpProvider auth0 writes this form)."
-    Write-Host "  2. Confirm the Auth0 API's Identifier == MACHINE_AUDIENCE ('$MachineAudience') and its JSON Web Token (JWT) Profile is RFC 9068 (or the Admin App includes the EDFI-2780 azp fallback)."
+    Write-Host "  2. Confirm the Auth0 API's Identifier == MACHINE_AUDIENCE ('$MachineAudience') and its JSON Web Token (JWT) Profile is RFC 9068 (or the Admin App includes the azp fallback, after v4.0.1)."
     Write-Host "  3. Machine USER '$AdminAppUsername' seeded (clientId='$MachineClientId'; must equal the token's client_id, or azp on the legacy profile)."
     Write-Host "  4. ./quick-start.ps1 -TokenUrl '$auth0Base/oauth/token' -OAuthClientId '$MachineClientId' -OAuthClientSecret '<secret>' -Audience '$MachineAudience'"
 }

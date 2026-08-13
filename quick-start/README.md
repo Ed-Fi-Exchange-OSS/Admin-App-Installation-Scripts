@@ -77,6 +77,13 @@ runs. All the scripts are idempotent, so re-running `run.ps1` is safe; if the ma
 and machine user are already in place, re-run only the provisioning half with
 `./run.ps1 -SkipBootstrap`.
 
+`API_BASE_URL` defaults to `https://localhost/adminapp-api/api`, the
+reverse-proxy path of the Docker deployment. On an Admin App installed with
+`windows-install/install-all.ps1` the API is its own IIS site instead — set
+`API_BASE_URL=https://localhost:3443/api` (the deployed `-HttpsApiPort`). With the
+wrong base URL the very first call, `GET /auth/me`, fails with an IIS 404 that
+misleadingly looks like a machine-user authentication problem.
+
 On SQL Server, a loopback `SECURITY_SQL_SERVER` is connected to with `sqlcmd -C`
 (trust server certificate), because a local instance presents a self-signed
 certificate that the sqlcmd shipped with SQL Server 2025 rejects by default. A
@@ -100,7 +107,7 @@ tenant and is created in the Auth0 dashboard before running the quick start
    Admin App's `MACHINE_AUDIENCE` (default `edfiadminapp-api`), and the API's
    **JSON Web Token (JWT) Profile** set to **RFC 9068** — the legacy "Auth0"
    profile omits the `client_id` claim from client-credentials tokens, and only
-   Admin App builds that include the EDFI-2780 `azp` fallback can resolve the
+   Admin App builds that include the `azp` fallback can resolve the
    machine user without it (v4.0.1 and earlier reject every bearer call with
    401; RFC 9068 works on every version).
 2. On that API, under **Permissions**, add **`login:app`**.
@@ -120,8 +127,8 @@ Client ID) and mints a test token from the tenant, failing loudly if `iss`
 or the caller id don't match what the Admin App verifies. The caller id follows
 the Admin App's own resolution order: `client_id` (RFC 9068), falling back to
 `azp` — a legacy-profile token that matches only via `azp` passes with a
-warning, since it authenticates only against Admin App builds with the
-EDFI-2780 fallback.
+warning, since it authenticates only against Admin App builds with the `azp`
+fallback (after v4.0.1).
 
 ## Claim set copies
 
