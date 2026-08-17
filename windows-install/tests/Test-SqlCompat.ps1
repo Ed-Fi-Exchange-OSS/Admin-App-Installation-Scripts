@@ -1,0 +1,144 @@
+#requires -Version 5.1
+<#
+.SYNOPSIS
+Tests the shared SQL-target helpers in windows-install\sql-compat.ps1.
+
+.DESCRIPTION
+Covers the decisions that switch the installer between a local SQL Server instance
+and a remote target such as a managed Azure SQL Database: remote-target detection
+across the host formats sqlcmd accepts, the sqlcmd encryption/certificate flags per
+target, that those flags survive splatting to a native command, and the Azure
+password rule. These run without a database, a server, or any module: plain
+PowerShell, so they work on both Windows PowerShell 5.1 and PowerShell 7.
+
+Exits 0 when every test passes and 1 on the first failure count, so it can gate a
+change from a command line or a future CI step.
+
+.EXAMPLE
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SqlCompat.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SqlCompat.ps1
+#>
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+. "$PSScriptRoot\..\sql-compat.ps1"
+
+$script:Passed = 0
+$script:Failed = 0
+
+function Assert-Equal {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Expected,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Actual,
+        [Parameter(Mandatory = $true)][string]$Because
+    )
+    if ($Expected -ceq $Actual) {
+        $script:Passed++
+        Write-Host "  PASS  $Because" -ForegroundColor Green
+    } else {
+        $script:Failed++
+        Write-Host "  FAIL  $Because -- expected '$Expected', got '$Actual'" -ForegroundColor Red
+    }
+}
+
+function Assert-Throws {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Action,
+        [Parameter(Mandatory = $true)][string]$Because
+    )
+    try {
+        & $Action
+        $script:Failed++
+        Write-Host "  FAIL  $Because -- no error was thrown" -ForegroundColor Red
+    } catch {
+        $script:Passed++
+        Write-Host "  PASS  $Because" -ForegroundColor Green
+    }
+}
+
+function Assert-DoesNotThrow {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Action,
+        [Parameter(Mandatory = $true)][string]$Because
+    )
+    try {
+        & $Action
+        $script:Passed++
+        Write-Host "  PASS  $Because" -ForegroundColor Green
+    } catch {
+        $script:Failed++
+        Write-Host "  FAIL  $Because -- threw: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# Echoes back whatever it is splatted -- token count included, since one argument
+# reading '-N -C' and two arguments reading '-N' and '-C' are indistinguishable once
+# joined. Stands in for sqlcmd so a test can assert what a native command receives.
+function Get-SplattedArgs {
+    return "count=$($args.Count) :: " + ($args -join ' ')
+}
+
+Write-Host ""
+Write-Host "Test-IsRemoteSqlTarget -- local targets" -ForegroundColor Cyan
+foreach ($local in @('localhost', 'LOCALHOST', '(local)', '.', '127.0.0.1', '::1', '[::1]',
+                     'tcp:localhost,1433', 'tcp:127.0.0.1,1433', 'localhost\SQLEXPRESS',
+                     'np:\\.\pipe\sql\query', '\\localhost\pipe\sql\query', '', '   ',
+                     $env:COMPUTERNAME, "tcp:$env:COMPUTERNAME,1433")) {
+    Assert-Equal -Expected 'False' -Actual "$(Test-IsRemoteSqlTarget -SqlServerHost $local)" -Because "'$local' is local"
+}
+
+Write-Host ""
+Write-Host "Test-IsRemoteSqlTarget -- remote targets" -ForegroundColor Cyan
+foreach ($remote in @('myserver.database.windows.net', 'tcp:myserver.database.windows.net,1433',
+                      'MYSERVER.DATABASE.WINDOWS.NET', '10.0.0.5', 'tcp:10.0.0.5,1433',
+                      'sqlbox', 'sqlbox\SQLEXPRESS')) {
+    Assert-Equal -Expected 'True' -Actual "$(Test-IsRemoteSqlTarget -SqlServerHost $remote)" -Because "'$remote' is remote"
+}
+
+Write-Host ""
+Write-Host "Get-SqlcmdSecurityArgs -- flags per target" -ForegroundColor Cyan
+# A local instance presents an auto-generated self-signed certificate: trust it
+# (-C) instead of failing validation. No machine-in-the-middle surface on loopback.
+Assert-Equal -Expected '-C' -Actual ((Get-SqlcmdSecurityArgs -SqlServerHost 'localhost') -join ' ') -Because 'local target trusts the certificate'
+Assert-Equal -Expected '-C' -Actual ((Get-SqlcmdSecurityArgs -SqlServerHost '') -join ' ') -Because "no host (sqlcmd's local default) trusts the certificate"
+Assert-Equal -Expected '-C' -Actual ((Get-SqlcmdSecurityArgs -SqlServerHost 'localhost' -TrustServerCertificate) -join ' ') -Because 'local target with the opt-in still just trusts'
+# The remote cases are the security-relevant ones: -N is what makes sqlcmd validate
+# the certificate. Omitting both -N and -C encrypts without validating.
+Assert-Equal -Expected '-N' -Actual ((Get-SqlcmdSecurityArgs -SqlServerHost 'myserver.database.windows.net') -join ' ') -Because 'remote target encrypts and validates'
+Assert-Equal -Expected '-N -C' -Actual ((Get-SqlcmdSecurityArgs -SqlServerHost 'myserver.database.windows.net' -TrustServerCertificate) -join ' ') -Because 'remote target with the opt-in encrypts and trusts'
+Assert-Equal -Expected '-N' -Actual ((Get-SqlcmdSecurityArgs -SqlServerHost 'tcp:myserver.database.windows.net,1433') -join ' ') -Because 'a protocol-prefixed remote host still validates'
+
+Write-Host ""
+Write-Host "Get-SqlcmdSecurityArgs -- the result splats as separate arguments" -ForegroundColor Cyan
+# These assert the CALL-SITE expression the install scripts use, `@(Get-...)`, not
+# just the return value: two array traps sit between the function and sqlcmd. A
+# one-element array unrolls to a bare string, and splatting a string iterates its
+# characters, so sqlcmd would receive '-' and 'C' as two bogus options; a doubly
+# wrapped array collapses the other way, splatting '-N -C' as ONE token that sqlcmd
+# cannot parse. Assert the token COUNT as well as the text -- '-N -C' as one argument
+# and as two look identical once joined.
+$localArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost 'localhost')
+Assert-Equal -Expected '1' -Actual "$($localArgs.Count)" -Because 'the local flag list holds one element'
+Assert-Equal -Expected 'count=1 :: -C' -Actual (Get-SplattedArgs @localArgs) -Because 'the local flag splats as one token'
+$remoteArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost 'myserver.database.windows.net')
+Assert-Equal -Expected '1' -Actual "$($remoteArgs.Count)" -Because 'the remote flag list holds one element'
+Assert-Equal -Expected 'count=1 :: -N' -Actual (Get-SplattedArgs @remoteArgs) -Because 'the remote flag splats as one token'
+$remoteTrustArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost 'myserver.database.windows.net' -TrustServerCertificate)
+Assert-Equal -Expected '2' -Actual "$($remoteTrustArgs.Count)" -Because 'the remote opt-out flag list holds two elements'
+Assert-Equal -Expected 'count=2 :: -N -C' -Actual (Get-SplattedArgs @remoteTrustArgs) -Because 'both remote flags splat as two separate tokens'
+
+Write-Host ""
+Write-Host "Test-DbPasswordNotUsername -- the Azure Msg 40632 rule" -ForegroundColor Cyan
+Assert-Throws -Because 'the whole login name is rejected' -Action { Test-DbPasswordNotUsername -Password 'edfi_adminapp!2026' -Username 'edfi_adminapp' }
+Assert-Throws -Because 'a 3+ character part of the login name is rejected' -Action { Test-DbPasswordNotUsername -Password 'Xx-adminapp-99' -Username 'edfi_adminapp' }
+Assert-Throws -Because 'the check is case-insensitive' -Action { Test-DbPasswordNotUsername -Password 'Xx-AdminApp-99' -Username 'edfi_adminapp' }
+Assert-DoesNotThrow -Because 'an unrelated password is accepted' -Action { Test-DbPasswordNotUsername -Password 'EdFi-Local!2026' -Username 'sbaa_user' }
+Assert-DoesNotThrow -Because 'a 2 character overlap is too short to matter' -Action { Test-DbPasswordNotUsername -Password 'Str0ng!ab' -Username 'ab_user' }
+
+Write-Host ""
+Write-Host ("{0} passed, {1} failed." -f $script:Passed, $script:Failed) -ForegroundColor $(if ($script:Failed) { 'Red' } else { 'Green' })
+if ($script:Failed) { exit 1 }
+exit 0
