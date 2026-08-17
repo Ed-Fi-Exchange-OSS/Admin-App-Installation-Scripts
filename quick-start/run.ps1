@@ -64,6 +64,13 @@ function Test-EnvTrue
 }
 
 $provider = Get-EnvValue 'PROVIDER' 'keycloak'
+# 'entra' was the original name of the Microsoft provider; normalize it here so
+# every branch (and bootstrap.ps1) sees one value. Existing .env files keep working.
+if ($provider -eq 'entra')
+{
+    Write-Host "PROVIDER=entra is a deprecated alias -- use PROVIDER=microsoft." -ForegroundColor Yellow
+    $provider = 'microsoft'
+}
 $dbEngine = Get-EnvValue 'DB_ENGINE' 'mssql'
 # EdFi_Security lives on the ODS/API side, so it may use a different engine
 # (and, for pgsql, a different server) than the Admin App database.
@@ -89,6 +96,10 @@ $missing = @()
 foreach ($name in 'MACHINE_CLIENT_SECRET', 'TOKEN_URL')
 {
     if (-not (Get-EnvValue $name)) { $missing += $name }
+}
+if ($provider -eq 'auth0' -and -not (Get-EnvValue 'AUTH0_ISSUER'))
+{
+    $missing += 'AUTH0_ISSUER'
 }
 if ($copyClaimsets -and $securityDbEngine -eq 'mssql' -and -not (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY') -and
     -not (Get-EnvValue 'SECURITY_DB_USERNAME'))
@@ -158,6 +169,10 @@ else
         $bootstrapArgs.AdminPassword = Get-EnvValue 'KEYCLOAK_ADMIN_PASSWORD'
         $bootstrapArgs.RealmName = Get-EnvValue 'KEYCLOAK_REALM' 'edfi'
     }
+    if ($provider -eq 'auth0')
+    {
+        $bootstrapArgs.Auth0Issuer = Get-EnvValue 'AUTH0_ISSUER'
+    }
     if ($dbEngine -eq 'mssql')
     {
         # The least-privilege app login; 'sa' is deliberately not used (EDFI-2776).
@@ -197,6 +212,14 @@ $quickStartArgs = @{
 if ($odss.Count -gt 0)
 {
     $quickStartArgs.Odss = $odss
+}
+# Auth0's token endpoint requires an explicit audience for client_credentials.
+# OAUTH_AUDIENCE overrides; for PROVIDER=auth0 it defaults to MACHINE_AUDIENCE;
+# other providers don't take the parameter, so it stays omitted when empty.
+$oauthAudience = Get-EnvValue 'OAUTH_AUDIENCE' $(if ($provider -eq 'auth0') { Get-EnvValue 'MACHINE_AUDIENCE' 'edfiadminapp-api' } else { '' })
+if ($oauthAudience)
+{
+    $quickStartArgs.Audience = $oauthAudience
 }
 
 Write-Host "==> quick-start.ps1" -ForegroundColor Cyan

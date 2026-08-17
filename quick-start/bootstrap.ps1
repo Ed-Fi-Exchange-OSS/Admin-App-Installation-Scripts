@@ -3,12 +3,19 @@
   (Optional) Bootstrap the service-account (machine-to-machine) client used for
   access to the Admin App API, and seed the matching machine USER row. Idempotent.
 
-  Two providers are supported via -Provider:
+  Three providers are supported via -Provider:
     * keycloak (default) -- provisions the Keycloak client + mappers + scopes,
       then seeds the machine USER row.
-    * entra              -- SKIPS all Keycloak admin calls (the Entra app
-      registration is done in the Entra portal / Graph) and only seeds the
-      machine USER row, keyed on the Entra app (client) GUID.
+    * microsoft          -- SKIPS all Keycloak admin calls (the Entra app
+      registration is done in the Microsoft Entra portal / Graph) and only seeds
+      the machine USER row, keyed on the Entra app (client) GUID. ('entra' is
+      still accepted as a deprecated alias; the name now matches
+      windows-install/install-all.ps1 -IdpProvider microsoft.)
+    * auth0              -- SKIPS all Keycloak admin calls (the Auth0 API +
+      Machine to Machine application are created in the Auth0 dashboard), seeds
+      the machine USER row keyed on the M2M application's Client ID, and -- when
+      -MachineClientSecret is supplied -- mints a client_credentials token and
+      FAILS LOUDLY if its claims don't match what the Admin App verifies.
 
 .DESCRIPTION
   KEYCLOAK provider
@@ -25,7 +32,7 @@
       Audience Resolve mapper from adding a second `account` audience, which would
       make `aud` an array and be rejected by the Admin App.
 
-  ENTRA provider
+  MICROSOFT (Entra ID) provider
   There are no admin calls to make from here: the API app registration
   (Expose an API + `login:app` app role + requestedAccessTokenVersion=2) and the
   machine client app (secret + `login:app` application permission with admin
@@ -33,11 +40,30 @@
   SQL seed, using the machine client app's Application (client) ID GUID for the
   `clientId` column (it must equal the token's `azp` (v2) / `appid` (v1) claim).
 
+  AUTH0 provider
+  Provider setup happens in the Auth0 dashboard, out-of-band:
+    * an API whose Identifier equals the Admin App's MACHINE_AUDIENCE (default
+      `edfiadminapp-api`), with its JSON Web Token (JWT) Profile set to RFC 9068
+      (the legacy "Auth0" profile omits the `client_id` claim from
+      client_credentials tokens and the Admin App then rejects them) and a
+      `login:app` permission defined,
+    * a Machine to Machine application authorized for that API with the
+      `login:app` permission granted.
+  This script seeds the machine USER row (clientId = the M2M application's
+  Client ID) and, when -MachineClientSecret is supplied, verifies an actual
+  token from `{-Auth0Issuer}/oauth/token`: iss must equal the issuer WITH a
+  trailing slash (how Auth0 always emits it -- and how the Admin App's
+  AUTH0_CONFIG_SECRET.ISSUER must be configured), aud must include the machine
+  audience, scope must include `login:app`, and the caller id must match --
+  client_id (RFC 9068), or azp alone (legacy profile), which passes with a
+  WARNING because only Admin App builds with the azp fallback (after v4.0.1)
+  accept it. Any mismatch throws with the exact fix.
+
   BOTH providers seed the matching machine USER row directly in the Admin App
   database -- required because a client_credentials token is only accepted once
   that user exists, so it cannot be created through the API. After this, run
   quick-start.ps1 with -TokenUrl / -OAuthClientId / -OAuthClientSecret
-  (and, for Entra, -Scope '<resource>/.default').
+  (and, for microsoft/Entra, -Scope '<resource>/.default').
 
 .EXAMPLE
   # Keycloak (default). Default engine is mssql; -AppDbPassword connects to
@@ -51,9 +77,9 @@
     -DbEngine pgsql -PostgresAppPassword 'edfi'
 
 .EXAMPLE
-  # Entra ID. No Keycloak calls; only the SQL seed runs. -MachineClientId is the
-  # Entra machine client app's Application (client) ID GUID (= token 'azp'/'appid').
-  ./bootstrap.ps1 -Provider entra `
+  # Microsoft Entra ID. No Keycloak calls; only the SQL seed runs. -MachineClientId
+  # is the Entra machine client app's Application (client) ID GUID (= token 'azp'/'appid').
+  ./bootstrap.ps1 -Provider microsoft `
     -MachineClientId '00000000-0000-0000-0000-000000000000' `
     -AppDbPassword 'EdFi-App!2026'
 
@@ -62,12 +88,26 @@
   #     grant_type=client_credentials
   #     client_id={machineAppGuid}&client_secret={secret}
   #     scope={api-app-id-uri-or-guid}/.default
+
+.EXAMPLE
+  # Auth0. No Keycloak calls; seeds the user and (because -MachineClientSecret is
+  # given) verifies a real client_credentials token's iss/aud/scope/client_id.
+  # -MachineClientId/-MachineClientSecret are the Auth0 MACHINE TO MACHINE
+  # application's credentials (not the Single Page Application used for human login).
+  ./bootstrap.ps1 -Provider auth0 `
+    -Auth0Issuer 'https://your-tenant.us.auth0.com' `
+    -MachineClientId '<M2M-application-Client-ID>' `
+    -MachineClientSecret '<M2M-application-Client-Secret>' `
+    -AppDbPassword 'EdFi-App!2026'
 #>
 #requires -Version 5.1
 param(
     # keycloak (default): provision the Keycloak client + seed the user.
-    # entra: skip all Keycloak calls; only seed the user (app reg is done in Entra).
-    [ValidateSet('keycloak', 'entra')][string]$Provider = 'keycloak',
+    # microsoft: skip all Keycloak calls; only seed the user (app reg is done in
+    #            the Microsoft Entra portal). 'entra' is a deprecated alias.
+    # auth0: skip all Keycloak calls; seed the user and, when -MachineClientSecret
+    #        is supplied, verify a real client_credentials token's claims.
+    [ValidateSet('keycloak', 'microsoft', 'entra', 'auth0')][string]$Provider = 'keycloak',
 
     # --- Keycloak provisioning (only used when -Provider keycloak) -------------
     [string]$KeycloakBaseUrl = "http://localhost:8080",
@@ -75,12 +115,18 @@ param(
     [string]$AdminPassword,                      # required for -Provider keycloak
     [string]$RealmName = "edfi",
     # Machine client identifier written to the user's clientId column.
-    #   keycloak -> the Keycloak client id (default below).
-    #   entra    -> the Entra machine app's Application (client) ID GUID.
+    #   keycloak  -> the Keycloak client id (default below).
+    #   microsoft -> the Entra machine app's Application (client) ID GUID.
+    #   auth0     -> the Auth0 Machine to Machine application's Client ID.
     [string]$MachineClientId = "edfiadminapp-machine",
     [string]$MachineClientSecret = "edfi-machine-secret-456",
     # Must equal the Admin App's AUTH0_CONFIG_SECRET.MACHINE_AUDIENCE.
+    # For auth0 it is also the Auth0 API's Identifier (the token-request audience).
     [string]$MachineAudience = "edfiadminapp-api",
+    # auth0 only: the tenant issuer URL (e.g. https://your-tenant.us.auth0.com).
+    # Either slash form is accepted; token claims are checked against the
+    # trailing-slash form because that is how Auth0 emits iss.
+    [string]$Auth0Issuer = "",
     [string]$LoginScopeName = "login:app",
     [switch]$SkipCertificateCheck,
 
@@ -110,9 +156,20 @@ $ErrorActionPreference = 'Stop'
 
 . "$PSScriptRoot/compat.ps1"
 
+# 'entra' was the original name of the Microsoft provider. Normalize it to
+# 'microsoft' (matching windows-install/install-all.ps1 -IdpProvider) so the
+# rest of the script branches on one value; existing .env files keep working.
+if ($Provider -eq 'entra')
+{
+    Write-Host "Provider 'entra' is a deprecated alias -- use 'microsoft'." -ForegroundColor Yellow
+    $Provider = 'microsoft'
+}
+
 # Provider-specific required-arg validation.
 if ($Provider -eq 'keycloak' -and -not $AdminPassword) { throw "-AdminPassword is required when -Provider is 'keycloak' (the default)." }
-if ($Provider -eq 'entra' -and $MachineClientId -eq 'edfiadminapp-machine') { throw "-MachineClientId must be the Entra machine app's Application (client) ID GUID when -Provider is 'entra' (it must match the token's azp/appid claim)." }
+if ($Provider -eq 'microsoft' -and $MachineClientId -eq 'edfiadminapp-machine') { throw "-MachineClientId must be the Entra machine app's Application (client) ID GUID when -Provider is 'microsoft' (it must match the token's azp/appid claim)." }
+if ($Provider -eq 'auth0' -and $MachineClientId -eq 'edfiadminapp-machine') { throw "-MachineClientId must be the Auth0 Machine to Machine application's Client ID when -Provider is 'auth0' (it must match the token's client_id claim)." }
+if ($Provider -eq 'auth0' -and -not $Auth0Issuer) { throw "-Auth0Issuer (the tenant URL, e.g. https://your-tenant.us.auth0.com) is required when -Provider is 'auth0'." }
 
 # Engine-specific required-arg validation (mirrors install-all.ps1).
 if ($DbEngine -eq 'mssql' -and -not $AppDbPassword) { throw "-AppDbPassword (the install-all.ps1 app login's password) is required when -DbEngine is 'mssql' (the default)." }
@@ -143,7 +200,7 @@ function Invoke-KcApi
     Invoke-RestMethod @params
 }
 
-# ==== Keycloak provisioning (skipped entirely for -Provider entra) ============
+# ==== Keycloak provisioning (skipped entirely for the external providers) =====
 if ($Provider -eq 'keycloak')
 {
     # ---- Admin token ---------------------------------------------------------
@@ -270,9 +327,13 @@ if ($Provider -eq 'keycloak')
         Write-Host "Moved 'roles' scope to Optional (keeps aud single-valued)."
     }
 }
+elseif ($Provider -eq 'microsoft')
+{
+    Write-Host "Provider 'microsoft': no local identity provider to provision (the app registration is done in the Microsoft Entra portal / Graph). Seeding the machine user." -ForegroundColor Yellow
+}
 else
 {
-    Write-Host "Provider 'entra': skipping Keycloak provisioning (app registration is done in the Entra portal / Graph)." -ForegroundColor Yellow
+    Write-Host "Provider 'auth0': no local identity provider to provision (the API and Machine to Machine application are created in the Auth0 dashboard). Seeding the machine user." -ForegroundColor Yellow
 }
 
 # ---- Seed the Admin App machine USER -----------------------------------------
@@ -355,6 +416,89 @@ if ($Provider -eq 'keycloak')
     Write-Host "  2. Confirm the Admin App's AUTH0_CONFIG_SECRET.ISSUER == '$($claims.iss)'."
     Write-Host "  3. Machine USER '$AdminAppUsername' seeded in the Admin App db (clientId='$MachineClientId', roleId=$AdminAppRoleId)."
     Write-Host "  4. ./quick-start.ps1 -TokenUrl '$KeycloakBaseUrl/realms/$RealmName/protocol/openid-connect/token' -OAuthClientId '$MachineClientId' -OAuthClientSecret '<secret>'"
+}
+elseif ($Provider -eq 'auth0')
+{
+    # Auth0 mints client_credentials tokens from {tenant}/oauth/token with an
+    # explicit audience. The assertions below mirror exactly what the Admin App
+    # verifies (iss exact match, aud = MACHINE_AUDIENCE, 'login:app' in scope,
+    # machine user resolved from client_id), so a mismatch here is the same
+    # mismatch that would 401 the real API call -- fail loudly with the fix.
+    $auth0Base = $Auth0Issuer.TrimEnd('/')
+    if ($PSBoundParameters.ContainsKey('MachineClientSecret'))
+    {
+        Write-Host "`nVerifying client_credentials token from $auth0Base/oauth/token..."
+        $tok = Invoke-RestMethod @script:rest -Uri "$auth0Base/oauth/token" `
+            -Method Post -ContentType "application/json" -Body (@{
+                grant_type    = "client_credentials"
+                client_id     = $MachineClientId
+                client_secret = $MachineClientSecret
+                audience      = $MachineAudience
+            } | ConvertTo-Json)
+        $p = $tok.access_token.Split('.')[1].Replace('-', '+').Replace('_', '/')
+        switch ($p.Length % 4) { 2 { $p += '==' } 3 { $p += '=' } }
+        $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+        Write-Host ("  iss       : {0}" -f $claims.iss)
+        Write-Host ("  aud       : {0}" -f (@($claims.aud) -join ', '))
+        Write-Host ("  scope     : {0}" -f $claims.scope)
+        Write-Host ("  client_id : {0}" -f $claims.client_id)
+        Write-Host ("  azp       : {0}" -f $claims.azp)
+        Write-Host ("  appid     : {0}" -f $claims.appid)
+
+        $problems = @()
+        $azpFallbackInUse = $false
+        if ($claims.iss -ne "$auth0Base/")
+        {
+            $problems += "iss is '$($claims.iss)' but must equal '$auth0Base/' (WITH the trailing slash -- how Auth0 emits it, and how the Admin App's AUTH0_CONFIG_SECRET.ISSUER must be configured)."
+        }
+        if (@($claims.aud) -notcontains $MachineAudience)
+        {
+            $problems += "aud '$(@($claims.aud) -join ', ')' does not include '$MachineAudience'. The Auth0 API's Identifier must be exactly the Admin App's MACHINE_AUDIENCE."
+        }
+        if ((" " + "$($claims.scope)" + " ") -notlike "* $LoginScopeName *")
+        {
+            $problems += "scope '$($claims.scope)' does not include '$LoginScopeName'. Define the permission on the Auth0 API and grant it to the Machine to Machine application."
+        }
+        # Mirror the Admin App's caller-id resolution: client_id, falling back to
+        # azp on builds that include the fallback. A token that only
+        # carries azp (the legacy 'Auth0' JWT profile) therefore passes, but with
+        # a warning -- Admin App versions WITHOUT that fallback (v4.0.1 and
+        # earlier) still 401 it, and RFC 9068 works on every version.
+        $callerId = if ($claims.client_id) { $claims.client_id } else { $claims.azp }
+        if (-not $callerId)
+        {
+            $problems += "the token carries neither a client_id nor an azp claim, so the Admin App cannot resolve the machine user. Set the Auth0 API's JSON Web Token (JWT) Profile to RFC 9068."
+        }
+        elseif ($callerId -ne $MachineClientId)
+        {
+            $problems += "the token's caller id is '$callerId' (from $(if ($claims.client_id) { 'client_id' } else { 'azp' })) but the machine user was seeded with clientId '$MachineClientId' -- they must match."
+        }
+        elseif (-not $claims.client_id)
+        {
+            $azpFallbackInUse = $true
+        }
+        if ($problems.Count -gt 0)
+        {
+            $problems | ForEach-Object { Write-Host "  PROBLEM: $_" -ForegroundColor Red }
+            throw "Auth0 token verification failed ($($problems.Count) problem(s) above). Fix them in the Auth0 dashboard and re-run."
+        }
+        Write-Host "`nSUCCESS: Auth0 token claims match what the Admin App verifies." -ForegroundColor Green
+        if ($azpFallbackInUse)
+        {
+            Write-Host "WARNING: the token has no client_id claim (legacy 'Auth0' JWT profile); the caller id was matched via the azp fallback." -ForegroundColor Yellow
+            Write-Host "         This only authenticates against Admin App builds that include the azp fallback (after v4.0.1) -- earlier versions 401 it." -ForegroundColor Yellow
+            Write-Host "         Setting the Auth0 API's JSON Web Token (JWT) Profile to RFC 9068 works on every Admin App version." -ForegroundColor Yellow
+        }
+    }
+    else
+    {
+        Write-Host "`nMachine user seeded. -MachineClientSecret was not supplied, so the Auth0 token check was SKIPPED -- verify the claims manually (decode a test token)." -ForegroundColor Yellow
+    }
+    Write-Host "Next:" -ForegroundColor Green
+    Write-Host "  1. Confirm the Admin App's AUTH0_CONFIG_SECRET.ISSUER == '$auth0Base/' (WITH the trailing slash; install-all.ps1 -IdpProvider auth0 writes this form)."
+    Write-Host "  2. Confirm the Auth0 API's Identifier == MACHINE_AUDIENCE ('$MachineAudience') and its JSON Web Token (JWT) Profile is RFC 9068 (or the Admin App includes the azp fallback, after v4.0.1)."
+    Write-Host "  3. Machine USER '$AdminAppUsername' seeded (clientId='$MachineClientId'; must equal the token's client_id, or azp on the legacy profile)."
+    Write-Host "  4. ./quick-start.ps1 -TokenUrl '$auth0Base/oauth/token' -OAuthClientId '$MachineClientId' -OAuthClientSecret '<secret>' -Audience '$MachineAudience'"
 }
 else
 {

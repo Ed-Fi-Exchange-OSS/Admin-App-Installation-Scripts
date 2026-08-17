@@ -8,13 +8,14 @@ that tie them together.
 
 Full walkthrough (prerequisites, provider setup for Keycloak / Entra ID,
 troubleshooting): [Global Admin Quick Start on docs.ed-fi.org](https://docs.ed-fi.org/reference/admin-app/user-guide/global-admin-quick-start).
+Auth0 prerequisites are covered [below](#auth0-prerequisites).
 
 ## Scripts
 
 | Script | Purpose |
 | --- | --- |
 | `run.ps1` | One-step entry point: loads `.env` and runs `bootstrap.ps1`, `quick-start.ps1`, and `copy-claimsets.ps1`. |
-| `bootstrap.ps1` | Provisions the IdP machine client (Keycloak) or, for Entra ID, skips provider calls; seeds the matching machine user row in the Admin App database. Idempotent. |
+| `bootstrap.ps1` | Provisions the IdP machine client (Keycloak) or, for Microsoft Entra ID / Auth0 (`-Provider microsoft \| auth0`; `entra` is a deprecated alias for `microsoft`), skips provider calls (the registration is done in the provider's portal); seeds the matching machine user row in the Admin App database. For Auth0 it also verifies a real client-credentials token's claims. Idempotent. |
 | `quick-start.ps1` | Provisions the team, environment, tenant, ODS instances, and ownerships through the Admin App REST API, and adds the machine user — plus the human bootstrap admin when `ADMIN_USERNAME` is set — to the team. Idempotent. |
 | `copy-claimsets.ps1` | Copies every built-in claimset under an `AA` prefix in the ODS/API's EdFi_Security database so they can be assigned to applications in the Admin App (or only the ones in `CLAIMSET_NAMES`). Idempotent. |
 | `cleanup.ps1` | Tears down everything the quick start created (environment, team, machine user). The human bootstrap user is left in place. |
@@ -76,6 +77,13 @@ runs. All the scripts are idempotent, so re-running `run.ps1` is safe; if the ma
 and machine user are already in place, re-run only the provisioning half with
 `./run.ps1 -SkipBootstrap`.
 
+`API_BASE_URL` defaults to `https://localhost/adminapp-api/api`, the
+reverse-proxy path of the Docker deployment. On an Admin App installed with
+`windows-install/install-all.ps1` the API is its own IIS site instead — set
+`API_BASE_URL=https://localhost:3443/api` (the deployed `-HttpsApiPort`). With the
+wrong base URL the very first call, `GET /auth/me`, fails with an IIS 404 that
+misleadingly looks like a machine-user authentication problem.
+
 On SQL Server, a loopback `SECURITY_SQL_SERVER` is connected to with `sqlcmd -C`
 (trust server certificate), because a local instance presents a self-signed
 certificate that the sqlcmd shipped with SQL Server 2025 rejects by default. A
@@ -88,6 +96,39 @@ to a machine-in-the-middle. This is the database counterpart of
 
 Individual scripts can also be run directly with parameters — see each
 script's comment-based help (`Get-Help ./bootstrap.ps1 -Full`).
+
+## Auth0 prerequisites
+
+With `PROVIDER=auth0`, the machine (service-account) client lives in your Auth0
+tenant and is created in the Auth0 dashboard before running the quick start
+(nothing can be provisioned from here):
+
+1. **Applications → APIs → Create API** with the **Identifier** equal to the
+   Admin App's `MACHINE_AUDIENCE` (default `edfiadminapp-api`), and the API's
+   **JSON Web Token (JWT) Profile** set to **RFC 9068** — the legacy "Auth0"
+   profile omits the `client_id` claim from client-credentials tokens, and only
+   Admin App builds that include the `azp` fallback can resolve the
+   machine user without it (v4.0.1 and earlier reject every bearer call with
+   401; RFC 9068 works on every version).
+2. On that API, under **Permissions**, add **`login:app`**.
+3. **Applications → Create Application → Machine to Machine**, authorized for
+   that API with the `login:app` permission granted.
+4. `.env` values: `PROVIDER=auth0`, `AUTH0_ISSUER=https://your-tenant.us.auth0.com`,
+   `MACHINE_CLIENT_ID` / `MACHINE_CLIENT_SECRET` = the M2M application's Client
+   ID / Client Secret, `MACHINE_AUDIENCE` = the API identifier from step 1,
+   `TOKEN_URL=https://your-tenant.us.auth0.com/oauth/token`. Leave `OAUTH_SCOPE`
+   at the default and `OAUTH_AUDIENCE` empty (it defaults to `MACHINE_AUDIENCE`
+   for Auth0 — its token endpoint requires an explicit audience).
+
+`bootstrap.ps1` then seeds the machine user (`clientId` = the M2M application's
+Client ID) and mints a test token from the tenant, failing loudly if `iss`
+(must end in `/` — how Auth0 emits it and how the Admin App's
+`AUTH0_CONFIG_SECRET.ISSUER` must be configured), `aud`, `scope` (`login:app`),
+or the caller id don't match what the Admin App verifies. The caller id follows
+the Admin App's own resolution order: `client_id` (RFC 9068), falling back to
+`azp` — a legacy-profile token that matches only via `azp` passes with a
+warning, since it authenticates only against Admin App builds with the `azp`
+fallback (after v4.0.1).
 
 ## Claim set copies
 

@@ -42,6 +42,17 @@ of its own HTTP site).
 The identity provider account-management URL the web application links to. Default (Keycloak example):
 http://localhost:8080/realms/edfi/account/.
 
+.PARAMETER ViteOidcId
+The `oidc` database row id the web application initiates login against. Written into
+packages\fe\.env as VITE_OIDC_ID before building (the bundle bakes it in and falls
+back to 1 when unset). Default: 1 -- correct for a fresh install; install-all.ps1
+re-invokes this script with the real id when it resolves to something else.
+
+.PARAMETER FeOnly
+Switch -- skip `npm run build:api` and only (re)build the web application bundle.
+Used by install-all.ps1 when only a Vite variable changed after the API was
+already built and deployed.
+
 .EXAMPLE
 .\04-build.ps1
 .\04-build.ps1 -SourcePath C:\Ed-Fi\Ed-Fi-AdminApp
@@ -65,7 +76,9 @@ param(
     [switch]$Force,
     [string]$ViteApiUrl = "http://localhost:3333",
     [string]$ViteBasePath = "/",
-    [string]$ViteIdpAccountUrl = "http://localhost:8080/realms/edfi/account/"
+    [string]$ViteIdpAccountUrl = "http://localhost:8080/realms/edfi/account/",
+    [int]$ViteOidcId = 1,
+    [switch]$FeOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,25 +111,29 @@ if ($apiBuilt -and $feBuilt) {
 }
 
 # The timestamp heuristic above does not know whether the existing web application bundle was
-# built for the requested VITE_API_URL. A stale bundle built for a different API
-# URL/scheme breaks at runtime under the enforcing CSP (connect-src), so only
-# treat the build as current when the last-built .env matches the requested URL.
+# built for the requested VITE_API_URL / VITE_OIDC_ID. A stale bundle built for a
+# different API URL/scheme breaks at runtime under the enforcing CSP (connect-src),
+# and one built for a different oidc row id initiates login against the wrong row --
+# so only treat the build as current when the last-built .env matches both. An
+# absent VITE_OIDC_ID line means the bundle baked the FE fallback of 1.
 $envFile = "$SourcePath\packages\fe\.env"
 $feConfigCurrent = $false
 if (Test-Path $envFile) {
     $m = Select-String -Path $envFile -Pattern '^VITE_API_URL=(.*)$' | Select-Object -First 1
-    if ($m -and $m.Matches.Groups[1].Value -eq $ViteApiUrl) { $feConfigCurrent = $true }
+    $mOidc = Select-String -Path $envFile -Pattern '^VITE_OIDC_ID=(.*)$' | Select-Object -First 1
+    $envOidcId = if ($mOidc) { $mOidc.Matches.Groups[1].Value.Trim() } else { '1' }
+    if ($m -and $m.Matches.Groups[1].Value -eq $ViteApiUrl -and $envOidcId -eq "$ViteOidcId") { $feConfigCurrent = $true }
 }
 
 if ($buildIsCurrent -and $feConfigCurrent -and -not $Force) {
-    Write-Host "Build artifacts present, current, and built for $ViteApiUrl -- skipping build." -ForegroundColor Green
+    Write-Host "Build artifacts present, current, and built for $ViteApiUrl (oidc id $ViteOidcId) -- skipping build." -ForegroundColor Green
     Write-Host "  API entry:  $apiMainJs"
     Write-Host "  Web application output:  $SourcePath\dist\packages\fe\"
     Write-Host "Pass -Force to rebuild anyway." -ForegroundColor DarkGray
     return
 }
 if ($buildIsCurrent -and -not $feConfigCurrent -and -not $Force) {
-    Write-Host "Web application build configuration changed (VITE_API_URL now $ViteApiUrl) -- rebuilding the web application bundle." -ForegroundColor Cyan
+    Write-Host "Web application build configuration changed (VITE_API_URL now $ViteApiUrl, VITE_OIDC_ID now $ViteOidcId) -- rebuilding the web application bundle." -ForegroundColor Cyan
 }
 
 # Ensure packages\fe\.env exists with the right Vite values before building.
@@ -133,8 +150,15 @@ try {
         $envText = $envText -replace 'VITE_API_URL=.*',         "VITE_API_URL=$ViteApiUrl"
         $envText = $envText -replace 'VITE_BASE_PATH=.*',        "VITE_BASE_PATH=`"$ViteBasePath`""
         $envText = $envText -replace 'VITE_IDP_ACCOUNT_URL=.*',  "VITE_IDP_ACCOUNT_URL=$ViteIdpAccountUrl"
+        # VITE_OIDC_ID may be absent from an older .env (the template ships it,
+        # but a hand-rolled file may not) -- replace when present, append otherwise.
+        if ($envText -match '(?m)^VITE_OIDC_ID=') {
+            $envText = $envText -replace 'VITE_OIDC_ID=.*', "VITE_OIDC_ID=$ViteOidcId"
+        } else {
+            $envText = $envText.TrimEnd() + "`r`nVITE_OIDC_ID=$ViteOidcId`r`n"
+        }
         Set-Content $envFile -Value $envText -Encoding UTF8
-        Write-Host "Updated packages\fe\.env (VITE_API_URL=$ViteApiUrl, VITE_BASE_PATH=$ViteBasePath)"
+        Write-Host "Updated packages\fe\.env (VITE_API_URL=$ViteApiUrl, VITE_BASE_PATH=$ViteBasePath, VITE_OIDC_ID=$ViteOidcId)"
     }
 } catch {
     throw "Failed to write the web application build configuration at $envFile. Check the path is writable. Original: $($_.Exception.Message)"
@@ -150,10 +174,15 @@ try {
         Write-Host "Skipping npm ci (-SkipInstall)."
     }
 
-    Write-Host ""
-    Write-Host "Running: npm run build:api" -ForegroundColor Cyan
-    & npm run build:api
-    if ($LASTEXITCODE -ne 0) { throw "build:api failed with exit code $LASTEXITCODE" }
+    if (-not $FeOnly) {
+        Write-Host ""
+        Write-Host "Running: npm run build:api" -ForegroundColor Cyan
+        & npm run build:api
+        if ($LASTEXITCODE -ne 0) { throw "build:api failed with exit code $LASTEXITCODE" }
+    } else {
+        Write-Host ""
+        Write-Host "Skipping build:api (-FeOnly)."
+    }
 
     Write-Host ""
     # nx caches fe:build and does not hash .env, so a changed VITE_API_URL alone

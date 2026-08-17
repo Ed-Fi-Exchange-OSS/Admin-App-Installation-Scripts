@@ -56,6 +56,18 @@ OIDC client secret (the secret configured on the client in your identity provide
 .PARAMETER OidcScope
 OIDC scopes requested at login. Default: 'openid email profile'.
 
+.PARAMETER M2mIssuer
+Issuer written to AUTH0_CONFIG_SECRET_VALUE.ISSUER, which machine-to-machine bearer
+verification exact-matches against the token's iss claim. Defaults to -OidcIssuer.
+Pass it separately when the token's iss differs from the discovery issuer -- Auth0
+always emits iss WITH a trailing slash while its discovery URL needs the no-slash
+form (install-all.ps1 -IdpProvider auth0 derives both automatically).
+
+.PARAMETER MachineAudience
+Expected audience (aud claim) of machine-to-machine bearer tokens, written to
+AUTH0_CONFIG_SECRET_VALUE.MACHINE_AUDIENCE. Default: 'edfiadminapp-api' (must equal
+the identity provider's API identifier, e.g. the Auth0 API identifier).
+
 .PARAMETER AdminUsername
 Email seeded as the admin user. Default: admin@example.com.
 
@@ -114,6 +126,13 @@ param(
     [SecureString]$OidcClientSecret,
 
     [string]$OidcScope = "openid email profile",
+
+    # Machine-to-machine issuer + audience for AUTH0_CONFIG_SECRET_VALUE. The
+    # issuer defaults to -OidcIssuer; Auth0 needs the trailing-slash form here
+    # (the token's iss claim) while discovery needs no slash, so install-all
+    # passes the two forms separately for -IdpProvider auth0.
+    [string]$M2mIssuer = "",
+    [string]$MachineAudience = "edfiadminapp-api",
 
     # URLs baked into production.js (MY_URL/FE_URL). Defaults are https on the
     # mirror ports; TLS is always-on (see -HttpsPort and the certificate params).
@@ -636,7 +655,7 @@ function Set-ConfigAnchor {
 
 # Build the NODE_CONFIG document from the resolved values. node-config deep-merges
 # objects, so partial DB_SECRET_VALUE / AUTH0_CONFIG_SECRET_VALUE objects keep
-# their untouched siblings (unused engine keys, MACHINE_AUDIENCE). A single-element
+# their untouched siblings (unused engine keys). A single-element
 # WHITELISTED_REDIRECTS array serializes correctly here (nested arrays don't
 # collapse in ConvertTo-Json; verified on PS 5.1).
 $nodeConfig = @{
@@ -654,9 +673,12 @@ $nodeConfig = @{
         scope        = $OidcScope
     }
     AUTH0_CONFIG_SECRET_VALUE = @{
-        ISSUER        = $OidcIssuer
-        CLIENT_ID     = $OidcClientId
-        CLIENT_SECRET = $OidcClientSecretPlain
+        # Exact-matched against the M2M token's iss claim (jose.jwtVerify), so it
+        # may carry a trailing slash (Auth0) while SAMPLE_OIDC_CONFIG.issuer must not.
+        ISSUER           = $(if ($M2mIssuer) { $M2mIssuer } else { $OidcIssuer })
+        CLIENT_ID        = $OidcClientId
+        CLIENT_SECRET    = $OidcClientSecretPlain
+        MACHINE_AUDIENCE = $MachineAudience
     }
 }
 if ($DbEngine -eq 'mssql') {

@@ -59,10 +59,11 @@ The dedicated least-privilege SQL login the Admin App connects as at runtime
 production.js as MSSQL_DB_USERNAME / MSSQL_DB_PASSWORD.
 
 .PARAMETER IdpProvider
-Identity provider (mandatory): keycloak | microsoft | google | other. 'keycloak'
+Identity provider (mandatory): keycloak | microsoft | google | auth0 | other. 'keycloak'
 stands up the local example identity provider and provisions the realm/client/user. The others
 target an external OIDC provider you register yourself; the AdminApp's authentication engine
-is provider-agnostic (OIDC discovery).
+is provider-agnostic (OIDC discovery). 'auth0' additionally normalizes the issuer into the
+two forms Auth0 needs (see -OidcIssuer).
 
 .PARAMETER OidcClientSecret
 OIDC client secret (mandatory, all modes): the secret of the AdminApp's OIDC client
@@ -70,7 +71,11 @@ OIDC client secret (mandatory, all modes): the secret of the AdminApp's OIDC cli
 provider.
 
 .PARAMETER OidcIssuer
-OIDC issuer URL. Defaulted for keycloak and google; required for microsoft and other.
+OIDC issuer URL. Defaulted for keycloak and google; required for microsoft, auth0 and other.
+For auth0 (https://<tenant>.<region>.auth0.com) either slash form is accepted: the installer
+derives both forms itself -- no trailing slash for OIDC discovery (the oidc row /
+SAMPLE_OIDC_CONFIG.issuer) and a trailing slash for machine-to-machine token verification
+(AUTH0_CONFIG_SECRET_VALUE.ISSUER, exact-matched against Auth0's iss claim).
 
 .PARAMETER OidcClientId
 OIDC client id. Defaulted for keycloak (edfiadminapp); required for the external modes.
@@ -78,9 +83,17 @@ OIDC client id. Defaulted for keycloak (edfiadminapp); required for the external
 .PARAMETER OidcScope
 OIDC scopes requested at login. Default: 'openid email profile'.
 
+.PARAMETER MachineAudience
+Expected audience (aud claim) of machine-to-machine bearer tokens, written to
+AUTH0_CONFIG_SECRET_VALUE.MACHINE_AUDIENCE. Default: 'edfiadminapp-api'. For Auth0 this
+must equal the Auth0 API identifier; for Keycloak it is the audience the bootstrap
+mapper emits. Set it to align the deployed API with an existing identity-provider API
+registration without editing config files on the server.
+
 .PARAMETER ViteIdpAccountUrl
 The identity provider account-management URL the web application links to. Defaulted per provider (keycloak,
-microsoft, google); required for 'other'.
+microsoft, google; auth0 falls back to the tenant URL, having no hosted account page);
+required for 'other'.
 
 .PARAMETER KeycloakAdminPassword
 (keycloak mode only) Password for the master-realm Keycloak admin, bootstrapped on
@@ -199,6 +212,18 @@ Default 8082. Becomes the YOPASS_URL the API is configured with.
   -OidcClientId '<application-id>' `
   -OidcClientSecret (Read-Host -AsSecureString 'Entra client secret') `
   -AdminUsername 'you@yourtenant.onmicrosoft.com'
+
+.EXAMPLE
+# External OIDC (Auth0). Create a Single Page Web Application in the Auth0 dashboard
+# first, and make sure an Auth0 user exists whose email matches -AdminUsername. Either
+# slash form of the issuer works -- the installer derives the discovery (no-slash) and
+# machine-to-machine (with-slash) forms itself.
+.\install-all.ps1 -IdpProvider auth0 `
+  -AppDbPassword (Read-Host -AsSecureString 'Admin App DB password') `
+  -OidcIssuer 'https://your-tenant.us.auth0.com' `
+  -OidcClientId '<Single-Page-App-Client-ID>' `
+  -OidcClientSecret (Read-Host -AsSecureString 'Auth0 client secret') `
+  -AdminUsername 'you@yourorg.com'
 #>
 
 param(
@@ -218,7 +243,7 @@ param(
     # local Keycloak (the example identity provider); the others deploy against an external OIDC
     # provider you register yourself (the client + user live in that provider).
     [Parameter(Mandatory = $true)]
-    [ValidateSet('keycloak','microsoft','google','other')]
+    [ValidateSet('keycloak','microsoft','google','auth0','other')]
     [string]$IdpProvider,
 
     # OIDC client secret -- required in every mode (the secret of the AdminApp's
@@ -232,6 +257,12 @@ param(
     [string]$OidcClientId = "",
     [string]$OidcScope = "openid email profile",
     [string]$ViteIdpAccountUrl = "",
+
+    # Machine-to-machine token audience, written to
+    # AUTH0_CONFIG_SECRET_VALUE.MACHINE_AUDIENCE (previously only reachable by
+    # editing the deployed config). Must equal the identity provider's API
+    # identifier (Auth0 API identifier / Keycloak audience mapper value).
+    [string]$MachineAudience = "edfiadminapp-api",
 
     # Keycloak-only (required when -IdpProvider is 'keycloak'): the master-realm
     # admin password and the seeded test user's password.
@@ -398,10 +429,29 @@ if ($idpIsKeycloak) {
             if (-not $OidcIssuer)        { $OidcIssuer = "https://accounts.google.com" }
             if (-not $ViteIdpAccountUrl) { $ViteIdpAccountUrl = "https://myaccount.google.com/" }
         }
+        'auth0'     {
+            # Auth0 has no hosted account-management page; the tenant URL is the
+            # documented placeholder. Overridable via -ViteIdpAccountUrl.
+            if (-not $ViteIdpAccountUrl -and $OidcIssuer) { $ViteIdpAccountUrl = "$($OidcIssuer.TrimEnd('/'))/" }
+        }
     }
     if (-not $OidcIssuer)        { throw "-OidcIssuer is required when -IdpProvider is '$IdpProvider'." }
     if (-not $OidcClientId)      { throw "-OidcClientId is required when -IdpProvider is '$IdpProvider'." }
     if (-not $ViteIdpAccountUrl) { throw "-ViteIdpAccountUrl is required when -IdpProvider is '$IdpProvider' (the identity provider account-management URL the web application links to)." }
+}
+
+# Machine-to-machine issuer resolution. Human login and M2M read the issuer from two
+# different places with two different comparison rules: OIDC discovery concatenates
+# `${issuer}/.well-known/openid-configuration` (a trailing slash 404s on Auth0), while
+# M2M bearer verification exact-matches AUTH0_CONFIG_SECRET_VALUE.ISSUER against the
+# token's iss claim (which Auth0 always emits WITH a trailing slash). No single value
+# satisfies both on Auth0, so derive both forms from the one parameter -- whichever
+# slash form the operator supplied. Other providers use the same value for both
+# (e.g. Entra's iss has no trailing slash).
+$M2mIssuer = $OidcIssuer
+if ($IdpProvider -eq 'auth0') {
+    $OidcIssuer = $OidcIssuer.TrimEnd('/')
+    $M2mIssuer  = "$OidcIssuer/"
 }
 
 # TLS (always-on): the web application bundle bakes the API URL at build time, and 05/06 read
@@ -722,11 +772,24 @@ if ($idpIsKeycloak) {
         throw "Could not reach the OIDC discovery endpoint at $disco. Check -OidcIssuer and connectivity. Original: $($_.Exception.Message)"
     }
     Write-Host ""
-    Write-Host "Register these in your '$IdpProvider' OIDC client before logging in:" -ForegroundColor Yellow
-    Write-Host "  Redirect URI:  $ApiUrl/api/auth/callback/<id>  (exact id confirmed at the end of this install)"
-    Write-Host "  Post-logout:   $ApiUrl/api/auth/post-logout"
-    Write-Host "  Web origin:    $FeUrl"
-    Write-Host "  And a user whose email/username claim equals '$AdminUsername' (seeded as admin below)."
+    if ($IdpProvider -eq 'auth0') {
+        # Same three URLs as the generic case, labeled with the exact Auth0
+        # application-settings field names so they can be pasted without mapping.
+        Write-Host "Register these in your Auth0 Single Page Application (Settings) before logging in:" -ForegroundColor Yellow
+        Write-Host "  Allowed Callback URLs:  $ApiUrl/api/auth/callback/<id>  (exact id confirmed at the end of this install)"
+        Write-Host "  Allowed Logout URLs:    $ApiUrl/api/auth/post-logout"
+        Write-Host "  Allowed Web Origins:    $FeUrl"
+        Write-Host "  And an Auth0 user whose email equals '$AdminUsername' (seeded as admin below)."
+        Write-Host "  For machine-to-machine access: an Auth0 API with identifier '$MachineAudience'," -ForegroundColor Yellow
+        Write-Host "  its JSON Web Token (JWT) Profile set to RFC 9068, and a 'login:app' permission" -ForegroundColor Yellow
+        Write-Host "  granted to your Machine to Machine application. (See the README's Auth0 section.)" -ForegroundColor Yellow
+    } else {
+        Write-Host "Register these in your '$IdpProvider' OIDC client before logging in:" -ForegroundColor Yellow
+        Write-Host "  Redirect URI:  $ApiUrl/api/auth/callback/<id>  (exact id confirmed at the end of this install)"
+        Write-Host "  Post-logout:   $ApiUrl/api/auth/post-logout"
+        Write-Host "  Web origin:    $FeUrl"
+        Write-Host "  And a user whose email/username claim equals '$AdminUsername' (seeded as admin below)."
+    }
 }
 
 Write-Phase "Phase 3.2: Deploy API (05-deploy-api.ps1)"
@@ -736,6 +799,10 @@ $apiArgs = @{
     DestPath             = $apiDestPath
     DatabaseName         = $DatabaseName
     OidcIssuer           = $OidcIssuer
+    # M2M bearer verification exact-matches this against the token's iss claim;
+    # differs from OidcIssuer only for auth0 (trailing slash -- derived above).
+    M2mIssuer            = $M2mIssuer
+    MachineAudience      = $MachineAudience
     OidcClientId         = $OidcClientId
     OidcClientSecret     = $OidcClientSecret
     OidcScope            = $OidcScope
@@ -964,11 +1031,24 @@ UPDATE "user" SET "roleId" = 2, "isActive" = true
             & "$scriptDir\idp-keycloak-setup.ps1" @kcArgs
         }
     } else {
-        # Entra/Google/other: no script can provision the provider's client, so
+        # Entra/Google/Auth0/other: no script can provision the provider's client, so
         # surface the exact redirect URI the app will send for manual registration.
         Write-Host ""
         Write-Host "IMPORTANT -- register this EXACT redirect URI in your $IdpProvider client before logging in:" -ForegroundColor Yellow
         Write-Host "  $ApiUrl/api/auth/callback/$oidcRowId"
+    }
+
+    # The web application bakes VITE_OIDC_ID into the bundle at BUILD time and falls
+    # back to 1, so on a database where the managed oidc row's id is not 1 the deployed
+    # bundle still initiates login against row 1 and login breaks (with the redirect
+    # URI above never used). Rebuild the bundle for the real id and redeploy. Provider-
+    # agnostic (the id is a database-row property); a fresh install resolves 1 and
+    # skips this. Phase 2 always stamps VITE_OIDC_ID=1, so re-running an install whose
+    # row went back to 1 also self-heals.
+    if ($oidcRowId -ne 1) {
+        Write-Phase "Phase 3.4: Rebuild the web application for OIDC row id $oidcRowId (VITE_OIDC_ID)"
+        & "$scriptDir\04-build.ps1" -SourcePath $SourcePath -ViteIdpAccountUrl $ViteIdpAccountUrl -ViteApiUrl $ApiUrl -ViteOidcId $oidcRowId -SkipInstall -FeOnly
+        & "$scriptDir\06-deploy-fe.ps1" @feArgs
     }
 } else {
     Write-Host "API is NOT responding after ~60s of retries." -ForegroundColor Red
@@ -1053,6 +1133,8 @@ Keycloak (Identity Provider)
     $idpSummary = @"
 Identity Provider (external: $IdpProvider)
   Issuer:             $OidcIssuer
+  M2M issuer:         $M2mIssuer (AUTH0_CONFIG_SECRET_VALUE.ISSUER -- must equal the token's iss claim)
+  M2M audience:       $MachineAudience
   Client ID:          $OidcClientId
   Account URL:        $ViteIdpAccountUrl
   Register in your identity provider (IdP): redirect $ApiUrl/api/auth/callback/$oidcRowId, origin $FeUrl
