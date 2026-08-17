@@ -112,24 +112,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Decide whether the SQL target is a local instance (loopback) or a remote server
-# such as a managed Azure SQL Database. A local target gets Windows Authentication
-# and the registry/service setup; a remote target is provisioned with a SQL admin
-# login over an encrypted, certificate-validated connection. Mirrors the loopback
-# normalization in Get-SqlcmdTrustArgs (quick-start/ and edorg-sync/ compat.ps1).
-function Test-IsRemoteSqlTarget {
-    param([string]$SqlServerHost)
-    if ([string]::IsNullOrWhiteSpace($SqlServerHost)) { return $false }
-    $value = $SqlServerHost.Trim()
-    # Local named pipes (\\.\pipe\..., optionally np:-prefixed) are loopback by
-    # definition and would otherwise normalize to an empty host below.
-    if ($value -match '^(np:)?\\\\(\.|localhost|127\.0\.0\.1)\\') { return $false }
-    $target = ($value -replace '^(tcp|np|lpc|admin):', '') -split '[,\\]' | Select-Object -First 1
-    $target = $target.Trim().Trim('(', ')')
-    $loopback = @('local', 'localhost', '.', '127.0.0.1', '::1', '[::1]')
-    if ($env:COMPUTERNAME) { $loopback += $env:COMPUTERNAME }
-    return ($target -notin $loopback)
-}
+# Shared SQL-target helpers (Test-IsRemoteSqlTarget, Get-SqlcmdSecurityArgs,
+# Test-DbPasswordNotUsername). A local target gets Windows Authentication and the
+# registry/service setup; a remote target is provisioned with a SQL admin login over
+# an encrypted, certificate-validated connection.
+. "$PSScriptRoot\sql-compat.ps1"
 
 # Reject a weak SQL login password the moment each is resolved (whether passed as a
 # param or prompted), before any registry or SQL work, so a weak password fails
@@ -172,25 +159,6 @@ function Test-DbPasswordUrlSafe {
     }
 }
 
-# A managed Azure SQL target rejects a database password that contains the login name
-# -- or any 3+ character alphanumeric part of it -- failing CREATE USER with an opaque
-# "Msg 40632 ... not complex enough". Local SQL Server's CHECK_POLICY does not enforce
-# this (so it is applied only for a remote target; the caller gates it), which keeps
-# example passwords like 'EdFi-App-Local!2026' valid on a local instance. Split the
-# username on non-alphanumeric delimiters -- the Windows/Azure tokenization -- and
-# reject the password if it contains the whole name or any such token, case-insensitive.
-function Test-DbPasswordNotUsername {
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
-        [Parameter(Mandatory = $true)][string]$Username
-    )
-    foreach ($token in @($Username) + ($Username -split '[^A-Za-z0-9]+')) {
-        if ($token.Length -ge 3 -and $Password -match [regex]::Escape($token)) {
-            throw "The Admin App DB password must not contain the login name or a part of it ('$token'): a managed Azure SQL target rejects such a password (Msg 40632, 'not complex enough'). Choose a password with no 3+ character part of the username '$Username'."
-        }
-    }
-}
-
 $isRemote = Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost
 if ($isRemote) {
     Write-Host "Remote SQL target detected: $SqlServerHost,$SqlServerPort (local instance configuration skipped)."
@@ -224,18 +192,13 @@ if ($isRemote) {
     if (-not $SqlAdminPasswordPlain) { throw "The SQL admin password (-SqlAdminPassword) is empty." }
 }
 
-# sqlcmd server certificate trust. -C trusts the certificate without validating it,
-# which is safe only for a loopback target (an auto-generated self-signed certificate,
-# no machine-in-the-middle surface) or when the operator explicitly opts in with
-# -TrustServerCertificate. A remote target validates by default so the SQL login
-# password is never presented to a forged endpoint. Appended to every sqlcmd call
-# through Invoke-Sqlcmd-Quiet below.
-# NOTE the @(...) wrapper: `if (...) { @() } else { @('-C') }` unwraps the single-
-# element array to the bare string '-C', and splatting a STRING (@script:SqlTrustArgs)
-# iterates its characters -> '-','C', so sqlcmd sees a bogus '-' option. Wrapping the
-# whole conditional in @(...) forces a real array (empty or one element) that splats
-# as a single token.
-$script:SqlTrustArgs = @(if ($isRemote -and -not $TrustServerCertificate) { } else { '-C' })
+# sqlcmd connection encryption and server-certificate validation, decided once from
+# the resolved target and appended to every sqlcmd call through Invoke-Sqlcmd-Quiet
+# below: a remote target encrypts and validates (-N) so the SQL login password is
+# never presented to a forged endpoint, a loopback trusts its auto-generated
+# self-signed certificate (-C). See Get-SqlcmdSecurityArgs in sql-compat.ps1 for why
+# omitting both flags is NOT validation.
+$script:SqlSecurityArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost $SqlServerHost -TrustServerCertificate:$TrustServerCertificate)
 
 # Admin connection used for provisioning: local uses Windows Authentication against
 # the local instance; remote uses the SQL admin login against the target host.
@@ -324,10 +287,10 @@ if (-not $isRemote) {
 # NativeCommandError records and the script-wide Stop preference treats those
 # as terminating, so we temporarily relax the preference around the call.
 # Every call gets a query timeout (-t) so we never hang on a partially-up
-# server. Server-certificate trust ($script:SqlTrustArgs) is decided once from the
-# target: a loopback (or an explicit -TrustServerCertificate) trusts with -C; a
-# remote target validates the certificate (no -C) so the login password is never
-# presented to a forged endpoint.
+# server. Encryption and certificate validation ($script:SqlSecurityArgs) are decided
+# once from the target: a loopback (or an explicit -TrustServerCertificate) trusts
+# with -C; a remote target encrypts and validates with -N so the login password is
+# never presented to a forged endpoint.
 function Invoke-Sqlcmd-Quiet {
     param(
         [string[]]$SqlArgs,
@@ -371,7 +334,7 @@ function Invoke-Sqlcmd-Quiet {
         # Keep the output (stderr folded in) so a failing caller can show WHY
         # sqlcmd failed. SQL error messages never echo the statement text, so
         # secrets in $QueryText don't leak through it.
-        $script:LastSqlcmdOutput = (& sqlcmd @SqlArgs @script:SqlTrustArgs -t 10 2>&1 | ForEach-Object { "$_" }) -join [Environment]::NewLine
+        $script:LastSqlcmdOutput = (& sqlcmd @SqlArgs @script:SqlSecurityArgs -t 10 2>&1 | ForEach-Object { "$_" }) -join [Environment]::NewLine
     } finally {
         $ErrorActionPreference = $prev
         if ($Password) { Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue }

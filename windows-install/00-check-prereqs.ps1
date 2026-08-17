@@ -60,22 +60,10 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
-# Decide whether the mssql target is a local instance (loopback) or a remote server
-# such as a managed Azure SQL Database. A remote target has no local SQL Server to
-# check or configure. Mirrors Test-IsRemoteSqlTarget in the other install scripts.
-function Test-IsRemoteSqlTarget {
-    param([string]$SqlServerHost)
-    if ([string]::IsNullOrWhiteSpace($SqlServerHost)) { return $false }
-    $value = $SqlServerHost.Trim()
-    # Local named pipes (\\.\pipe\..., optionally np:-prefixed) are loopback by
-    # definition and would otherwise normalize to an empty host below.
-    if ($value -match '^(np:)?\\\\(\.|localhost|127\.0\.0\.1)\\') { return $false }
-    $target = ($value -replace '^(tcp|np|lpc|admin):', '') -split '[,\\]' | Select-Object -First 1
-    $target = $target.Trim().Trim('(', ')')
-    $loopback = @('local', 'localhost', '.', '127.0.0.1', '::1', '[::1]')
-    if ($env:COMPUTERNAME) { $loopback += $env:COMPUTERNAME }
-    return ($target -notin $loopback)
-}
+# Shared SQL-target helpers (Test-IsRemoteSqlTarget). A remote target has no local
+# SQL Server to check or configure.
+. "$PSScriptRoot\sql-compat.ps1"
+
 $isRemoteSql = ($DbEngine -eq 'mssql') -and (Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost)
 
 # Minimum versions enforced by the install scripts. The Node floor is

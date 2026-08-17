@@ -163,30 +163,14 @@ param(
 # to push through and report at the end.
 $ErrorActionPreference = 'Continue'
 
-# Decide whether the SQL target is a local instance (loopback) or a remote server
-# such as a managed Azure SQL Database. A remote target is torn down as a SQL admin
-# (no Windows Authentication) and its database is left intact (operator-owned).
-# Mirrors Test-IsRemoteSqlTarget in 02-prereqs-sql.ps1 / 05-deploy-api.ps1.
-function Test-IsRemoteSqlTarget {
-    param([string]$SqlServerHost)
-    if ([string]::IsNullOrWhiteSpace($SqlServerHost)) { return $false }
-    $value = $SqlServerHost.Trim()
-    # Local named pipes (\\.\pipe\..., optionally np:-prefixed) are loopback by
-    # definition and would otherwise normalize to an empty host below.
-    if ($value -match '^(np:)?\\\\(\.|localhost|127\.0\.0\.1)\\') { return $false }
-    $target = ($value -replace '^(tcp|np|lpc|admin):', '') -split '[,\\]' | Select-Object -First 1
-    $target = $target.Trim().Trim('(', ')')
-    $loopback = @('local', 'localhost', '.', '127.0.0.1', '::1', '[::1]')
-    if ($env:COMPUTERNAME) { $loopback += $env:COMPUTERNAME }
-    return ($target -notin $loopback)
-}
+# Shared SQL-target helpers. A remote target is torn down as a SQL admin (no Windows
+# Authentication) and its database is left intact (operator-owned).
+. "$PSScriptRoot\sql-compat.ps1"
+
 $isRemote = Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost
-# sqlcmd server-certificate trust for the remote drop: validate a remote certificate
-# by default, trust a loopback (or an explicit -TrustServerCertificate).
-# @(...) wrapper is required: `if (...) { @() } else { @('-C') }` unwraps the single-
-# element array to the bare string '-C', and splatting a string iterates its characters
-# ('-','C'), so sqlcmd sees a bogus '-' option. @(...) forces a real (possibly empty) array.
-$sqlTrustArgs = @(if ($isRemote -and -not $TrustServerCertificate) { } else { '-C' })
+# sqlcmd encryption/certificate flags for the remote drop: a remote target encrypts
+# and validates (-N), a loopback trusts its self-signed certificate (-C).
+$sqlSecurityArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost $SqlServerHost -TrustServerCertificate:$TrustServerCertificate)
 
 $results = [System.Collections.Generic.List[object]]::new()
 function Record {
@@ -471,11 +455,12 @@ IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$safeUserLiteral
     DROP USER [$safeUser];
 "@
                 # Pass the admin password via SQLCMDPASSWORD (off the command line);
-                # cleared in the finally. Trust follows the target ($sqlTrustArgs):
-                # a remote certificate is validated unless -TrustServerCertificate.
+                # cleared in the finally. Encryption/validation follows the target
+                # ($sqlSecurityArgs): a remote certificate is validated unless
+                # -TrustServerCertificate.
                 $env:SQLCMDPASSWORD = $adminPwPlain
                 try {
-                    & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $SqlAdminUsername -d $DatabaseName @sqlTrustArgs -b -l 30 -Q $dropUser 2>&1 | Out-Null
+                    & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $SqlAdminUsername -d $DatabaseName @sqlSecurityArgs -b -l 30 -Q $dropUser 2>&1 | Out-Null
                     if ($LASTEXITCODE -eq 0) {
                         Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "OK" "SQL admin '$SqlAdminUsername'"
                     } else {

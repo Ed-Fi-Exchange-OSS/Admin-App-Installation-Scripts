@@ -258,24 +258,10 @@ function Test-DbPasswordUrlSafe {
     }
 }
 
-# Decide whether the mssql target is a local instance (loopback) or a remote server
-# such as a managed Azure SQL Database. A remote target validates the server
-# certificate and (via 02-prereqs-sql.ps1) is provisioned as a contained user.
-# Mirrors the loopback normalization in Get-SqlcmdTrustArgs (quick-start/ and
-# edorg-sync/ compat.ps1) and Test-IsRemoteSqlTarget in 02-prereqs-sql.ps1.
-function Test-IsRemoteSqlTarget {
-    param([string]$SqlServerHost)
-    if ([string]::IsNullOrWhiteSpace($SqlServerHost)) { return $false }
-    $value = $SqlServerHost.Trim()
-    # Local named pipes (\\.\pipe\..., optionally np:-prefixed) are loopback by
-    # definition and would otherwise normalize to an empty host below.
-    if ($value -match '^(np:)?\\\\(\.|localhost|127\.0\.0\.1)\\') { return $false }
-    $target = ($value -replace '^(tcp|np|lpc|admin):', '') -split '[,\\]' | Select-Object -First 1
-    $target = $target.Trim().Trim('(', ')')
-    $loopback = @('local', 'localhost', '.', '127.0.0.1', '::1', '[::1]')
-    if ($env:COMPUTERNAME) { $loopback += $env:COMPUTERNAME }
-    return ($target -notin $loopback)
-}
+# Shared SQL-target helpers (Test-IsRemoteSqlTarget, Get-SqlcmdSecurityArgs). A remote
+# target validates the server certificate and (via 02-prereqs-sql.ps1) is provisioned
+# as a contained user.
+. "$PSScriptRoot\sql-compat.ps1"
 
 # Secrets arrive as SecureString (kept off the command line); unwrap the ones
 # supplied to plaintext locals for sqlcmd -P and the production.js patch.
@@ -296,14 +282,12 @@ if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbUsername   -L
 
 # Remote/Azure SQL target (mssql only). A non-loopback -SqlServerHost switches to
 # remote mode: the app validates the server certificate (DB_TRUST_CERTIFICATE=false)
-# and the installer's sqlcmd calls validate too (no -C), unless -TrustServerCertificate
-# is set. $script:SqlTrustArgs is appended to the raw sqlcmd calls (key guard, OIDC
-# reconcile) below; DB_TRUST_CERTIFICATE is derived from the same decision.
+# and the installer's sqlcmd calls encrypt and validate too (-N), unless
+# -TrustServerCertificate is set. $script:SqlSecurityArgs is appended to the raw sqlcmd
+# calls (key guard, OIDC reconcile) below; DB_TRUST_CERTIFICATE is derived from the
+# same decision.
 $isRemoteSql = ($DbEngine -eq 'mssql') -and (Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost)
-# @(...) wrapper is required: `if (...) { @() } else { @('-C') }` unwraps the single-
-# element array to the bare string '-C', and splatting a string iterates its characters
-# ('-','C'), so sqlcmd sees a bogus '-' option. @(...) forces a real (possibly empty) array.
-$script:SqlTrustArgs = @(if ($isRemoteSql -and -not $TrustServerCertificate) { } else { '-C' })
+$script:SqlSecurityArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost $SqlServerHost -TrustServerCertificate:$TrustServerCertificate)
 if ($isRemoteSql) { Write-Host "Remote SQL target: $SqlServerHost,$SqlServerPort (server certificate $(if ($TrustServerCertificate) { 'trusted (-TrustServerCertificate)' } else { 'validated' }))." }
 
 $apiBuildDir = "$SourcePath\dist\packages\api"
@@ -640,10 +624,10 @@ if ($freshKeyGenerated -and $DbEngine -eq 'mssql' -and -not $ForceKeyRotation) {
     # sqlcmd process command line; cleared in the finally.
     $env:SQLCMDPASSWORD = $AppDbPasswordPlain
     try {
-        # Server-certificate trust follows the resolved target ($script:SqlTrustArgs):
+        # Encryption/validation follows the resolved target ($script:SqlSecurityArgs):
         # a loopback (or an explicit -TrustServerCertificate) trusts with -C; a remote
-        # target (e.g. Azure SQL) validates the certificate.
-        $out = & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -h -1 -W -t 10 `
+        # target (e.g. Azure SQL) encrypts and validates the certificate with -N.
+        $out = & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlSecurityArgs -h -1 -W -t 10 `
             -Q "SET NOCOUNT ON; IF OBJECT_ID('sb_environment','U') IS NOT NULL SELECT COUNT(*) FROM sb_environment ELSE SELECT 0;" 2>$null
         if ($LASTEXITCODE -eq 0 -and $out) { $envCount = [int]("$($out | Select-Object -First 1)").Trim() }
     } catch {
@@ -930,11 +914,12 @@ END
         # under load.
         # -I (QUOTED_IDENTIFIER ON) is required: the [oidc]/[user] schema carries
         # filtered/computed-column indexes whose INSERT/UPDATE errors with Msg 1934
-        # under sqlcmd's default QUOTED_IDENTIFIER OFF. Trust follows the resolved
-        # target ($script:SqlTrustArgs): loopback/opt-in trusts, remote validates.
+        # under sqlcmd's default QUOTED_IDENTIFIER OFF. Encryption/validation follows
+        # the resolved target ($script:SqlSecurityArgs): loopback/opt-in trusts, a
+        # remote target encrypts and validates.
         $oidcUpsertExit = 1
         try {
-            & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -I -b -l 30 -i $oidcQueryFile 1>$null 2>$null
+            & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlSecurityArgs -I -b -l 30 -i $oidcQueryFile 1>$null 2>$null
             $oidcUpsertExit = $LASTEXITCODE
         } catch {
             $oidcUpsertExit = 1

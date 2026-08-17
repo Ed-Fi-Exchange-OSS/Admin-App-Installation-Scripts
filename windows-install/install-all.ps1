@@ -412,48 +412,16 @@ function Test-DbPasswordUrlSafe {
     }
 }
 
-# A managed Azure SQL target rejects a database password that contains the login name
-# -- or any 3+ character alphanumeric part of it -- failing CREATE USER with an opaque
-# "Msg 40632 ... not complex enough". Local SQL Server does not enforce this, so the
-# caller applies it only for a remote target (keeping local example passwords valid).
-# Mirrors Test-DbPasswordNotUsername in 02-prereqs-sql.ps1.
-function Test-DbPasswordNotUsername {
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
-        [Parameter(Mandatory = $true)][string]$Username
-    )
-    foreach ($token in @($Username) + ($Username -split '[^A-Za-z0-9]+')) {
-        if ($token.Length -ge 3 -and $Password -match [regex]::Escape($token)) {
-            throw "The Admin App DB password must not contain the login name or a part of it ('$token'): a managed Azure SQL target rejects such a password (Msg 40632, 'not complex enough'). Choose a password with no 3+ character part of the username '$Username'."
-        }
-    }
-}
+# Shared SQL-target helpers (Test-IsRemoteSqlTarget, Get-SqlcmdSecurityArgs,
+# Test-DbPasswordNotUsername). A remote target is provisioned as the SQL admin and
+# validates the server certificate.
+. "$PSScriptRoot\sql-compat.ps1"
 
-# Decide whether the mssql target is a local instance (loopback) or a remote server
-# such as a managed Azure SQL Database. A remote target is provisioned as the SQL
-# admin and validates the server certificate. Mirrors Test-IsRemoteSqlTarget in
-# 02-prereqs-sql.ps1 / 05-deploy-api.ps1.
-function Test-IsRemoteSqlTarget {
-    param([string]$SqlServerHost)
-    if ([string]::IsNullOrWhiteSpace($SqlServerHost)) { return $false }
-    $value = $SqlServerHost.Trim()
-    # Local named pipes (\\.\pipe\..., optionally np:-prefixed) are loopback by
-    # definition and would otherwise normalize to an empty host below.
-    if ($value -match '^(np:)?\\\\(\.|localhost|127\.0\.0\.1)\\') { return $false }
-    $target = ($value -replace '^(tcp|np|lpc|admin):', '') -split '[,\\]' | Select-Object -First 1
-    $target = $target.Trim().Trim('(', ')')
-    $loopback = @('local', 'localhost', '.', '127.0.0.1', '::1', '[::1]')
-    if ($env:COMPUTERNAME) { $loopback += $env:COMPUTERNAME }
-    return ($target -notin $loopback)
-}
-# $script:SqlTrustArgs is appended to the post-boot sqlcmd calls (user-table probe,
-# admin-user upsert, OIDC-id read) so they trust a loopback (or opt-in) and validate
-# a remote certificate, matching how 02/05 connect.
+# $script:SqlSecurityArgs is appended to the post-boot sqlcmd calls (user-table probe,
+# admin-user upsert, OIDC-id read) so they trust a loopback (or opt-in) and encrypt +
+# validate against a remote certificate, matching how 02/05 connect.
 $isRemoteSql = ($DbEngine -eq 'mssql') -and (Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost)
-# @(...) wrapper is required: `if (...) { @() } else { @('-C') }` unwraps the single-
-# element array to the bare string '-C', and splatting a string iterates its characters
-# ('-','C'), so sqlcmd sees a bogus '-' option. @(...) forces a real (possibly empty) array.
-$script:SqlTrustArgs = @(if ($isRemoteSql -and -not $TrustServerCertificate) { } else { '-C' })
+$script:SqlSecurityArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost $SqlServerHost -TrustServerCertificate:$TrustServerCertificate)
 
 # Announce a remote SQL target up front (before the admin credential prompt) so a
 # typo in -SqlServerHost -- anything that is not a loopback name is treated as remote
@@ -1017,11 +985,12 @@ if ($apiOk) {
         try {
             if ($DbEngine -eq 'mssql') {
                 # SQLCMDPASSWORD instead of -P keeps the password off the sqlcmd
-                # process command line; cleared in the finally below. Server-
-                # certificate trust follows the resolved target ($script:SqlTrustArgs):
-                # a loopback (or -TrustServerCertificate) trusts, a remote target validates.
+                # process command line; cleared in the finally below. Encryption and
+                # certificate validation follow the resolved target
+                # ($script:SqlSecurityArgs): a loopback (or -TrustServerCertificate)
+                # trusts, a remote target encrypts and validates.
                 $env:SQLCMDPASSWORD = $AppDbPasswordPlain
-                & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
+                & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlSecurityArgs -Q "SET NOCOUNT ON; SELECT TOP 1 1 FROM [user];" 2>&1 | Out-Null
             } else {
                 # Probe via the container's psql (postgres-only -- avoids
                 # requiring psql.exe on the host) when docker is in play;
@@ -1074,8 +1043,8 @@ UPDATE [user] SET roleId = 2, isActive = 1
         try {
             # -I (QUOTED_IDENTIFIER ON): the [user] table carries filtered/computed-
             # column indexes whose INSERT/UPDATE errors with Msg 1934 under sqlcmd's
-            # default QUOTED_IDENTIFIER OFF. Trust follows the resolved target.
-            & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -I -Q $upsertQuery 1>$null 2>$null
+            # default QUOTED_IDENTIFIER OFF. Encryption/validation follows the target.
+            & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlSecurityArgs -I -Q $upsertQuery 1>$null 2>$null
             $upsertExit = $LASTEXITCODE
         } finally {
             Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
@@ -1132,7 +1101,7 @@ UPDATE "user" SET "roleId" = 2, "isActive" = true
     if ($DbEngine -eq 'mssql') {
         $env:SQLCMDPASSWORD = $AppDbPasswordPlain
         try {
-            $idOut = & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlTrustArgs -h -1 -W -Q "SET NOCOUNT ON; SELECT TOP 1 id FROM [oidc] WHERE clientId = '$oidcClientIdSql';" 2>$null
+            $idOut = & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlSecurityArgs -h -1 -W -Q "SET NOCOUNT ON; SELECT TOP 1 id FROM [oidc] WHERE clientId = '$oidcClientIdSql';" 2>$null
             if ($LASTEXITCODE -eq 0 -and "$idOut" -match '(\d+)') { $oidcRowId = [int]$Matches[1] }
         } finally { Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue }
     } else {
