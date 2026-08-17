@@ -32,7 +32,7 @@ You do **not** need to clone the Admin App application repository yourself: `ins
 
 ## Quick start (local Keycloak)
 
-`install-all.ps1` is the "run everything" path. Pick the identity provider with the mandatory **`-IdpProvider`** (`keycloak` | `microsoft` | `google` | `other`). `keycloak` stands up a local Keycloak as the example identity provider; for an external provider see [Other identity providers](#other-identity-providers).
+`install-all.ps1` is the "run everything" path. Pick the identity provider with the mandatory **`-IdpProvider`** (`keycloak` | `microsoft` | `google` | `auth0` | `other`). `keycloak` stands up a local Keycloak as the example identity provider; for an external provider see [Other identity providers](#other-identity-providers).
 
 ```powershell
 # One-time, current-process-only bypass so the first script can run. It affects only
@@ -60,7 +60,7 @@ When `install-all.ps1` finishes, open `https://localhost:4443/` and sign in with
 - **All password/secret parameters are `[SecureString]`.** Supply each with `(Read-Host -AsSecureString '...')` as shown above, never a plaintext literal — a plaintext string fails parameter binding before the script runs, and a literal on the command line would be captured in your shell history.
 - **`-AppDbPassword`** *(mssql)*: password for the dedicated least-privilege login (`edfi_adminapp`) the Admin App connects as (`db_owner` on `sbaa`, non-`sa`). Required in the default `mssql` mode; the app uses it at runtime, so provisioning and deploy must receive the same value. Must satisfy the Windows password policy `CHECK_POLICY` enforces — length ≥ 8 and at least 3 of 4 character categories (uppercase, lowercase, digit, symbol); weak passwords are rejected up front. The same rule applies to every SQL login the scripts create.
 - **SQL Server bootstrap runs under Windows Authentication.** Run the install as a Windows account that is a SQL Server sysadmin: `02-prereqs-sql.ps1` creates the database and the `edfi_adminapp` login over Windows authentication and never enables, resets, or uses the `sa` login. There is no `-SaPassword` parameter.
-- **`-IdpProvider`** *(mandatory)*: `keycloak` | `microsoft` | `google` | `other`. `keycloak` runs the local example identity provider; the others target an external OIDC provider (see [Other identity providers](#other-identity-providers)).
+- **`-IdpProvider`** *(mandatory)*: `keycloak` | `microsoft` | `google` | `auth0` | `other`. `keycloak` runs the local example identity provider; the others target an external OIDC provider (see [Other identity providers](#other-identity-providers)).
 - **`-OidcClientSecret`** *(all modes)*: the OIDC client secret. For `keycloak` it's the secret set on the `edfiadminapp` client (you pick it, 32+ chars recommended); for external providers it's the secret from your app registration.
 - **`-KeycloakAdminPassword`** *(keycloak only)*: Password for the master-realm admin user auto-created when Keycloak first starts.
 - **`-TestUserPassword`** *(keycloak only)*: Password for the seeded `admin@example.com` user in the `edfi` realm — what you type on the Keycloak login screen.
@@ -108,14 +108,14 @@ Numbered scripts map to the official guide's section order. The **generic path**
 
 | Script | Purpose |
 |---|---|
-| `idp-entra-setup.ps1` | Optional Entra helper. Creates (or reconciles) a single-tenant Entra App Registration via the Microsoft Graph PowerShell SDK: sets the Web redirect URI, adds the `email` ID-token optional claim, adds the delegated `openid`/`email` Microsoft Graph permissions, creates a client secret, and grants admin consent when the running identity is privileged enough (otherwise it prints the exact manual consent URL). It outputs the client id, client secret, and issuer to pass to `install-all.ps1 -IdpProvider microsoft`. Separate from the install: `install-all.ps1` does not call it. Google Workspace is intentionally not covered (Google exposes no supported API to create the standard Web OAuth client the Admin App needs), so for Google the OAuth client stays a manual step. |
+| `idp-entra-setup.ps1` | Optional Entra helper. Creates (or reconciles) a single-tenant Entra App Registration via the Microsoft Graph PowerShell SDK: sets the Web redirect URI, adds the `email` ID-token optional claim, adds the delegated `openid`/`email` Microsoft Graph permissions, creates a client secret, and grants admin consent when the running identity is privileged enough (otherwise it prints the exact manual consent URL). It outputs the client id, client secret, and issuer to pass to `install-all.ps1 -IdpProvider microsoft`. Separate from the install: `install-all.ps1` does not call it. Entra is the only provider with a helper: Google Workspace is intentionally not covered (Google exposes no supported API to create the standard Web OAuth client the Admin App needs) and the Auth0 application is registered in the Auth0 dashboard (see [Auth0](#auth0)). |
 
 ### Transversal
 
 | Script | Purpose |
 |---|---|
 | `setup-vm-prereqs.ps1` | OS-level installs only: IIS features, SQL Server Developer, Git. Scans first, installs only what's missing. |
-| `install-all.ps1` | Master orchestrator. Pick the identity provider with `-IdpProvider` (keycloak/microsoft/google/other). Pre-flight check + all phases + smoke test. |
+| `install-all.ps1` | Master orchestrator. Pick the identity provider with `-IdpProvider` (keycloak/microsoft/google/auth0/other). Pre-flight check + all phases + smoke test. |
 | `yopass-docker.ps1` | Optional. Stands up a local Yopass + memcached stack via `docker\docker-compose.yopass.yml`. Only runs with `install-all -SetupYopassDocker` (or directly). |
 | `uninstall.ps1` | Reverses the generic install: IIS sites/App Pool/files, the `sbaa` database, docker Postgres + Yopass stacks, `C:\npm-cache`. Detects Keycloak leftovers and suggests `uninstall-keycloak.ps1` (does not touch them). Per-step OK/SKIP/WARN/FAIL ledger. |
 | `uninstall-keycloak.ps1` | Tears down the local Keycloak identity provider: stops the process, deletes the install directory, unsets `JAVA_HOME`. Leaves the JDK install in place. |
