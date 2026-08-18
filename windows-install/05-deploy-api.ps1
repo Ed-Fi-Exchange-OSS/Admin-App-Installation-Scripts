@@ -966,10 +966,29 @@ UPDATE "oidc" SET "issuer" = '$oidcIssuerSql', "clientSecret" = '$oidcSecretSql'
     }
 }
 
-# Trigger startup only if something actually changed
+# Trigger startup only if something actually changed. Recycle the pool through the
+# ServerManager API rather than touching web.config's timestamp: on a re-deploy over a
+# running site the IIS worker process holds that file, so the write fails with "the
+# process cannot access the file because it is being used by another process" and takes
+# the whole install down after the configuration was already written. Recycling is the
+# effect the touch was after, and it works whether or not the site is serving.
 if ($webConfigChanged -or $prodJsChanged) {
-    (Get-Item "$DestPath\web.config").LastWriteTime = Get-Date
-    Write-Host "Touched web.config to recycle the app pool."
+    $recycleManager = New-IisServerManager
+    try {
+        $recyclePool = $recycleManager.ApplicationPools[$AppPoolName]
+        # Recycle throws on a stopped pool, which does not need one: it reads the new
+        # configuration when it next starts.
+        if ($recyclePool -and "$($recyclePool.State)" -eq 'Started') {
+            $recyclePool.Recycle() | Out-Null
+            Write-Host "Recycled app pool '$AppPoolName' to pick up the new configuration."
+        } else {
+            Write-Host "App pool '$AppPoolName' is not running; it picks up the new configuration on start."
+        }
+    } catch {
+        # The deploy itself succeeded by this point, so a failed recycle is a warning
+        # with a manual step, not a reason to fail the install.
+        Write-Warning "Could not recycle app pool '$AppPoolName' ($($_.Exception.Message)). Recycle it manually so the API picks up the new configuration."
+    }
 } else {
     Write-Host "No file changes — skipping app pool recycle."
 }
