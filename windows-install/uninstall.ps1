@@ -450,21 +450,36 @@ if ($KeepDatabase) {
                 Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "SKIP" "no -SqlAdminPassword supplied"
             } else {
                 $adminPwPlain = [System.Net.NetworkCredential]::new('', $SqlAdminPassword).Password
+                # Hand any schema the app user owns back to dbo before dropping it.
+                # The Admin App creates a schema at runtime (a 'cert' schema on first
+                # boot) while connected as this db_owner user, which makes the user its
+                # owner, and SQL Server refuses to drop a principal that owns a schema
+                # (Msg 15138). Reassigning to dbo keeps the schema and its objects
+                # intact -- only ownership moves -- so the operator's database is left
+                # as it was apart from the user. Built as dynamic SQL because
+                # ALTER AUTHORIZATION takes no variable for the schema name.
                 $dropUser = @"
+DECLARE @reassign nvarchar(max) = N'';
+SELECT @reassign = @reassign + N'ALTER AUTHORIZATION ON SCHEMA::' + QUOTENAME(s.name) + N' TO dbo; '
+FROM sys.schemas s
+JOIN sys.database_principals p ON s.principal_id = p.principal_id
+WHERE p.name = N'$safeUserLiteral';
+IF @reassign <> N'' EXEC sp_executesql @reassign;
 IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$safeUserLiteral' AND type = 'S')
     DROP USER [$safeUser];
 "@
                 # Pass the admin password via SQLCMDPASSWORD (off the command line);
                 # cleared in the finally. Encryption/validation follows the target
                 # ($sqlSecurityArgs): a remote certificate is validated unless
-                # -TrustServerCertificate.
+                # -TrustServerCertificate. Keep sqlcmd's output so a failure reports
+                # what SQL Server actually said instead of a guess.
                 $env:SQLCMDPASSWORD = $adminPwPlain
                 try {
-                    & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $SqlAdminUsername -d $DatabaseName @sqlSecurityArgs -b -l 30 -Q $dropUser 2>&1 | Out-Null
+                    $dropOutput = (& sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $SqlAdminUsername -d $DatabaseName @sqlSecurityArgs -b -l 30 -Q $dropUser 2>&1 | ForEach-Object { "$_" }) -join ' '
                     if ($LASTEXITCODE -eq 0) {
-                        Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "OK" "SQL admin '$SqlAdminUsername'"
+                        Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "OK" "SQL admin '$SqlAdminUsername'; any schema it owned was reassigned to dbo"
                     } else {
-                        Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "FAIL" "sqlcmd exit $LASTEXITCODE (a user that still owns objects cannot be dropped)"
+                        Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "FAIL" "sqlcmd exit $LASTEXITCODE -- $($dropOutput.Trim())"
                     }
                 } catch {
                     Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "FAIL" $_.Exception.Message
