@@ -194,6 +194,15 @@ if (-not $PostgresAppUser) { $PostgresAppUser = Get-EnvValue 'POSTGRES_APP_USER'
 if (-not $UsePostgresDocker -and (Test-EnvTrue 'USE_POSTGRES_DOCKER')) { $UsePostgresDocker = $true }
 if (-not $PostgresContainerName) { $PostgresContainerName = Get-EnvValue 'POSTGRES_CONTAINER' 'edfiadminapp-postgres' }
 
+# Windows authentication cannot reach a managed Azure SQL Database. Fail here
+# rather than at the sqlcmd call, which reports it as a raw driver error --
+# and before the password prompt below, which it would make pointless.
+if ($DbEngine -eq 'mssql')
+{
+    Assert-SqlAuthSupported -SqlServer $SqlServer -UseIntegratedSecurity ([bool]$UseIntegratedSecurity) `
+        -UsernameParameterName '-DbUsername' -PasswordParameterName '-DbPassword'
+}
+
 # Passwords not passed as a parameter or set in the .env are prompted for
 # (masked), like run.ps1.
 if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $DbPassword)

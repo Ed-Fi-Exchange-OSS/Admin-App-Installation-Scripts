@@ -139,6 +139,10 @@ $ErrorActionPreference = 'Stop'
 # Engine-specific required-arg validation.
 if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $DbPassword) { throw "-DbPassword is required when -DbEngine is 'mssql' (the default) without -UseIntegratedSecurity." }
 if ($UseIntegratedSecurity -and $DbEngine -ne 'mssql') { throw "-UseIntegratedSecurity only applies when -DbEngine is 'mssql'." }
+# Windows authentication cannot reach a managed Azure SQL Database. Fail here
+# rather than at the sqlcmd call, which reports it as a raw driver error.
+Assert-SqlAuthSupported -SqlServer $SqlServer -UseIntegratedSecurity ([bool]$UseIntegratedSecurity) `
+    -UsernameParameterName '-DbUsername' -PasswordParameterName '-DbPassword'
 if ($DbEngine -eq 'pgsql' -and -not $PostgresPassword) { throw "-PostgresPassword is required when -DbEngine is 'pgsql'." }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'." }
 
