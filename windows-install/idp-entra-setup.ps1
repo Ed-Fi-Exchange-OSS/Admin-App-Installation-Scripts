@@ -21,7 +21,9 @@ Steps (each idempotent):
   1. Ensure the Microsoft.Graph.Applications module is available (auto-installs
      for CurrentUser unless -SkipModuleInstall).
   2. Connect-MgGraph with Application.ReadWrite.All (and, unless
-     -SkipAdminConsent, DelegatedPermissionGrant.ReadWrite.All for consent).
+     -SkipAdminConsent, DelegatedPermissionGrant.ReadWrite.All for consent; when
+     the tenant denies that second scope at sign-in, reconnect without it and fall
+     back to the manual consent URL).
   3. Create (or reuse) a single-tenant App Registration (SignInAudience
      AzureADMyOrg) with the Web redirect URI, the 'email' ID-token optional
      claim, and the delegated openid + email Microsoft Graph permissions.
@@ -63,7 +65,15 @@ https://<host>/adminapp-api/api/auth/callback/1.
 Friendly name recorded on the client secret. Default: "AdminApp OIDC secret".
 
 .PARAMETER SecretValidMonths
-Client-secret lifetime in months. Default: 12.
+Client-secret lifetime in months, 1 to 24 (the longest the Entra portal offers).
+Default: 12.
+
+.PARAMETER ReplaceExistingSecret
+Switch -- once the new secret exists, remove the registration's other secrets that
+carry the same -SecretDisplayName, i.e. the ones earlier runs of this script left
+behind. Off by default, so a re-run keeps them; use it to hold exactly one active
+secret per registration. Secrets added by hand, or under a different display name,
+are never touched.
 
 .PARAMETER SkipAdminConsent
 Switch -- do not attempt to grant admin consent. The delegated openid/email scopes
@@ -94,9 +104,12 @@ encryption key). The value is always available on the result object as a
 SecureString for programmatic (piped) use.
 
 .OUTPUTS
-A PSCustomObject with ClientId, ClientSecret (a SecureString), Issuer, RedirectUri,
-TenantId, SignedInUser, and SuggestedAdminUsername (the signed-in account's mail,
-i.e. the source of Entra's email claim, or null when it has none). Capture it
+A PSCustomObject with Status, Warnings, ClientId, ClientSecret (a SecureString),
+Issuer, RedirectUri, TenantId, SignedInUser, and SuggestedAdminUsername (the
+signed-in account's mail, i.e. the source of Entra's email claim, or null when it
+has none). Status is 'Ready', or 'PartiallyReady' when the registration exists but
+something still needs a manual follow-up (admin consent not granted, or the secret
+file not written or not locked down); Warnings lists those items. Capture it
 (e.g. $r = .\idp-entra-setup.ps1 ...) and feed $r.ClientId / $r.ClientSecret /
 $r.Issuer to install-all.ps1 -IdpProvider microsoft. Because ClientSecret is a
 SecureString, it drops straight into install-all's -OidcClientSecret with no
@@ -131,7 +144,9 @@ param(
     [int]$RedirectCallbackId = 1,
     [string]$RedirectUri,
     [string]$SecretDisplayName = "AdminApp OIDC secret",
+    [ValidateRange(1, 24)]
     [int]$SecretValidMonths = 12,
+    [switch]$ReplaceExistingSecret,
     [switch]$SkipAdminConsent,
     [switch]$SkipModuleInstall,
     [switch]$UseDeviceCode,
@@ -193,8 +208,9 @@ Import-Module Microsoft.Graph.Applications
 # --- 2. Connect --------------------------------------------------------------
 # User.Read lets the script read the signed-in identity (/me) afterwards, to
 # suggest -AdminUsername from that account's mail (the source of Entra's email claim).
+$consentScope = 'DelegatedPermissionGrant.ReadWrite.All'
 $scopes = @('Application.ReadWrite.All', 'User.Read')
-if (-not $SkipAdminConsent) { $scopes += 'DelegatedPermissionGrant.ReadWrite.All' }
+if (-not $SkipAdminConsent) { $scopes += $consentScope }
 
 $connectArgs = @{ Scopes = $scopes; NoWelcome = $true }
 if ($TenantId) { $connectArgs.TenantId = $TenantId }
@@ -211,8 +227,25 @@ if ($UseDeviceCode) {
 } else {
     Write-Host "Connecting to Microsoft Graph (a browser sign-in may open)..."
 }
+# The consent scope needs tenant admin approval of its own, so a tenant that has
+# approved Application.ReadWrite.All for the Graph SDK but not this one fails the
+# whole sign-in. That would strand the operator before step 5 ever prints the manual
+# consent URL, so drop the scope and reconnect: creating the registration only needs
+# Application.ReadWrite.All, and consent then falls back to that URL.
+$consentScopeDenied = $false
 try {
-    Connect-MgGraph @connectArgs
+    try {
+        Connect-MgGraph @connectArgs
+    } catch {
+        if ($SkipAdminConsent) { throw }
+        Write-Host ""
+        Write-Host "[WARN] Sign-in failed while requesting $($consentScope):" -ForegroundColor Yellow
+        Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "       Retrying without it; admin consent becomes a manual step." -ForegroundColor Yellow
+        $consentScopeDenied = $true
+        $connectArgs.Scopes = @($scopes | Where-Object { $_ -ne $consentScope })
+        Connect-MgGraph @connectArgs
+    }
 } finally {
     if ($UseDeviceCode) { $InformationPreference = $prevInformationPreference }
 }
@@ -277,7 +310,11 @@ if ($existingApp) {
         -RequiredResourceAccess $requiredResourceAccess | Out-Null
     $app = Get-MgApplication -ApplicationId $existingApp.Id
     Write-Host "Configuration reconciled."
-    Write-Host "NOTE: existing client secrets are left in place; a NEW secret is created below." -ForegroundColor DarkGray
+    if ($ReplaceExistingSecret) {
+        Write-Host "NOTE: a NEW secret is created below; earlier ones named '$SecretDisplayName' are then removed (-ReplaceExistingSecret)." -ForegroundColor DarkGray
+    } else {
+        Write-Host "NOTE: existing client secrets are left in place; a NEW secret is created below. Pass -ReplaceExistingSecret to drop the earlier ones." -ForegroundColor DarkGray
+    }
 } else {
     Write-Host "Creating App Registration '$DisplayName'..."
     $app = New-MgApplication `
@@ -304,12 +341,44 @@ $secretResult = Add-MgApplicationPassword -ApplicationId $app.Id -PasswordCreden
 $clientSecret = $secretResult.SecretText
 Write-Host "Client secret created (id $($secretResult.KeyId), expires $($endDate.ToString('yyyy-MM-dd')))." -ForegroundColor Green
 
+# Every run mints a secret, so repeated runs (a retry, a redirect-uri correction)
+# leave credentials behind that still authenticate. -ReplaceExistingSecret removes
+# the ones an earlier run of this script left, matched on the display name so a
+# secret added by hand is never touched. Best-effort: the new secret already works,
+# so a cleanup failure is a warning on the run, not a failure of it.
+$staleSecretsRemoved = 0
+$secretCleanupWarning = $null
+if ($ReplaceExistingSecret) {
+    try {
+        $staleSecrets = @((Get-MgApplication -ApplicationId $app.Id).PasswordCredentials |
+            Where-Object { $_.KeyId -ne $secretResult.KeyId -and $_.DisplayName -eq $SecretDisplayName })
+        foreach ($staleSecret in $staleSecrets) {
+            Remove-MgApplicationPassword -ApplicationId $app.Id -KeyId $staleSecret.KeyId
+            $staleSecretsRemoved++
+        }
+        if ($staleSecretsRemoved -gt 0) {
+            Write-Host "Removed $staleSecretsRemoved earlier secret(s) named '$SecretDisplayName' (-ReplaceExistingSecret)." -ForegroundColor Yellow
+        } else {
+            Write-Host "No earlier secret named '$SecretDisplayName' to remove." -ForegroundColor DarkGray
+        }
+    } catch {
+        $secretCleanupWarning = "the earlier client secrets could not be removed ($($_.Exception.Message)); delete them in the Entra portal"
+        Write-Warning "The new secret was created, but $secretCleanupWarning."
+    }
+}
+
 # --- 5. Admin consent --------------------------------------------------------
 $consentGranted = $false
 $adminConsentUrl = "https://login.microsoftonline.com/$resolvedTenantId/adminconsent?client_id=$clientId"
 
 if ($SkipAdminConsent) {
     Write-Host "Skipping admin consent (-SkipAdminConsent). openid/email are user-consentable at first sign-in." -ForegroundColor Yellow
+} elseif ($consentScopeDenied) {
+    Write-Host ""
+    Write-Host "[WARN] Admin consent not attempted: the sign-in could not obtain $($consentScope)." -ForegroundColor Yellow
+    Write-Host "       Grant it manually (a privileged admin opens this URL once):" -ForegroundColor Yellow
+    Write-Host "         $adminConsentUrl"
+    Write-Host "       Alternatively, openid/email are user-consentable at first sign-in." -ForegroundColor DarkGray
 } else {
     Write-Host "Granting admin consent for delegated openid + email..."
     try {
@@ -398,6 +467,7 @@ Copy the secret into your secret store, then you may delete this file.
 # showing the secret inline, so it is never lost) from an ACL failure (file written
 # but not locked down -- warn, keep the console redacted since the file holds it).
 $secretWritten = $false
+$secretAclRestricted = $false
 $secretFileStatus = "(not written)"
 try {
     $secretDir = Split-Path $SecretOutFile -Parent
@@ -414,6 +484,7 @@ try {
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'Allow')))
         }
         Set-Acl -Path $SecretOutFile -AclObject $acl
+        $secretAclRestricted = $true
         $secretFileStatus = "$SecretOutFile (Administrators-only)"
     } catch {
         Write-Warning "Wrote the secret file but could not restrict its ACL ($($_.Exception.Message)). It holds the client secret -- protect or delete it manually: $SecretOutFile"
@@ -427,9 +498,33 @@ try {
 # a standalone operator does not lose the one-time value.
 $secretDisplay = if ($ShowSecret -or -not $secretWritten) { $clientSecret } else { '(redacted -- see the protected file below)' }
 
+# The registration can be usable and still need a manual follow-up: consent this
+# identity could not grant, a secret file that could not be written or locked down.
+# Report that as PartiallyReady rather than SUCCESS, and carry it on the result
+# object so a caller can branch on it without scraping the console. An explicit
+# -SkipAdminConsent is an operator decision, not an incomplete run.
+$warnings = @()
+if (-not $consentGranted -and -not $SkipAdminConsent) {
+    $warnings += 'admin consent was not granted: open the admin-consent URL above, or let the first sign-in consent openid/email'
+}
+if (-not $secretWritten) {
+    $warnings += 'the client secret file could not be written: copy the secret shown above before closing this window'
+} elseif (-not $secretAclRestricted) {
+    $warnings += "the client secret file is not ACL-restricted: protect or delete $SecretOutFile by hand"
+}
+if ($secretCleanupWarning) { $warnings += $secretCleanupWarning }
+$status = if ($warnings.Count -eq 0) { 'Ready' } else { 'PartiallyReady' }
+
 Write-Host ""
-Write-Host "SUCCESS: Entra App Registration ready." -ForegroundColor Green
+if ($status -eq 'Ready') {
+    Write-Host "SUCCESS: Entra App Registration ready." -ForegroundColor Green
+} else {
+    Write-Host "PARTIAL SUCCESS: the App Registration exists but needs a manual follow-up:" -ForegroundColor Yellow
+    foreach ($warning in $warnings) { Write-Host "  * $warning" -ForegroundColor Yellow }
+    Write-Host ""
+}
 Write-Host "Values below are what install-all.ps1 -IdpProvider microsoft needs:" -ForegroundColor Green
+Write-Host "  Status              : $status"
 Write-Host "  Tenant id           : $resolvedTenantId"
 Write-Host "  Client id (App ID)  : $clientId"
 Write-Host "  Client secret       : $secretDisplay"
@@ -441,14 +536,17 @@ if ($secretWritten) {
     Write-Host "  (Shown only once and not retrievable later; copy it to your secret store, then you may delete the file.)" -ForegroundColor DarkGray
 }
 Write-Host ""
-Write-Host "Next: feed these to the OIDC seeding step. Example:" -ForegroundColor Cyan
+Write-Host "Next: feed these to the OIDC seeding step. If you captured this run's result" -ForegroundColor Cyan
+Write-Host "(`$r = .\idp-entra-setup.ps1 ...), the hand-off is copy-paste ready:" -ForegroundColor Cyan
 Write-Host "  .\install-all.ps1 -IdpProvider microsoft ``"
-Write-Host "    -OidcIssuer '$issuer' ``"
-Write-Host "    -OidcClientId '$clientId' ``"
-Write-Host "    -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret') ``"
-Write-Host "    -AdminUsername '<the sign-in user''s email>' ``"
+Write-Host "    -OidcIssuer `$r.Issuer ``"
+Write-Host "    -OidcClientId `$r.ClientId ``"
+Write-Host "    -OidcClientSecret `$r.ClientSecret ``"
+Write-Host "    -AdminUsername `$r.SuggestedAdminUsername ``"
 Write-Host "    -AppDbPassword (Read-Host -AsSecureString 'Admin App DB login password')"
 Write-Host ""
+Write-Host "  Without a captured result, pass the values printed above and read the secret" -ForegroundColor DarkGray
+Write-Host "  back with -OidcClientSecret (Read-Host -AsSecureString 'OIDC client secret')." -ForegroundColor DarkGray
 Write-Host "  -AdminUsername must equal the 'email' claim of the Entra user who signs in." -ForegroundColor DarkGray
 if ($signedInMail) {
     Write-Host "  You authenticated as $signedInUpn (mail: $signedInMail)." -ForegroundColor DarkGray
@@ -475,12 +573,16 @@ Write-Host "this script with -RedirectCallbackId <id> (or -RedirectUri) to add t
 # SuggestedAdminUsername is the signed-in account's mail (source of Entra's email
 # claim) when available -- a convenience for the caller; it is null when that
 # account has no mail, in which case the operator must supply -AdminUsername.
+# Status ('Ready' or 'PartiallyReady') and Warnings expose an incomplete run to an
+# automated caller, which the console text alone could not.
 [PSCustomObject]@{
-    ClientId              = $clientId
-    ClientSecret          = (ConvertTo-SecureString $clientSecret -AsPlainText -Force)
-    Issuer                = $issuer
-    RedirectUri           = $RedirectUri
-    TenantId              = $resolvedTenantId
-    SignedInUser          = $signedInUpn
+    Status                 = $status
+    ClientId               = $clientId
+    ClientSecret           = (ConvertTo-SecureString $clientSecret -AsPlainText -Force)
+    Issuer                 = $issuer
+    RedirectUri            = $RedirectUri
+    TenantId               = $resolvedTenantId
+    SignedInUser           = $signedInUpn
     SuggestedAdminUsername = $signedInMail
+    Warnings               = $warnings
 }
