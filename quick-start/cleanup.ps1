@@ -43,6 +43,11 @@
 .EXAMPLE
   # Leave the claimset copies in place:
   ./cleanup.ps1 -SkipClaimsets
+
+.EXAMPLE
+  # Managed Azure SQL Database (both databases; SQL authentication only):
+  ./cleanup.ps1 -AppSqlServer 'tcp:myserver.database.windows.net,1433' `
+    -SecuritySqlServer 'tcp:myserver.database.windows.net,1433'
 #>
 #requires -Version 5.1
 param(
@@ -54,6 +59,11 @@ param(
     # 'sa' is deliberately not used (EDFI-2776).
     [ValidateSet('mssql', 'pgsql')][string]$DbEngine,
     [string]$DatabaseName,
+    # mssql: the server hosting the Admin App application database. A remote
+    # FQDN (e.g. a managed Azure SQL Database) is connected with encryption and
+    # certificate validation; the loopback default trusts the local instance's
+    # self-signed certificate.
+    [string]$AppSqlServer,
     [string]$AppDbUsername,
     [string]$AppDbPassword,
     [string]$PostgresAppPassword,
@@ -108,6 +118,7 @@ function Get-EnvValue
 # Explicit parameters win; otherwise fall back to .env, then to the defaults.
 if (-not $PSBoundParameters.ContainsKey('DbEngine')) { $DbEngine = Get-EnvValue 'DB_ENGINE' 'mssql' }
 if (-not $PSBoundParameters.ContainsKey('DatabaseName')) { $DatabaseName = Get-EnvValue 'DATABASE_NAME' 'sbaa' }
+if (-not $PSBoundParameters.ContainsKey('AppSqlServer')) { $AppSqlServer = Get-EnvValue 'APP_SQL_SERVER' 'tcp:localhost,1433' }
 if (-not $PSBoundParameters.ContainsKey('AppDbUsername')) { $AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfi_adminapp' }
 if (-not $PSBoundParameters.ContainsKey('AppDbPassword')) { $AppDbPassword = Get-EnvValue 'APP_DB_PASSWORD' }
 if (-not $PSBoundParameters.ContainsKey('PostgresAppPassword')) { $PostgresAppPassword = Get-EnvValue 'POSTGRES_APP_PASSWORD' }
@@ -153,6 +164,15 @@ if ($claimsetTargets.Count -eq 0 -and -not $ClaimSetPrefix)
 }
 
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when the engine is 'pgsql'." }
+if ($DbEngine -ne 'mssql' -and $PSBoundParameters.ContainsKey('AppSqlServer')) { throw "-AppSqlServer only applies when the engine is 'mssql' (it targets a remote SQL Server / Azure SQL Database)." }
+# Windows authentication cannot reach a managed Azure SQL Database. Checked
+# before the -SecurityDbUsername rule below, whose message suggests integrated
+# security as the alternative -- advice that does not hold for a remote target.
+if ($removeClaimsets -and $securityDbEngine -eq 'mssql')
+{
+    Assert-SqlAuthSupported -SqlServer $SecuritySqlServer -UseIntegratedSecurity $securityUseIntegratedSecurity `
+        -UsernameParameterName '-SecurityDbUsername' -PasswordParameterName '-SecurityDbPassword'
+}
 if ($removeClaimsets -and $securityDbEngine -eq 'mssql' -and -not $securityUseIntegratedSecurity -and -not $SecurityDbUsername) { throw "-SecurityDbUsername (or SECURITY_DB_USERNAME in .env; a login with rights on EdFi_Security) is required to remove the claimset copies, or set SECURITY_USE_INTEGRATED_SECURITY=true, or skip with -SkipClaimsets." }
 
 # ---- Prompt for any password not passed as a parameter or set in the .env -----
@@ -225,11 +245,12 @@ DELETE FROM [team] WHERE [name] = N'$teamNameSql';
 DELETE FROM [user]
  WHERE [username] = N'$machineUser' AND [userType] = N'machine';
 "@
-    # -C (trust server certificate) is safe unconditionally: -S is the hardcoded
-    # loopback. The EdFi_Security calls below take -SecuritySqlServer instead and
-    # decide per target via Get-SqlcmdTrustArgs.
-    & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -C -Q $cleanupSql
-    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername'. Check -AppDbUsername / -AppDbPassword / -DatabaseName." }
+    # Per target: a loopback instance trusts its self-signed certificate, a
+    # remote server encrypts AND validates. Same decision as the EdFi_Security
+    # calls below, which take -SecuritySqlServer.
+    $appTrustArgs = @(Get-SqlcmdTrustArgs -SqlServer $AppSqlServer -TrustServerCertificate:$TrustServerCertificate)
+    & sqlcmd -S $AppSqlServer -U $AppDbUsername -P $AppDbPassword -d $DatabaseName @appTrustArgs -Q $cleanupSql
+    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername' on '$AppSqlServer'. Check -AppSqlServer / -AppDbUsername / -AppDbPassword / -DatabaseName. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
 }
 else
 {

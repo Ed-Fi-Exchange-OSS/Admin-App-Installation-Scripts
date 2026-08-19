@@ -175,9 +175,13 @@ else
     }
     if ($dbEngine -eq 'mssql')
     {
+        # The server hosting the Admin App application database: the loopback
+        # default, or a remote FQDN such as a managed Azure SQL Database.
+        $bootstrapArgs.AppSqlServer = Get-EnvValue 'APP_SQL_SERVER' 'tcp:localhost,1433'
         # The least-privilege app login; 'sa' is deliberately not used (EDFI-2776).
         $bootstrapArgs.AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfi_adminapp'
         $bootstrapArgs.AppDbPassword = Get-EnvValue 'APP_DB_PASSWORD'
+        if (Test-EnvTrue 'SQL_TRUST_SERVER_CERTIFICATE') { $bootstrapArgs.TrustServerCertificate = $true }
     }
     else
     {
