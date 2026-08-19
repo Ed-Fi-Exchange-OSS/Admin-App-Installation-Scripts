@@ -20,7 +20,8 @@ Auth0 prerequisites are covered [below](#auth0-prerequisites).
 | `copy-claimsets.ps1` | Copies every built-in claimset under an `AA` prefix in the ODS/API's EdFi_Security database so they can be assigned to applications in the Admin App (or only the ones in `CLAIMSET_NAMES`). Idempotent. |
 | `cleanup.ps1` | Tears down everything the quick start created (environment, team, machine user). The human bootstrap user is left in place. |
 | `load-dotenv.ps1` | Shared `.env` parser dot-sourced by `run.ps1` and `cleanup.ps1`. |
-| `compat.ps1` | Shared Windows PowerShell 5.1 / PowerShell 7+ compatibility helpers dot-sourced by the other scripts. |
+| `compat.ps1` | Shared Windows PowerShell 5.1 / PowerShell 7+ compatibility helpers, plus the SQL-target helpers that decide local vs. remote, dot-sourced by the other scripts. |
+| `tests/Test-SqlCompat.ps1` | Tests the SQL-target helpers in `compat.ps1`. No database or module required; exits non-zero on failure. |
 
 ## Usage
 
@@ -84,11 +85,12 @@ reverse-proxy path of the Docker deployment. On an Admin App installed with
 wrong base URL the very first call, `GET /auth/me`, fails with an IIS 404 that
 misleadingly looks like a machine-user authentication problem.
 
-On SQL Server, a loopback `SECURITY_SQL_SERVER` is connected to with `sqlcmd -C`
-(trust server certificate), because a local instance presents a self-signed
-certificate that the sqlcmd shipped with SQL Server 2025 rejects by default. A
-**remote** EdFi_Security server keeps validating its certificate; if it is
-self-signed, either install a trusted certificate on it (preferred) or set
+On SQL Server, a loopback `APP_SQL_SERVER` / `SECURITY_SQL_SERVER` is connected
+to with `sqlcmd -C` (trust server certificate), because a local instance
+presents a self-signed certificate that the sqlcmd shipped with SQL Server 2025
+rejects by default. A **remote** server is connected to with `sqlcmd -N`, which
+encrypts the connection and validates the certificate; if it is self-signed,
+either install a trusted certificate on it (preferred) or set
 `SQL_TRUST_SERVER_CERTIFICATE=true` (equivalently, pass
 `-TrustServerCertificate`), which disables validation and exposes the connection
 to a machine-in-the-middle. This is the database counterpart of
@@ -96,6 +98,36 @@ to a machine-in-the-middle. This is the database counterpart of
 
 Individual scripts can also be run directly with parameters — see each
 script's comment-based help (`Get-Help ./bootstrap.ps1 -Full`).
+
+### Managed Azure SQL Database
+
+Both databases the scripts touch may live on a managed Azure SQL Database, and
+independently of one another: `APP_SQL_SERVER` for the Admin App application
+database (default `sbaa`) and `SECURITY_SQL_SERVER` for the ODS/API's
+`EdFi_Security`.
+
+```ini
+APP_SQL_SERVER=tcp:myserver.database.windows.net,1433
+SECURITY_SQL_SERVER=tcp:myserver.database.windows.net,1433
+SECURITY_USE_INTEGRATED_SECURITY=false
+```
+
+Three things differ from a local instance:
+
+* **SQL authentication is required.** Azure SQL does not accept Windows
+  integrated authentication, so `SECURITY_USE_INTEGRATED_SECURITY` must be
+  `false` and the `APP_DB_*` / `SECURITY_DB_*` logins must be set. The scripts
+  refuse the combination up front rather than letting the driver fail later.
+* **The login is a contained user.** `APP_DB_USERNAME` must exist as a user in
+  the application database itself, with `db_owner`; see
+  [Database](https://docs.ed-fi.org/reference/admin-app/getting-started/windows-iis-installation/manual#database)
+  for the `CREATE USER` statement and the server, firewall, and database the
+  Admin App installation needs in Azure first.
+* **The connection is validated.** Azure SQL presents a CA-issued certificate,
+  so leave `SQL_TRUST_SERVER_CERTIFICATE=false`.
+
+The scripts only read and write rows in tables that already exist, so nothing
+in the Quick Start creates or alters a database.
 
 ## Auth0 prerequisites
 

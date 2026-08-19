@@ -23,7 +23,8 @@ Full walkthrough (prerequisites, verification, troubleshooting):
 | `import-edorgs.ps1` | Loads the CSV into the Admin App database: inserts the missing `edorg` rows under the configured tenant/ODS, corrects the name/type of existing rows that differ (e.g. the `Institution #<id>` placeholders the Admin App writes at ODS registration), wires the parent/child hierarchy, and fills the closure rows the Admin App's tree queries expect. Skips types the Admin App does not support, records the inserted ids in `imported-ids.csv`, and runs in a single transaction. Idempotent. |
 | `cleanup-edorgs.ps1` | Deletes exactly the rows the import inserted (from the `imported-ids.csv` manifest); children not being deleted are kept and become roots, and team access (ownership) rows referencing a deleted ed org are removed and reported. Idempotent. |
 | `load-dotenv.ps1` | Shared `.env` parser dot-sourced by `run.ps1` and `cleanup-edorgs.ps1`. |
-| `compat.ps1` | Shared Windows PowerShell 5.1 / PowerShell 7+ compatibility helpers dot-sourced by the other scripts. |
+| `compat.ps1` | Shared Windows PowerShell 5.1 / PowerShell 7+ compatibility helpers, plus the SQL-target helpers that decide local vs. remote, dot-sourced by the other scripts. |
+| `tests/Test-SqlCompat.ps1` | Tests the SQL-target helpers in `compat.ps1`. No database or module required; exits non-zero on failure. |
 
 ## Usage
 
@@ -50,12 +51,22 @@ scripts are idempotent, so re-running `run.ps1` is safe.
 On SQL Server, a loopback `ODS_SQL_SERVER` / `SQL_SERVER` is connected to with
 `sqlcmd -C` (trust server certificate), because a local instance presents a
 self-signed certificate that the sqlcmd shipped with SQL Server 2025 rejects by
-default. A **remote** server keeps validating its certificate; if it is
-self-signed, either install a trusted certificate on it (preferred) or set
+default. A **remote** server is connected to with `sqlcmd -N`, which encrypts
+the connection and validates the certificate; if it is self-signed, either
+install a trusted certificate on it (preferred) or set
 `SQL_TRUST_SERVER_CERTIFICATE=true` (equivalently, pass
 `-TrustServerCertificate`), which disables validation and exposes the
-connection to a machine-in-the-middle. To review (or trim)
-the CSV before anything is written to the Admin App, split the run:
+connection to a machine-in-the-middle.
+
+Either database may be a **managed Azure SQL Database**: set `ODS_SQL_SERVER`
+and/or `SQL_SERVER` to the server's FQDN. Azure SQL accepts SQL authentication
+only, so provide the login (`ODS_DB_USERNAME` / `ADMIN_APP_DB_USER`) and its
+password; `ODS_USE_INTEGRATED_SECURITY` and `USE_INTEGRATED_SECURITY` are
+refused against a remote server, and the certificate Azure presents is
+CA-issued, so `SQL_TRUST_SERVER_CERTIFICATE` stays `false`.
+
+To review (or trim) the CSV before anything is written to the Admin App, split
+the run:
 
 ```powershell
 ./run.ps1 -SkipImport    # export only: writes edorgs.csv
