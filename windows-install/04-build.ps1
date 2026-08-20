@@ -110,19 +110,32 @@ if ($apiBuilt -and $feBuilt) {
     }
 }
 
-# The timestamp heuristic above does not know whether the existing web application bundle was
-# built for the requested VITE_API_URL / VITE_OIDC_ID. A stale bundle built for a
-# different API URL/scheme breaks at runtime under the enforcing CSP (connect-src),
-# and one built for a different oidc row id initiates login against the wrong row --
-# so only treat the build as current when the last-built .env matches both. An
-# absent VITE_OIDC_ID line means the bundle baked the FE fallback of 1.
+# The timestamp heuristic above does not know which values the existing web
+# application bundle was built with. Vite bakes VITE_API_URL, VITE_BASE_PATH,
+# VITE_IDP_ACCOUNT_URL and VITE_OIDC_ID into the bundle at build time, so the build
+# is only current when the last-built .env matches ALL of them: a stale API URL/scheme
+# breaks at runtime under the enforcing CSP (connect-src), a stale oidc row id
+# initiates login against the wrong row, and a stale base path or identity-provider
+# account URL leaves dead links in the bundle. Comparing VITE_API_URL and
+# VITE_OIDC_ID alone let an identity-provider switch (which changes
+# VITE_IDP_ACCOUNT_URL) or a base-path change on the same API URL skip the rebuild.
+# An absent VITE_OIDC_ID line means the bundle baked the FE fallback of 1.
 $envFile = "$SourcePath\packages\fe\.env"
 $feConfigCurrent = $false
 if (Test-Path $envFile) {
-    $m = Select-String -Path $envFile -Pattern '^VITE_API_URL=(.*)$' | Select-Object -First 1
-    $mOidc = Select-String -Path $envFile -Pattern '^VITE_OIDC_ID=(.*)$' | Select-Object -First 1
-    $envOidcId = if ($mOidc) { $mOidc.Matches.Groups[1].Value.Trim() } else { '1' }
-    if ($m -and $m.Matches.Groups[1].Value -eq $ViteApiUrl -and $envOidcId -eq "$ViteOidcId") { $feConfigCurrent = $true }
+    $getEnvValue = {
+        param([string]$Key)
+        $m = Select-String -Path $envFile -Pattern "^$Key=(.*)$" | Select-Object -First 1
+        if ($m) { $m.Matches.Groups[1].Value.Trim().Trim('"') } else { $null }
+    }
+    $envOidcId = (& $getEnvValue 'VITE_OIDC_ID')
+    if (-not $envOidcId) { $envOidcId = '1' }
+    if ((& $getEnvValue 'VITE_API_URL')         -eq $ViteApiUrl -and
+        (& $getEnvValue 'VITE_BASE_PATH')       -eq $ViteBasePath -and
+        (& $getEnvValue 'VITE_IDP_ACCOUNT_URL') -eq $ViteIdpAccountUrl -and
+        $envOidcId                              -eq "$ViteOidcId") {
+        $feConfigCurrent = $true
+    }
 }
 
 if ($buildIsCurrent -and $feConfigCurrent -and -not $Force) {
@@ -133,7 +146,7 @@ if ($buildIsCurrent -and $feConfigCurrent -and -not $Force) {
     return
 }
 if ($buildIsCurrent -and -not $feConfigCurrent -and -not $Force) {
-    Write-Host "Web application build configuration changed (VITE_API_URL now $ViteApiUrl, VITE_OIDC_ID now $ViteOidcId) -- rebuilding the web application bundle." -ForegroundColor Cyan
+    Write-Host "Web application build configuration changed (VITE_API_URL / VITE_BASE_PATH / VITE_IDP_ACCOUNT_URL / VITE_OIDC_ID) -- rebuilding the web application bundle." -ForegroundColor Cyan
 }
 
 # Ensure packages\fe\.env exists with the right Vite values before building.
@@ -158,7 +171,7 @@ try {
             $envText = $envText.TrimEnd() + "`r`nVITE_OIDC_ID=$ViteOidcId`r`n"
         }
         Set-Content $envFile -Value $envText -Encoding UTF8
-        Write-Host "Updated packages\fe\.env (VITE_API_URL=$ViteApiUrl, VITE_BASE_PATH=$ViteBasePath, VITE_OIDC_ID=$ViteOidcId)"
+        Write-Host "Updated packages\fe\.env (VITE_API_URL=$ViteApiUrl, VITE_BASE_PATH=$ViteBasePath, VITE_IDP_ACCOUNT_URL=$ViteIdpAccountUrl, VITE_OIDC_ID=$ViteOidcId)"
     }
 } catch {
     throw "Failed to write the web application build configuration at $envFile. Check the path is writable. Original: $($_.Exception.Message)"

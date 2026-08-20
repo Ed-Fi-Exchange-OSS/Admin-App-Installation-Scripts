@@ -43,6 +43,8 @@ windows-install/
 ├─ uninstall-keycloak.ps1 # tear down Keycloak
 ├─ setup-vm-prereqs.ps1   # fresh virtual machine bootstrap
 ├─ yopass-docker.ps1      # optional one-time-credential-link stack
+├─ sql-compat.ps1         # shared SQL-target helpers (local vs remote, sqlcmd encryption flags)
+├─ tests/                 # tests for the pure helpers (no database required)
 ├─ README.md              # user install guide
 └─ docker/                # PostgreSQL + optional Yopass compose stack; init/ creates the PostgreSQL role
 ```
@@ -184,7 +186,18 @@ Changes must not weaken these properties (each is exercised by the E2E suite):
 
 ## Testing
 
-These are deployment/orchestration scripts with no unit-testable surface. Before opening a PR,
+The pure helper functions in `sql-compat.ps1` do have a test script. Run it in both editions
+after touching remote-target detection, the sqlcmd encryption/certificate flags, or the Azure
+password rule — no database or server required:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SqlCompat.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SqlCompat.ps1
+```
+
+It exits non-zero on the first failure, so it can gate a change from a command line.
+
+The rest is deployment/orchestration with no unit-testable surface. Before opening a PR,
 validate the affected paths end to end on a clean box:
 
 - Install completes and the app boots; API returns 401 and the web application returns 200 with SPA fallback.

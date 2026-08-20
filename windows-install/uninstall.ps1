@@ -54,8 +54,30 @@ Prompts for confirmation by default. Pass -Force for non-interactive runs.
 Database to drop. Default: sbaa. Must match what 02-prereqs-sql.ps1 created.
 
 .PARAMETER AppDbUsername
-Server-level login to drop alongside the database. Default: edfi_adminapp. Must
-match what 02-prereqs-sql.ps1 provisioned.
+Server-level login (local) or contained database user (remote) to drop alongside
+the database. Default: edfi_adminapp. Must match what 02-prereqs-sql.ps1 provisioned.
+
+.PARAMETER SqlServerHost
+SQL host the Admin App was deployed against. Default 'localhost'. Set to a remote
+FQDN (e.g. an Azure SQL Database) to tear down a managed target: the script then
+drops only the contained user (the managed database is operator-owned and left
+intact) and connects as a SQL admin instead of Windows Authentication.
+
+.PARAMETER SqlServerPort
+TCP port of the SQL target. Default 1433.
+
+.PARAMETER SqlAdminUsername
+SQL admin login used to drop the contained user on a REMOTE target (Windows
+Authentication is unavailable on Azure SQL). Required to remove the user on a remote
+target; ignored for a local instance.
+
+.PARAMETER SqlAdminPassword
+Password for -SqlAdminUsername. Prompted if omitted on a remote target (unless
+-Force, in which case the remote user drop is skipped when no password is supplied).
+
+.PARAMETER TrustServerCertificate
+Trust the remote SQL server certificate instead of validating it (adds sqlcmd -C).
+Local loopback always trusts; a remote target validates by default.
 
 .PARAMETER KeycloakInstallPath
 Path checked for Keycloak leftovers (informational only; this script does not
@@ -103,6 +125,16 @@ Switch — skip the confirmation prompt.
 param(
     [string]$DatabaseName = "sbaa",
     [string]$AppDbUsername = "edfi_adminapp",
+
+    # Remote/Azure SQL teardown. Default 'localhost' keeps the local-instance path;
+    # a non-loopback host drops only the contained user (the managed database is left
+    # intact) and authenticates as the SQL admin below.
+    [string]$SqlServerHost = "localhost",
+    [int]$SqlServerPort = 1433,
+    [string]$SqlAdminUsername = "",
+    [SecureString]$SqlAdminPassword,
+    [switch]$TrustServerCertificate,
+
     [string]$KeycloakInstallPath = "C:\keycloak",
     [string]$NpmCachePath = "C:\npm-cache",
     [string]$AppPoolName = "EdFi-AdminApp-API",
@@ -130,6 +162,15 @@ param(
 # Don't bail on the first non-terminating error -- this is a teardown, we want
 # to push through and report at the end.
 $ErrorActionPreference = 'Continue'
+
+# Shared SQL-target helpers. A remote target is torn down as a SQL admin (no Windows
+# Authentication) and its database is left intact (operator-owned).
+. "$PSScriptRoot\sql-compat.ps1"
+
+$isRemote = Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost
+# sqlcmd encryption/certificate flags for the remote drop: a remote target encrypts
+# and validates (-N), a loopback trusts its self-signed certificate (-C).
+$sqlSecurityArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost $SqlServerHost -TrustServerCertificate:$TrustServerCertificate)
 
 $results = [System.Collections.Generic.List[object]]::new()
 function Record {
@@ -162,7 +203,11 @@ Write-Host "  - IIS App Pools '$AppPoolName' (API) and '$StandaloneFeAppPoolName
 Write-Host "  - HTTPS SSL bindings + the auto-generated self-signed certificate"
 Write-Host "  - Deployed directories: $ApiDestPath and $FeDestPath"
 if (-not $KeepDatabase)         {
-    Write-Host "  - SQL database [$DatabaseName] + login [$AppDbUsername] (if MSSQLSERVER is running)"
+    if ($isRemote) {
+        Write-Host "  - Contained user [$AppDbUsername] on remote SQL '$SqlServerHost' (the managed database [$DatabaseName] is left intact)"
+    } else {
+        Write-Host "  - SQL database [$DatabaseName] + login [$AppDbUsername] (if MSSQLSERVER is running)"
+    }
     Write-Host "  - Docker postgres container + volumes (if edfiadminapp-postgres exists)"
 }
 Write-Host "  - Docker Yopass stack (edfiadminapp-yopass + memcached) and its volumes (if present)"
@@ -381,22 +426,81 @@ if ($KeepDatabase) {
     Record "Docker postgres down -v" "SKIP" "-KeepDatabase"
 } else {
     # --- mssql ----------------------------------------------------------------
+    # Bracket- and literal-escape the app principal name in case a custom
+    # -AppDbUsername contains ] or '.
     $sqlcmdAvailable = $null -ne (Get-Command sqlcmd -ErrorAction SilentlyContinue)
-    $msSqlRunning = $null -ne (Get-Service MSSQLSERVER -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' })
-    if (-not $sqlcmdAvailable -or -not $msSqlRunning) {
-        Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "SKIP" $(if (-not $msSqlRunning) { "MSSQLSERVER not running" } else { "sqlcmd not on PATH" })
+    $safeUser        = $AppDbUsername -replace ']', ']]'
+    $safeUserLiteral = $AppDbUsername -replace "'", "''"
+    if (-not $sqlcmdAvailable) {
+        Record "Drop [$AppDbUsername] / database [$DatabaseName] (mssql)" "SKIP" "sqlcmd not on PATH"
+    } elseif ($isRemote) {
+        # Remote/managed target (e.g. Azure SQL): the database is operator-owned
+        # (created out of band through the Azure control plane) and is NOT dropped
+        # here. Drop only the contained app user so a reinstall re-provisions it
+        # cleanly. Requires the SQL admin login -- Windows Authentication is not
+        # available on Azure SQL, and the app user (db_owner) cannot drop itself.
+        Record "Drop database [$DatabaseName] (remote)" "SKIP" "managed database is operator-owned; drop it via the Azure control plane if desired"
+        if (-not $SqlAdminUsername) {
+            Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "SKIP" "no -SqlAdminUsername supplied (pass it to remove the user on a remote target)"
+        } else {
+            if (-not $SqlAdminPassword -and -not $Force) {
+                $SqlAdminPassword = Read-Host -AsSecureString "SQL admin '$SqlAdminUsername' password"
+            }
+            if (-not $SqlAdminPassword) {
+                Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "SKIP" "no -SqlAdminPassword supplied"
+            } else {
+                $adminPwPlain = [System.Net.NetworkCredential]::new('', $SqlAdminPassword).Password
+                # Hand any schema the app user owns back to dbo before dropping it.
+                # The Admin App creates a schema at runtime (a 'cert' schema on first
+                # boot) while connected as this db_owner user, which makes the user its
+                # owner, and SQL Server refuses to drop a principal that owns a schema
+                # (Msg 15138). Reassigning to dbo keeps the schema and its objects
+                # intact -- only ownership moves -- so the operator's database is left
+                # as it was apart from the user. Built as dynamic SQL because
+                # ALTER AUTHORIZATION takes no variable for the schema name.
+                $dropUser = @"
+DECLARE @reassign nvarchar(max) = N'';
+SELECT @reassign = @reassign + N'ALTER AUTHORIZATION ON SCHEMA::' + QUOTENAME(s.name) + N' TO dbo; '
+FROM sys.schemas s
+JOIN sys.database_principals p ON s.principal_id = p.principal_id
+WHERE p.name = N'$safeUserLiteral';
+IF @reassign <> N'' EXEC sp_executesql @reassign;
+IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$safeUserLiteral' AND type = 'S')
+    DROP USER [$safeUser];
+"@
+                # Pass the admin password via SQLCMDPASSWORD (off the command line);
+                # cleared in the finally. Encryption/validation follows the target
+                # ($sqlSecurityArgs): a remote certificate is validated unless
+                # -TrustServerCertificate. Keep sqlcmd's output so a failure reports
+                # what SQL Server actually said instead of a guess.
+                $env:SQLCMDPASSWORD = $adminPwPlain
+                try {
+                    $dropOutput = (& sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $SqlAdminUsername -d $DatabaseName @sqlSecurityArgs -b -l 30 -Q $dropUser 2>&1 | ForEach-Object { "$_" }) -join ' '
+                    if ($LASTEXITCODE -eq 0) {
+                        Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "OK" "SQL admin '$SqlAdminUsername'; any schema it owned was reassigned to dbo"
+                    } else {
+                        Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "FAIL" "sqlcmd exit $LASTEXITCODE -- $($dropOutput.Trim())"
+                    }
+                } catch {
+                    Record "Drop contained user [$AppDbUsername] on '$SqlServerHost'" "FAIL" $_.Exception.Message
+                } finally {
+                    Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
+                }
+            }
+        }
     } else {
-        # SET SINGLE_USER ROLLBACK IMMEDIATE forces existing connections off
-        # before the DROP. Without it the drop fails when the API's node process
-        # (launched by httpPlatform) still has a pool open (e.g., if the App Pool
-        # removal above didn't terminate the node process cleanly).
-        # Also drop the server-level app login. 02-prereqs-sql creates it once and
-        # only re-syncs the password on re-run, so without this it survives an
-        # uninstall and a later reinstall silently keeps the old password. Bracket-
-        # and literal-escape the name in case a custom -AppDbUsername contains ] or '.
-        $safeUser        = $AppDbUsername -replace ']', ']]'
-        $safeUserLiteral = $AppDbUsername -replace "'", "''"
-        $dropQuery = @"
+        $msSqlRunning = $null -ne (Get-Service MSSQLSERVER -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' })
+        if (-not $msSqlRunning) {
+            Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "SKIP" "MSSQLSERVER not running"
+        } else {
+            # SET SINGLE_USER ROLLBACK IMMEDIATE forces existing connections off
+            # before the DROP. Without it the drop fails when the API's node process
+            # (launched by httpPlatform) still has a pool open (e.g., if the App Pool
+            # removal above didn't terminate the node process cleanly).
+            # Also drop the server-level app login. 02-prereqs-sql creates it once and
+            # only re-syncs the password on re-run, so without this it survives an
+            # uninstall and a later reinstall silently keeps the old password.
+            $dropQuery = @"
 IF EXISTS (SELECT 1 FROM sys.databases WHERE name = N'$DatabaseName')
 BEGIN
     ALTER DATABASE [$DatabaseName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
@@ -405,20 +509,21 @@ END
 IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$safeUserLiteral' AND type = 'S')
     DROP LOGIN [$safeUser];
 "@
-        # Windows authentication via (local): dropping a database and a server login both
-        # require server-level privilege the app login (db_owner only) lacks, so
-        # the teardown runs as the current sysadmin account.
-        try {
-            # -C (trust server certificate) is safe unconditionally: -S is the
-            # hardcoded loopback '(local)', never a parameterized remote host.
-            & sqlcmd -S "(local)" -E -C -Q $dropQuery -t 30 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "OK" "Windows Authentication"
-            } else {
-                Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "FAIL" "sqlcmd exit $LASTEXITCODE"
+            # Windows authentication via (local): dropping a database and a server login both
+            # require server-level privilege the app login (db_owner only) lacks, so
+            # the teardown runs as the current sysadmin account.
+            try {
+                # -C (trust server certificate) is safe unconditionally: -S is the
+                # hardcoded loopback '(local)', never a parameterized remote host.
+                & sqlcmd -S "(local)" -E -C -Q $dropQuery -t 30 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "OK" "Windows Authentication"
+                } else {
+                    Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "FAIL" "sqlcmd exit $LASTEXITCODE"
+                }
+            } catch {
+                Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "FAIL" $_.Exception.Message
             }
-        } catch {
-            Record "Drop database [$DatabaseName] + login [$AppDbUsername] (mssql)" "FAIL" $_.Exception.Message
         }
     }
 

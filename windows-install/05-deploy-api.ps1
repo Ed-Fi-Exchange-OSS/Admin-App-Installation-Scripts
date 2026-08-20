@@ -109,6 +109,19 @@ param(
 
     [string]$DatabaseName = "sbaa",
 
+    # SQL Server / Azure SQL host the app connects to (mssql only). Default
+    # 'localhost'; set to a remote FQDN (for example an Azure SQL Database,
+    # myserver.database.windows.net) to target a managed server. A non-loopback host
+    # switches the mssql path to remote mode: DB_TRUST_CERTIFICATE defaults to false
+    # (the server certificate is validated) and the installer's sqlcmd calls validate too.
+    [string]$SqlServerHost = "localhost",
+    [int]$SqlServerPort = 1433,
+    # Trust the SQL server certificate instead of validating it. Implied for a local
+    # loopback target (its auto-generated certificate is not CA-issued); set it for a
+    # remote server that presents a self-signed/dev certificate. Controls both
+    # DB_TRUST_CERTIFICATE (the app's runtime connection) and the installer's sqlcmd -C.
+    [switch]$TrustServerCertificate,
+
     # PostgreSQL connection details. Required only when -DbEngine is 'pgsql'.
     # Defaults match the docker-compose setup at windows-install\docker\ where
     # the dedicated app user 'edfiadminapp' is provisioned by init/01-...sh.
@@ -223,6 +236,9 @@ if ($DbEngine -eq 'mssql' -and -not $AppDbPassword) {
 if ($DbEngine -eq 'pgsql' -and -not $PgDbPassword) {
     throw "-PgDbPassword is required when -DbEngine is 'pgsql'."
 }
+if ($DbEngine -ne 'mssql' -and $SqlServerHost -ne 'localhost') {
+    throw "-SqlServerHost only applies when -DbEngine is 'mssql'."
+}
 
 # The Admin App builds its database connection string as a URL and interpolates the database
 # credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
@@ -242,6 +258,11 @@ function Test-DbPasswordUrlSafe {
     }
 }
 
+# Shared SQL-target helpers (Test-IsRemoteSqlTarget, Get-SqlcmdSecurityArgs). A remote
+# target validates the server certificate and (via 02-prereqs-sql.ps1) is provisioned
+# as a contained user.
+. "$PSScriptRoot\sql-compat.ps1"
+
 # Secrets arrive as SecureString (kept off the command line); unwrap the ones
 # supplied to plaintext locals for sqlcmd -P and the production.js patch.
 # Point-of-use plaintext is unavoidable. DbEncryptionKey stays a plain string:
@@ -258,6 +279,16 @@ if ($DbEngine -eq 'mssql') { Test-DbPasswordUrlSafe -Password $AppDbPasswordPlai
 if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbPasswordPlain  -Label "Postgres app user (-PgDbPassword)" }
 if ($DbEngine -eq 'mssql') { Test-DbPasswordUrlSafe -Password $AppDbUsername -Label "Admin App DB username (-AppDbUsername)" }
 if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbUsername   -Label "Postgres app username (-PgDbUsername)" }
+
+# Remote/Azure SQL target (mssql only). A non-loopback -SqlServerHost switches to
+# remote mode: the app validates the server certificate (DB_TRUST_CERTIFICATE=false)
+# and the installer's sqlcmd calls encrypt and validate too (-N), unless
+# -TrustServerCertificate is set. $script:SqlSecurityArgs is appended to the raw sqlcmd
+# calls (key guard, OIDC reconcile) below; DB_TRUST_CERTIFICATE is derived from the
+# same decision.
+$isRemoteSql = ($DbEngine -eq 'mssql') -and (Test-IsRemoteSqlTarget -SqlServerHost $SqlServerHost)
+$script:SqlSecurityArgs = @(Get-SqlcmdSecurityArgs -SqlServerHost $SqlServerHost -TrustServerCertificate:$TrustServerCertificate)
+if ($isRemoteSql) { Write-Host "Remote SQL target: $SqlServerHost,$SqlServerPort (server certificate $(if ($TrustServerCertificate) { 'trusted (-TrustServerCertificate)' } else { 'validated' }))." }
 
 $apiBuildDir = "$SourcePath\dist\packages\api"
 if (-not (Test-Path "$apiBuildDir\main.js")) {
@@ -593,9 +624,10 @@ if ($freshKeyGenerated -and $DbEngine -eq 'mssql' -and -not $ForceKeyRotation) {
     # sqlcmd process command line; cleared in the finally.
     $env:SQLCMDPASSWORD = $AppDbPasswordPlain
     try {
-        # -C (trust server certificate) is safe unconditionally: -S is the
-        # hardcoded loopback, never a parameterized remote host.
-        $out = & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -h -1 -W -t 10 `
+        # Encryption/validation follows the resolved target ($script:SqlSecurityArgs):
+        # a loopback (or an explicit -TrustServerCertificate) trusts with -C; a remote
+        # target (e.g. Azure SQL) encrypts and validates the certificate with -N.
+        $out = & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlSecurityArgs -h -1 -W -t 10 `
             -Q "SET NOCOUNT ON; IF OBJECT_ID('sb_environment','U') IS NOT NULL SELECT COUNT(*) FROM sb_environment ELSE SELECT 0;" 2>$null
         if ($LASTEXITCODE -eq 0 -and $out) { $envCount = [int]("$($out | Select-Object -First 1)").Trim() }
     } catch {
@@ -683,9 +715,13 @@ $nodeConfig = @{
 }
 if ($DbEngine -eq 'mssql') {
     $nodeConfig.DB_ENGINE            = 'mssql'
-    $nodeConfig.DB_TRUST_CERTIFICATE = $true
+    # A local/loopback target (or an explicit -TrustServerCertificate) trusts the
+    # instance's self-signed certificate; a remote target (e.g. Azure SQL) presents
+    # a CA-issued certificate, so validate it (DB_TRUST_CERTIFICATE=false).
+    $nodeConfig.DB_TRUST_CERTIFICATE = ($TrustServerCertificate -or -not $isRemoteSql)
     $nodeConfig.DB_SECRET_VALUE      = @{
-        MSSQL_DB_HOST     = 'localhost'
+        MSSQL_DB_HOST     = $SqlServerHost
+        MSSQL_DB_PORT     = $SqlServerPort
         MSSQL_DB_DATABASE = $DatabaseName
         MSSQL_DB_USERNAME = $AppDbUsername
         MSSQL_DB_PASSWORD = $AppDbPasswordPlain
@@ -876,9 +912,14 @@ END
         # terminating NativeCommandError under $ErrorActionPreference='Stop', so
         # catch it and fall through to the warning. -l 30 gives the login headroom
         # under load.
+        # -I (QUOTED_IDENTIFIER ON) is required: the [oidc]/[user] schema carries
+        # filtered/computed-column indexes whose INSERT/UPDATE errors with Msg 1934
+        # under sqlcmd's default QUOTED_IDENTIFIER OFF. Encryption/validation follows
+        # the resolved target ($script:SqlSecurityArgs): loopback/opt-in trusts, a
+        # remote target encrypts and validates.
         $oidcUpsertExit = 1
         try {
-            & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -d $DatabaseName -C -b -l 30 -i $oidcQueryFile 1>$null 2>$null
+            & sqlcmd -S "tcp:$SqlServerHost,$SqlServerPort" -U $AppDbUsername -d $DatabaseName @script:SqlSecurityArgs -I -b -l 30 -i $oidcQueryFile 1>$null 2>$null
             $oidcUpsertExit = $LASTEXITCODE
         } catch {
             $oidcUpsertExit = 1
@@ -925,10 +966,29 @@ UPDATE "oidc" SET "issuer" = '$oidcIssuerSql', "clientSecret" = '$oidcSecretSql'
     }
 }
 
-# Trigger startup only if something actually changed
+# Trigger startup only if something actually changed. Recycle the pool through the
+# ServerManager API rather than touching web.config's timestamp: on a re-deploy over a
+# running site the IIS worker process holds that file, so the write fails with "the
+# process cannot access the file because it is being used by another process" and takes
+# the whole install down after the configuration was already written. Recycling is the
+# effect the touch was after, and it works whether or not the site is serving.
 if ($webConfigChanged -or $prodJsChanged) {
-    (Get-Item "$DestPath\web.config").LastWriteTime = Get-Date
-    Write-Host "Touched web.config to recycle the app pool."
+    $recycleManager = New-IisServerManager
+    try {
+        $recyclePool = $recycleManager.ApplicationPools[$AppPoolName]
+        # Recycle throws on a stopped pool, which does not need one: it reads the new
+        # configuration when it next starts.
+        if ($recyclePool -and "$($recyclePool.State)" -eq 'Started') {
+            $recyclePool.Recycle() | Out-Null
+            Write-Host "Recycled app pool '$AppPoolName' to pick up the new configuration."
+        } else {
+            Write-Host "App pool '$AppPoolName' is not running; it picks up the new configuration on start."
+        }
+    } catch {
+        # The deploy itself succeeded by this point, so a failed recycle is a warning
+        # with a manual step, not a reason to fail the install.
+        Write-Warning "Could not recycle app pool '$AppPoolName' ($($_.Exception.Message)). Recycle it manually so the API picks up the new configuration."
+    }
 } else {
     Write-Host "No file changes — skipping app pool recycle."
 }
