@@ -32,7 +32,7 @@ You do **not** need to clone the Admin App application repository yourself: `ins
 
 ## Quick start (local Keycloak)
 
-`install-all.ps1` is the "run everything" path. Pick the identity provider with the mandatory **`-IdpProvider`** (`keycloak` | `microsoft` | `google` | `other`). `keycloak` stands up a local Keycloak as the example identity provider; for an external provider see [Other identity providers](#other-identity-providers).
+`install-all.ps1` is the "run everything" path. Pick the identity provider with the mandatory **`-IdpProvider`** (`keycloak` | `microsoft` | `google` | `auth0` | `other`). `keycloak` stands up a local Keycloak as the example identity provider; for an external provider see [Other identity providers](#other-identity-providers).
 
 ```powershell
 # One-time, current-process-only bypass so the first script can run. It affects only
@@ -60,7 +60,7 @@ When `install-all.ps1` finishes, open `https://localhost:4443/` and sign in with
 - **All password/secret parameters are `[SecureString]`.** Supply each with `(Read-Host -AsSecureString '...')` as shown above, never a plaintext literal — a plaintext string fails parameter binding before the script runs, and a literal on the command line would be captured in your shell history.
 - **`-AppDbPassword`** *(mssql)*: password for the dedicated least-privilege login (`edfi_adminapp`) the Admin App connects as (`db_owner` on `sbaa`, non-`sa`). Required in the default `mssql` mode; the app uses it at runtime, so provisioning and deploy must receive the same value. Must satisfy the Windows password policy `CHECK_POLICY` enforces — length ≥ 8 and at least 3 of 4 character categories (uppercase, lowercase, digit, symbol); weak passwords are rejected up front. The same rule applies to every SQL login the scripts create.
 - **SQL Server bootstrap runs under Windows Authentication.** Run the install as a Windows account that is a SQL Server sysadmin: `02-prereqs-sql.ps1` creates the database and the `edfi_adminapp` login over Windows authentication and never enables, resets, or uses the `sa` login. There is no `-SaPassword` parameter.
-- **`-IdpProvider`** *(mandatory)*: `keycloak` | `microsoft` | `google` | `other`. `keycloak` runs the local example identity provider; the others target an external OIDC provider (see [Other identity providers](#other-identity-providers)).
+- **`-IdpProvider`** *(mandatory)*: `keycloak` | `microsoft` | `google` | `auth0` | `other`. `keycloak` runs the local example identity provider; the others target an external OIDC provider (see [Other identity providers](#other-identity-providers)).
 - **`-OidcClientSecret`** *(all modes)*: the OIDC client secret. For `keycloak` it's the secret set on the `edfiadminapp` client (you pick it, 32+ chars recommended); for external providers it's the secret from your app registration.
 - **`-KeycloakAdminPassword`** *(keycloak only)*: Password for the master-realm admin user auto-created when Keycloak first starts.
 - **`-TestUserPassword`** *(keycloak only)*: Password for the seeded `admin@example.com` user in the `edfi` realm — what you type on the Keycloak login screen.
@@ -104,12 +104,18 @@ Numbered scripts map to the official guide's section order. The **generic path**
 | `idp-keycloak-setup.ps1` | One run = a ready local Keycloak: installs a JDK if needed, downloads Keycloak, starts it (via `idp-keycloak-start.ps1`), then provisions the `edfi` realm, `edfiadminapp` client, and test user. |
 | `idp-keycloak-start.ps1` | Starts Keycloak in the background (bootstraps the master admin on first run, waits for readiness). Does not require elevation. Use to relaunch Keycloak by hand. |
 
+### External IdP helper (optional: Microsoft Entra ID)
+
+| Script | Purpose |
+|---|---|
+| `idp-entra-setup.ps1` | Optional Entra helper. Creates (or reconciles) a single-tenant Entra App Registration via the Microsoft Graph PowerShell SDK: sets the Web redirect URI, adds the `email` ID-token optional claim, adds the delegated `openid`/`email` Microsoft Graph permissions, creates a client secret, and grants admin consent when the running identity is privileged enough (otherwise it prints the exact manual consent URL). It outputs the client id, client secret, and issuer to pass to `install-all.ps1 -IdpProvider microsoft`. Separate from the install: `install-all.ps1` does not call it. Entra is the only provider with a helper: Google Workspace is intentionally not covered (Google exposes no supported API to create the standard Web OAuth client the Admin App needs) and the Auth0 application is registered in the Auth0 dashboard (see [Auth0](#auth0)). |
+
 ### Transversal
 
 | Script | Purpose |
 |---|---|
 | `setup-vm-prereqs.ps1` | OS-level installs only: IIS features, SQL Server Developer, Git. Scans first, installs only what's missing. |
-| `install-all.ps1` | Master orchestrator. Pick the identity provider with `-IdpProvider` (keycloak/microsoft/google/other). Pre-flight check + all phases + smoke test. |
+| `install-all.ps1` | Master orchestrator. Pick the identity provider with `-IdpProvider` (keycloak/microsoft/google/auth0/other). Pre-flight check + all phases + smoke test. |
 | `yopass-docker.ps1` | Optional. Stands up a local Yopass + memcached stack via `docker\docker-compose.yopass.yml`. Only runs with `install-all -SetupYopassDocker` (or directly). |
 | `uninstall.ps1` | Reverses the generic install: IIS sites/App Pool/files, the `sbaa` database, docker Postgres + Yopass stacks, `C:\npm-cache`. Detects Keycloak leftovers and suggests `uninstall-keycloak.ps1` (does not touch them). Per-step OK/SKIP/WARN/FAIL ledger. |
 | `uninstall-keycloak.ps1` | Tears down the local Keycloak identity provider: stops the process, deletes the install directory, unsets `JAVA_HOME`. Leaves the JDK install in place. |
@@ -144,10 +150,12 @@ The Admin App's authentication engine is provider-agnostic (generic OIDC discove
   -AdminUsername 'you@yourtenant.onmicrosoft.com'
 ```
 
+> **Optional (Entra only):** rather than registering the App Registration by hand, you can script it first with [`idp-entra-setup.ps1`](#external-idp-helper-optional-microsoft-entra-id). It creates the single-tenant registration, sets the redirect URI and `email` claim, adds the delegated `openid`/`email` permissions, and creates a client secret, then outputs the `-OidcIssuer` / `-OidcClientId` / `-OidcClientSecret` values to pass to the command above. On a clean install the redirect callback id is `1` (the helper's default); if `install-all` later reports a different id, re-run the helper with `-RedirectCallbackId <id>` to add the matching redirect URI (Entra allows editing redirect URIs after creation, and the helper merges rather than replaces). Every run creates a new client secret and leaves the earlier ones active; pass `-ReplaceExistingSecret` to have the helper delete the ones its own earlier runs created.
+
 - `keycloak`/`google` default `-OidcIssuer`; `microsoft`/`auth0`/`other` require it. `-ViteIdpAccountUrl` is defaulted per provider (`other` requires it; `auth0` defaults it to the tenant URL, since Auth0 has no hosted account page). `-OidcScope` defaults to `openid email profile`.
 - **Where to find `-OidcIssuer`:** for Entra, the App Registration → *Endpoints* → "OpenID Connect metadata document" URL, minus the trailing `/.well-known/openid-configuration` (typically `https://login.microsoftonline.com/<tenant-id>/v2.0`). For Google it's `https://accounts.google.com` (the default). For Auth0 it's the tenant **Domain** shown on the application's Settings page, as a URL (e.g. `https://your-tenant.us.auth0.com`).
 - `-MachineAudience` (default `edfiadminapp-api`) sets the audience the API expects on machine-to-machine bearer tokens (`AUTH0_CONFIG_SECRET_VALUE.MACHINE_AUDIENCE`) — align it with your provider's API identifier without editing config files on the server.
-- **You register the OIDC client yourself** in the provider's portal (no script can provision Entra/Google). `install-all` validates the issuer's discovery endpoint and, at the end of the install, prints the exact URIs to register. The redirect URI is `https://localhost:3443/api/auth/callback/<id>`, where `<id>` is the `oidc` database row id `install-all` resolves and prints ("OIDC redirect callback id resolved to `<id>`") — register `callback/<that id>`, not a hardcoded `callback/1`. Post-logout is `https://localhost:3443/api/auth/post-logout` and the allowed origin is `https://localhost:4443`.
+- **You register the OIDC client yourself** in the provider's portal (no script provisions the Google or Auth0 client; for Entra, the optional `idp-entra-setup.ps1` can script the App Registration). `install-all` validates the issuer's discovery endpoint and, at the end of the install, prints the exact URIs to register. The redirect URI is `https://localhost:3443/api/auth/callback/<id>`, where `<id>` is the `oidc` database row id `install-all` resolves and prints ("OIDC redirect callback id resolved to `<id>`") — register `callback/<that id>`, not a hardcoded `callback/1`. Post-logout is `https://localhost:3443/api/auth/post-logout` and the allowed origin is `https://localhost:4443`.
 - A user must exist in the provider whose **email/username claim equals `-AdminUsername`** — the script seeds that user in the `[user]` table with the admin role, but the identity lives in your identity provider. For Entra specifically, the app registration must emit an `email` claim; see [Entra: "Invalid email from IdP" after sign-in](#entra-invalid-email-from-idp-after-sign-in).
 
 You can also drive the per-section scripts manually (`00`→`06`), passing `-Oidc*` to `05-deploy-api.ps1` and `-ViteIdpAccountUrl` to `04-build.ps1`. When you do, the OIDC **client secret, issuer, client id, and admin username must match** between the identity-provider step (`idp-keycloak-setup.ps1` or your external provider) and `05-deploy-api.ps1` — a mismatch surfaces as a login failure, not an install error. Open a **fresh** elevated PowerShell after `03-prereqs-node.ps1` installs Node, so the updated `PATH` is in effect before `04-build.ps1` runs.
