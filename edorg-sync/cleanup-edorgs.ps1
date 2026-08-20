@@ -115,7 +115,13 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     # Path to the .env file used for defaults (copy .env.example and edit it).
-    [string]$EnvFile = "$PSScriptRoot/.env",
+    # Deliberately NOT defaulted here: this script is an advanced one
+    # ([CmdletBinding]), and $PSScriptRoot is empty while a parameter default is
+    # evaluated, so "$PSScriptRoot/.env" would resolve to '/.env'. The .env would
+    # then be silently ignored and every setting would fall back to its built-in
+    # default -- including tcp:localhost,1433, pointing the deletes at the wrong
+    # server. Resolved against $PSScriptRoot in the body instead, where it is set.
+    [string]$EnvFile,
     # Victim list. Default: the imported-ids.csv manifest import-edorgs.ps1
     # writes next to its CSV (only rows the import inserted are deleted).
     # Pass explicitly to delete every listed id instead (raw CSV mode).
@@ -154,6 +160,9 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/compat.ps1"
 
 # ---- Defaults: explicit parameter > .env value > built-in --------------------
+# See the -EnvFile parameter comment: the default belongs here, not in the param
+# block, because $PSScriptRoot is empty while parameter defaults are evaluated.
+if (-not $EnvFile) { $EnvFile = Join-Path $PSScriptRoot '.env' }
 $dotenv = if (Test-Path $EnvFile) { Read-DotEnv -Path $EnvFile } else { @{} }
 function Get-EnvValue
 {
