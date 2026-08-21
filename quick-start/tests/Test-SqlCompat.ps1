@@ -56,21 +56,41 @@ function Assert-Equal
 
 function Assert-Throws
 {
+    <#
+        -Matching asserts what the message SAYS, not merely that something was
+        thrown. Without it a refusal that stopped naming the target, or stopped
+        telling the operator which parameters to use instead, would still pass
+        and the actionable wording could rot unnoticed.
+    #>
     param(
         [Parameter(Mandatory = $true)][scriptblock]$Action,
-        [Parameter(Mandatory = $true)][string]$Because
+        [Parameter(Mandatory = $true)][string]$Because,
+        [string[]]$Matching
     )
+    $message = $null
     try
     {
         & $Action
-        $script:Failed++
-        Write-Host "  FAIL  $Because -- no error was thrown" -ForegroundColor Red
     }
     catch
     {
-        $script:Passed++
-        Write-Host "  PASS  $Because" -ForegroundColor Green
+        $message = "$($_.Exception.Message)"
     }
+    if ($null -eq $message)
+    {
+        $script:Failed++
+        Write-Host "  FAIL  $Because -- no error was thrown" -ForegroundColor Red
+        return
+    }
+    $absent = @($Matching | Where-Object { $_ -and $message -notlike "*$_*" })
+    if ($absent.Count -gt 0)
+    {
+        $script:Failed++
+        Write-Host "  FAIL  $Because -- the message never mentioned '$($absent -join "', '")': $message" -ForegroundColor Red
+        return
+    }
+    $script:Passed++
+    Write-Host "  PASS  $Because" -ForegroundColor Green
 }
 
 function Assert-DoesNotThrow
@@ -154,7 +174,8 @@ Assert-Equal -Expected 'count=2 :: -N -C' -Actual (Get-SplattedArgs @remoteTrust
 
 Write-Host ""
 Write-Host "Assert-SqlAuthSupported -- Windows authentication against a remote target" -ForegroundColor Cyan
-Assert-Throws -Because 'integrated security is refused for a remote host' -Action {
+Assert-Throws -Because 'integrated security is refused for a remote host, naming the target and the way out' `
+    -Matching 'myserver.database.windows.net', '-UseIntegratedSecurity', '-SecurityDbUsername', '-SecurityDbPassword', 'SQL authentication' -Action {
     Assert-SqlAuthSupported -SqlServer 'myserver.database.windows.net' -UseIntegratedSecurity $true -UsernameParameterName '-SecurityDbUsername' -PasswordParameterName '-SecurityDbPassword'
 }
 Assert-DoesNotThrow -Because 'integrated security is allowed for a local instance' -Action {
@@ -163,6 +184,43 @@ Assert-DoesNotThrow -Because 'integrated security is allowed for a local instanc
 Assert-DoesNotThrow -Because 'a remote host with SQL authentication is allowed' -Action {
     Assert-SqlAuthSupported -SqlServer 'myserver.database.windows.net' -UseIntegratedSecurity $false -UsernameParameterName '-SecurityDbUsername' -PasswordParameterName '-SecurityDbPassword'
 }
+
+Write-Host ""
+Write-Host "Invoke-WithDbPassword -- the variable is restored, never just cleared" -ForegroundColor Cyan
+# The point of the helper: a parent automation process may have exported its own
+# SQLCMDPASSWORD, and deleting it would break the rest of that parent's run.
+Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
+Assert-Equal -Expected 'secret' -Actual (Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password 'secret' -Action { $env:SQLCMDPASSWORD }) -Because 'the password is visible to the action'
+Assert-Equal -Expected 'False' -Actual "$(Test-Path Env:SQLCMDPASSWORD)" -Because 'a variable that did not exist before is removed afterwards'
+$env:SQLCMDPASSWORD = 'from-the-parent'
+[void](Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password 'secret' -Action { $env:SQLCMDPASSWORD })
+Assert-Equal -Expected 'from-the-parent' -Actual "$env:SQLCMDPASSWORD" -Because "a parent's value is put back, not deleted"
+Assert-Throws -Because 'an error inside the action still propagates' -Matching 'boom' -Action {
+    Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password 'secret' -Action { throw 'boom' }
+}
+Assert-Equal -Expected 'from-the-parent' -Actual "$env:SQLCMDPASSWORD" -Because "a parent's value is put back even when the action throws"
+Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
+
+Write-Host ""
+Write-Host "Both folders' helpers agree (they are separate copies)" -ForegroundColor Cyan
+# quick-start/ and edorg-sync/ each dot-source their own compat.ps1, so the
+# certificate decision lives in two places and could drift. Dot-sourcing the
+# other copy inside & { } scopes its functions to that block, so the two
+# implementations can be run over the same inputs and compared here.
+$hostMatrix = @('localhost', 'tcp:localhost,1433', '(local)', '.', '127.0.0.1', '[::1]',
+                'localhost\SQLEXPRESS', 'np:\\.\pipe\sql\query', $env:COMPUTERNAME, '',
+                'myserver.database.windows.net', 'tcp:myserver.database.windows.net,1433',
+                '10.0.0.5', 'sqlbox', 'sqlbox\SQLEXPRESS')
+$thisFolder = foreach ($h in $hostMatrix) {
+    '{0}|{1}|{2}' -f $h, ((Get-SqlcmdTrustArgs -SqlServer $h) -join ' '), ((Get-SqlcmdTrustArgs -SqlServer $h -TrustServerCertificate) -join ' ')
+}
+$otherFolder = & {
+    . "$PSScriptRoot/../../edorg-sync/compat.ps1"
+    foreach ($h in $hostMatrix) {
+        '{0}|{1}|{2}' -f $h, ((Get-SqlcmdTrustArgs -SqlServer $h) -join ' '), ((Get-SqlcmdTrustArgs -SqlServer $h -TrustServerCertificate) -join ' ')
+    }
+}
+Assert-Equal -Expected ($thisFolder -join "`n") -Actual ($otherFolder -join "`n") -Because "edorg-sync/compat.ps1 returns the same flags for all $($hostMatrix.Count) targets"
 
 Write-Host ""
 Write-Host ("{0} passed, {1} failed." -f $script:Passed, $script:Failed) -ForegroundColor $(if ($script:Failed) { 'Red' } else { 'Green' })
