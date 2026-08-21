@@ -115,7 +115,13 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     # Path to the .env file used for defaults (copy .env.example and edit it).
-    [string]$EnvFile = "$PSScriptRoot/.env",
+    # Deliberately NOT defaulted here: this script is an advanced one
+    # ([CmdletBinding]), and $PSScriptRoot is empty while a parameter default is
+    # evaluated, so "$PSScriptRoot/.env" would resolve to '/.env'. The .env would
+    # then be silently ignored and every setting would fall back to its built-in
+    # default -- including tcp:localhost,1433, pointing the deletes at the wrong
+    # server. Resolved against $PSScriptRoot in the body instead, where it is set.
+    [string]$EnvFile,
     # Victim list. Default: the imported-ids.csv manifest import-edorgs.ps1
     # writes next to its CSV (only rows the import inserted are deleted).
     # Pass explicitly to delete every listed id instead (raw CSV mode).
@@ -154,6 +160,9 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/compat.ps1"
 
 # ---- Defaults: explicit parameter > .env value > built-in --------------------
+# See the -EnvFile parameter comment: the default belongs here, not in the param
+# block, because $PSScriptRoot is empty while parameter defaults are evaluated.
+if (-not $EnvFile) { $EnvFile = Join-Path $PSScriptRoot '.env' }
 $dotenv = if (Test-Path $EnvFile) { Read-DotEnv -Path $EnvFile } else { @{} }
 function Get-EnvValue
 {
@@ -193,6 +202,15 @@ if (-not $PostgresPort) { $PostgresPort = [int](Get-EnvValue 'POSTGRES_PORT' '54
 if (-not $PostgresAppUser) { $PostgresAppUser = Get-EnvValue 'POSTGRES_APP_USER' 'edfiadminapp' }
 if (-not $UsePostgresDocker -and (Test-EnvTrue 'USE_POSTGRES_DOCKER')) { $UsePostgresDocker = $true }
 if (-not $PostgresContainerName) { $PostgresContainerName = Get-EnvValue 'POSTGRES_CONTAINER' 'edfiadminapp-postgres' }
+
+# Windows authentication cannot reach a managed Azure SQL Database. Fail here
+# rather than at the sqlcmd call, which reports it as a raw driver error --
+# and before the password prompt below, which it would make pointless.
+if ($DbEngine -eq 'mssql')
+{
+    Assert-SqlAuthSupported -SqlServer $SqlServer -UseIntegratedSecurity ([bool]$UseIntegratedSecurity) `
+        -UsernameParameterName '-DbUsername' -PasswordParameterName '-DbPassword'
+}
 
 # Passwords not passed as a parameter or set in the .env are prompted for
 # (masked), like run.ps1.
@@ -238,8 +256,13 @@ function Invoke-AdminAppSql
             # UTF-8 with BOM so sqlcmd decodes non-ASCII input correctly
             # ('utf8BOM' is not a valid encoding name on 5.1).
             Write-Utf8BomFile -Path $tempFile -Content $Sql
-            if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
-            $out = & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            # Invoke-WithDbPassword restores whatever SQLCMDPASSWORD held before
+            # rather than deleting it: a parent process may have exported its own.
+            # It also handles the -WhatIf:$false / -Confirm:$false this script's
+            # SupportsShouldProcess would otherwise propagate into the variable.
+            $out = Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $(if ($UseIntegratedSecurity) { '' } else { $DbPassword }) -Action {
+                & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            }
             if ($LASTEXITCODE -ne 0)
             {
                 $out | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
@@ -251,31 +274,23 @@ function Invoke-AdminAppSql
         {
             # -WhatIf:$false -Confirm:$false: housekeeping must always run --
             # the script's own SupportsShouldProcess would otherwise propagate
-            # -WhatIf here and leave the password in the environment.
-            Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
+            # -WhatIf here and leave the temporary SQL file on disk.
             Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
         }
     }
 
     # Pass the password through the environment, never on the command line:
     # `docker exec -e PGPASSWORD` (no value) forwards it from this process, so
-    # the secret stays out of the docker argv; cleared in the finally.
-    $env:PGPASSWORD = $PostgresAppPassword
-    try
-    {
+    # the secret stays out of the docker argv. Restored afterwards, not deleted.
+    $out = Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresAppPassword -Action {
         if ($UsePostgresDocker)
         {
-            $out = $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+            $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
         }
         else
         {
-            $out = $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+            $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
         }
-    }
-    finally
-    {
-        # Always runs (see the SQLCMDPASSWORD note above).
-        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
     }
     if ($LASTEXITCODE -ne 0)
     {

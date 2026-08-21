@@ -72,6 +72,14 @@
   ./bootstrap.ps1 -AdminPassword 'admin' -AppDbPassword 'EdFi-App!2026'
 
 .EXAMPLE
+  # Managed Azure SQL Database instead of a local instance. -AppDbUsername is the
+  # contained user created in the application database; Azure SQL accepts SQL
+  # authentication only, and the connection is encrypted and validated.
+  ./bootstrap.ps1 -AdminPassword 'admin' `
+    -AppSqlServer 'tcp:myserver.database.windows.net,1433' `
+    -AppDbPassword 'EdFi-App!2026'
+
+.EXAMPLE
   # Keycloak against Postgres instead:
   ./bootstrap.ps1 -AdminPassword 'admin' `
     -DbEngine pgsql -PostgresAppPassword 'edfi'
@@ -136,10 +144,20 @@ param(
     # human admin). Connection parameters mirror windows-install/install-all.ps1.
     [ValidateSet('mssql', 'pgsql')][string]$DbEngine = 'mssql',
     [switch]$UsePostgresDocker,
+    # mssql: the server hosting the Admin App application database. A remote
+    # FQDN (e.g. a managed Azure SQL Database, 'myserver.database.windows.net')
+    # is connected with encryption and certificate validation; the loopback
+    # default trusts the local instance's self-signed certificate.
+    [string]$AppSqlServer = 'tcp:localhost,1433',
+    # mssql: skip certificate validation on a remote server presenting a
+    # self-signed/dev certificate. Ignored for a loopback target, which always
+    # trusts.
+    [switch]$TrustServerCertificate,
     # mssql login: the dedicated least-privilege app login created by
     # windows-install/install-all.ps1 (-AppDbPassword there). It is db_owner on
     # the app database, which is all this seed needs -- 'sa' is deliberately
-    # not used (EDFI-2776).
+    # not used (EDFI-2776). On a managed Azure SQL Database it is the contained
+    # user created in that database; SQL authentication is required there.
     [string]$AppDbUsername = 'edfi_adminapp',
     [string]$AppDbPassword,                      # required for -DbEngine mssql
     [string]$PostgresAppPassword,                # required for -DbEngine pgsql
@@ -175,6 +193,7 @@ if ($Provider -eq 'auth0' -and -not $Auth0Issuer) { throw "-Auth0Issuer (the ten
 if ($DbEngine -eq 'mssql' -and -not $AppDbPassword) { throw "-AppDbPassword (the install-all.ps1 app login's password) is required when -DbEngine is 'mssql' (the default)." }
 if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppPassword is required when -DbEngine is 'pgsql'." }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'." }
+if ($DbEngine -ne 'mssql' -and $PSBoundParameters.ContainsKey('AppSqlServer')) { throw "-AppSqlServer only applies when -DbEngine is 'mssql' (it targets a remote SQL Server / Azure SQL Database). Remove it, or use -DbEngine mssql." }
 
 $script:rest = @{}
 if ($SkipCertificateCheck)
@@ -362,11 +381,16 @@ IF NOT EXISTS (SELECT 1 FROM [user] WHERE username = '$userNameSql' OR clientId 
 UPDATE [user] SET roleId = $AdminAppRoleId, isActive = 1, userType = 'machine', clientId = '$clientIdSql'
     WHERE username = '$userNameSql';
 "@
-    # -C (trust server certificate) is safe unconditionally: -S is the hardcoded
-    # loopback, never a parameterized remote host (contrast copy-claimsets.ps1,
-    # which takes -SqlServer and decides via Get-SqlcmdTrustArgs).
-    & sqlcmd -S "tcp:localhost,1433" -U $AppDbUsername -P $AppDbPassword -d $DatabaseName -C -Q $userSql
-    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername'. Check -AppDbUsername / -AppDbPassword / -DatabaseName." }
+    # Per target: a loopback instance trusts its self-signed certificate, a
+    # remote server encrypts AND validates. Same decision as copy-claimsets.ps1
+    # and the edorg-sync scripts.
+    $appTrustArgs = @(Get-SqlcmdTrustArgs -SqlServer $AppSqlServer -TrustServerCertificate:$TrustServerCertificate)
+    # The password goes through SQLCMDPASSWORD, never as -P: an argument is
+    # visible to anyone who can list processes while the call runs.
+    Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $AppDbPassword -Action {
+        & sqlcmd -S $AppSqlServer -U $AppDbUsername -d $DatabaseName @appTrustArgs -Q $userSql
+    }
+    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername' on '$AppSqlServer'. Check -AppSqlServer / -AppDbUsername / -AppDbPassword / -DatabaseName. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
 }
 else
 {
@@ -379,14 +403,19 @@ INSERT INTO "user" (username, "clientId", "userType", description, "roleId", "is
 UPDATE "user" SET "roleId" = $AdminAppRoleId, "isActive" = true, "userType" = 'machine', "clientId" = '$clientIdSql'
     WHERE username = '$userNameSql';
 "@
-    if ($UsePostgresDocker)
-    {
-        $userSql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" edfiadminapp-postgres psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
-    }
-    else
-    {
-        $env:PGPASSWORD = $PostgresAppPassword
-        $userSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+    # `docker exec -e PGPASSWORD` with NO value forwards it from this process,
+    # so the secret stays out of the docker argument list; `-e "PGPASSWORD=..."`
+    # would put it there in plain sight. Both branches read it from the
+    # environment, which is also restored afterwards.
+    Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresAppPassword -Action {
+        if ($UsePostgresDocker)
+        {
+            $userSql | & docker exec -i -e PGPASSWORD edfiadminapp-postgres psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+        }
+        else
+        {
+            $userSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+        }
     }
     if ($LASTEXITCODE -ne 0) { throw "psql failed (exit $LASTEXITCODE). Check -PostgresAppPassword / -PostgresHost / -PostgresPort / -PostgresAppUser / -DatabaseName." }
 }

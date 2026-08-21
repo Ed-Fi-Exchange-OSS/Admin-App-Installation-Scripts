@@ -168,6 +168,10 @@ $ErrorActionPreference = 'Stop'
 # Engine-specific required-arg validation.
 if ($DbEngine -eq 'mssql' -and -not $UseIntegratedSecurity -and -not $DbPassword) { throw "-DbPassword is required when -DbEngine is 'mssql' (the default) without -UseIntegratedSecurity." }
 if ($UseIntegratedSecurity -and $DbEngine -ne 'mssql') { throw "-UseIntegratedSecurity only applies when -DbEngine is 'mssql'." }
+# Windows authentication cannot reach a managed Azure SQL Database. Fail here
+# rather than at the sqlcmd call, which reports it as a raw driver error.
+Assert-SqlAuthSupported -SqlServer $SqlServer -UseIntegratedSecurity ([bool]$UseIntegratedSecurity) `
+    -UsernameParameterName '-DbUsername' -PasswordParameterName '-DbPassword'
 if ($DbEngine -eq 'pgsql' -and -not $PostgresAppPassword) { throw "-PostgresAppPassword is required when -DbEngine is 'pgsql'." }
 if ($UsePostgresDocker -and $DbEngine -ne 'pgsql') { throw "-UsePostgresDocker only applies when -DbEngine is 'pgsql'." }
 if (-not (Test-Path $CsvPath)) { throw "CSV not found: $CsvPath. Run export-edorgs.ps1 first (or pass -CsvPath)." }
@@ -201,8 +205,11 @@ function Invoke-AdminAppSql
             # UTF-8 with BOM so sqlcmd decodes non-ASCII institution names
             # correctly ('utf8BOM' is not a valid encoding name on 5.1).
             Write-Utf8BomFile -Path $tempFile -Content $Sql
-            if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
-            $out = & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            # Invoke-WithDbPassword restores whatever SQLCMDPASSWORD held before
+            # rather than deleting it: a parent process may have exported its own.
+            $out = Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $(if ($UseIntegratedSecurity) { '' } else { $DbPassword }) -Action {
+                & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            }
             if ($LASTEXITCODE -ne 0)
             {
                 $out | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
@@ -212,29 +219,22 @@ function Invoke-AdminAppSql
         }
         finally
         {
-            Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
             Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
         }
     }
 
     # Pass the password through the environment, never on the command line:
     # `docker exec -e PGPASSWORD` (no value) forwards it from this process, so
-    # the secret stays out of the docker argv; cleared in the finally.
-    $env:PGPASSWORD = $PostgresAppPassword
-    try
-    {
+    # the secret stays out of the docker argv. Restored afterwards, not deleted.
+    $out = Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresAppPassword -Action {
         if ($UsePostgresDocker)
         {
-            $out = $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+            $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
         }
         else
         {
-            $out = $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+            $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
         }
-    }
-    finally
-    {
-        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
     }
     if ($LASTEXITCODE -ne 0)
     {

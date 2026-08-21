@@ -115,6 +115,18 @@ if ($missing.Count -gt 0)
     throw "Missing required value(s) in ${EnvFile}: $($missing -join ', '). Edit the file and try again."
 }
 
+# Windows authentication cannot reach a managed Azure SQL Database, and
+# copy-claimsets.ps1 is the LAST step of this run: left to the child script, the
+# refusal would land after the machine user was seeded and the environment,
+# team, tenant, and ODS instances were already provisioned through the API,
+# leaving a half-built Quick Start behind. Refuse here, before the first prompt.
+if ($copyClaimsets -and $securityDbEngine -eq 'mssql')
+{
+    Assert-SqlAuthSupported -SqlServer (Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433') `
+        -UseIntegratedSecurity (Test-EnvTrue 'SECURITY_USE_INTEGRATED_SECURITY') `
+        -UsernameParameterName 'SECURITY_DB_USERNAME' -PasswordParameterName 'SECURITY_DB_PASSWORD'
+}
+
 # ---- Prompt for any password not provided in the .env -------------------------
 function Read-EnvSecret
 {
@@ -175,9 +187,13 @@ else
     }
     if ($dbEngine -eq 'mssql')
     {
+        # The server hosting the Admin App application database: the loopback
+        # default, or a remote FQDN such as a managed Azure SQL Database.
+        $bootstrapArgs.AppSqlServer = Get-EnvValue 'APP_SQL_SERVER' 'tcp:localhost,1433'
         # The least-privilege app login; 'sa' is deliberately not used (EDFI-2776).
         $bootstrapArgs.AppDbUsername = Get-EnvValue 'APP_DB_USERNAME' 'edfi_adminapp'
         $bootstrapArgs.AppDbPassword = Get-EnvValue 'APP_DB_PASSWORD'
+        if (Test-EnvTrue 'SQL_TRUST_SERVER_CERTIFICATE') { $bootstrapArgs.TrustServerCertificate = $true }
     }
     else
     {
