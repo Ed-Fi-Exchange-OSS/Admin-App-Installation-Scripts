@@ -249,7 +249,11 @@ DELETE FROM [user]
     # remote server encrypts AND validates. Same decision as the EdFi_Security
     # calls below, which take -SecuritySqlServer.
     $appTrustArgs = @(Get-SqlcmdTrustArgs -SqlServer $AppSqlServer -TrustServerCertificate:$TrustServerCertificate)
-    & sqlcmd -S $AppSqlServer -U $AppDbUsername -P $AppDbPassword -d $DatabaseName @appTrustArgs -Q $cleanupSql
+    # The password goes through SQLCMDPASSWORD, never as -P: an argument is
+    # visible to anyone who can list processes while the call runs.
+    Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $AppDbPassword -Action {
+        & sqlcmd -S $AppSqlServer -U $AppDbUsername -d $DatabaseName @appTrustArgs -Q $cleanupSql
+    }
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername' on '$AppSqlServer'. Check -AppSqlServer / -AppDbUsername / -AppDbPassword / -DatabaseName. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
 }
 else
@@ -279,14 +283,17 @@ DELETE FROM team WHERE name = '$teamNameSql';
 DELETE FROM "user"
  WHERE username = '$machineUser' AND "userType" = 'machine';
 "@
-    if ($UsePostgresDocker)
-    {
-        $cleanupSql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" edfiadminapp-postgres psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
-    }
-    else
-    {
-        $env:PGPASSWORD = $PostgresAppPassword
-        $cleanupSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+    # `docker exec -e PGPASSWORD` with NO value forwards it from this process,
+    # keeping the secret out of the docker argument list.
+    Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresAppPassword -Action {
+        if ($UsePostgresDocker)
+        {
+            $cleanupSql | & docker exec -i -e PGPASSWORD edfiadminapp-postgres psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+        }
+        else
+        {
+            $cleanupSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+        }
     }
     if ($LASTEXITCODE -ne 0) { throw "psql failed (exit $LASTEXITCODE). Check -PostgresAppPassword / -PostgresHost / -PostgresPort / -PostgresAppUser / -DatabaseName." }
 }
@@ -328,14 +335,18 @@ WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
 "@
     # @(...) wrap is load-bearing: a one-element if-expression result is a scalar
     # string, and splatting a scalar garbles the native argument list.
-    $secAuthArgs = @(if ($securityUseIntegratedSecurity) { '-E' } else { '-U', $SecurityDbUsername, '-P', $SecurityDbPassword })
+    # No -P: the password reaches sqlcmd through SQLCMDPASSWORD below, so it is
+    # never visible in this process's argument list.
+    $secAuthArgs = @(if ($securityUseIntegratedSecurity) { '-E' } else { '-U', $SecurityDbUsername })
     # -C (trust server certificate) only where it is safe: a loopback target or
     # an explicit opt-in. Same @(...) rule as $secAuthArgs above.
     $secTrustArgs = @(Get-SqlcmdTrustArgs -SqlServer $SecuritySqlServer -TrustServerCertificate:$TrustServerCertificate)
     # Count first so the outcome is honest: a blanket "removed" message when
     # nothing matched reads as a successful delete of copies that were never there.
     $countSql = "SET NOCOUNT ON; SELECT COUNT(*) FROM dbo.ClaimSets cs WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;"
-    $matched = @(& sqlcmd -S $SecuritySqlServer @secAuthArgs @secTrustArgs -d $securityDatabaseName -b -h -1 -W -Q $countSql | Where-Object { "$_".Trim() })[0]
+    $matched = @(Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $SecurityDbPassword -Action {
+            & sqlcmd -S $SecuritySqlServer @secAuthArgs @secTrustArgs -d $securityDatabaseName -b -h -1 -W -Q $countSql | Where-Object { "$_".Trim() }
+        })[0]
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed counting the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
     if ([int]"$matched" -eq 0)
     {
@@ -343,7 +354,9 @@ WHERE $claimsetFilter AND cs.IsEdfiPreset = 0;
     }
     else
     {
-        & sqlcmd -S $SecuritySqlServer @secAuthArgs @secTrustArgs -d $securityDatabaseName -b -Q $claimsetSql
+        Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $SecurityDbPassword -Action {
+            & sqlcmd -S $SecuritySqlServer @secAuthArgs @secTrustArgs -d $securityDatabaseName -b -Q $claimsetSql
+        }
         if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed removing the claimset copies (exit $LASTEXITCODE). Check -SecuritySqlServer / -SecurityDbUsername / -SecurityDbPassword / SECURITY_DATABASE_NAME." }
         Write-Host "Removed $matched claimset copies from '$securityDatabaseName'." -ForegroundColor Green
     }
@@ -375,14 +388,15 @@ WHERE $claimsetFilter AND cs.isedfipreset = FALSE;
 "@
     # Count first so the outcome is honest (same reason as the mssql branch).
     $countSql = "SELECT COUNT(*) FROM dbo.claimsets cs WHERE $claimsetFilter AND cs.isedfipreset = FALSE;"
-    if ($securityUsePostgresDocker)
-    {
-        $matched = "$($countSql | & docker exec -i -e "PGPASSWORD=$postgresSecurityPassword" $securityPostgresContainer psql -U $postgresSecurityUser -d $securityDatabaseName -v ON_ERROR_STOP=1 -t -A)".Trim()
-    }
-    else
-    {
-        $env:PGPASSWORD = $postgresSecurityPassword
-        $matched = "$($countSql | & psql -h $postgresSecurityHost -p $postgresSecurityPort -U $postgresSecurityUser -d $securityDatabaseName -v ON_ERROR_STOP=1 -t -A)".Trim()
+    $matched = Invoke-WithDbPassword -Name PGPASSWORD -Password $postgresSecurityPassword -Action {
+        if ($securityUsePostgresDocker)
+        {
+            "$($countSql | & docker exec -i -e PGPASSWORD $securityPostgresContainer psql -U $postgresSecurityUser -d $securityDatabaseName -v ON_ERROR_STOP=1 -t -A)".Trim()
+        }
+        else
+        {
+            "$($countSql | & psql -h $postgresSecurityHost -p $postgresSecurityPort -U $postgresSecurityUser -d $securityDatabaseName -v ON_ERROR_STOP=1 -t -A)".Trim()
+        }
     }
     if ($LASTEXITCODE -ne 0) { throw "psql failed counting the claimset copies (exit $LASTEXITCODE). Check POSTGRES_SECURITY_PASSWORD / POSTGRES_SECURITY_HOST / POSTGRES_SECURITY_PORT / POSTGRES_SECURITY_USER (or their POSTGRES_* fallbacks) / SECURITY_DATABASE_NAME." }
     if ([int]$matched -eq 0)
@@ -391,14 +405,15 @@ WHERE $claimsetFilter AND cs.isedfipreset = FALSE;
     }
     else
     {
-        if ($securityUsePostgresDocker)
-        {
-            $claimsetSql | & docker exec -i -e "PGPASSWORD=$postgresSecurityPassword" $securityPostgresContainer psql -U $postgresSecurityUser -d $securityDatabaseName -v ON_ERROR_STOP=1
-        }
-        else
-        {
-            $env:PGPASSWORD = $postgresSecurityPassword
-            $claimsetSql | & psql -h $postgresSecurityHost -p $postgresSecurityPort -U $postgresSecurityUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+        Invoke-WithDbPassword -Name PGPASSWORD -Password $postgresSecurityPassword -Action {
+            if ($securityUsePostgresDocker)
+            {
+                $claimsetSql | & docker exec -i -e PGPASSWORD $securityPostgresContainer psql -U $postgresSecurityUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+            }
+            else
+            {
+                $claimsetSql | & psql -h $postgresSecurityHost -p $postgresSecurityPort -U $postgresSecurityUser -d $securityDatabaseName -v ON_ERROR_STOP=1
+            }
         }
         if ($LASTEXITCODE -ne 0) { throw "psql failed removing the claimset copies (exit $LASTEXITCODE). Check POSTGRES_SECURITY_PASSWORD / POSTGRES_SECURITY_HOST / POSTGRES_SECURITY_PORT / POSTGRES_SECURITY_USER (or their POSTGRES_* fallbacks) / SECURITY_DATABASE_NAME." }
         Write-Host "Removed $matched claimset copies from '$securityDatabaseName'." -ForegroundColor Green

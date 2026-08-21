@@ -385,7 +385,11 @@ UPDATE [user] SET roleId = $AdminAppRoleId, isActive = 1, userType = 'machine', 
     # remote server encrypts AND validates. Same decision as copy-claimsets.ps1
     # and the edorg-sync scripts.
     $appTrustArgs = @(Get-SqlcmdTrustArgs -SqlServer $AppSqlServer -TrustServerCertificate:$TrustServerCertificate)
-    & sqlcmd -S $AppSqlServer -U $AppDbUsername -P $AppDbPassword -d $DatabaseName @appTrustArgs -Q $userSql
+    # The password goes through SQLCMDPASSWORD, never as -P: an argument is
+    # visible to anyone who can list processes while the call runs.
+    Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $AppDbPassword -Action {
+        & sqlcmd -S $AppSqlServer -U $AppDbUsername -d $DatabaseName @appTrustArgs -Q $userSql
+    }
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE) as login '$AppDbUsername' on '$AppSqlServer'. Check -AppSqlServer / -AppDbUsername / -AppDbPassword / -DatabaseName. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
 }
 else
@@ -399,14 +403,19 @@ INSERT INTO "user" (username, "clientId", "userType", description, "roleId", "is
 UPDATE "user" SET "roleId" = $AdminAppRoleId, "isActive" = true, "userType" = 'machine', "clientId" = '$clientIdSql'
     WHERE username = '$userNameSql';
 "@
-    if ($UsePostgresDocker)
-    {
-        $userSql | & docker exec -i -e "PGPASSWORD=$PostgresAppPassword" edfiadminapp-postgres psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
-    }
-    else
-    {
-        $env:PGPASSWORD = $PostgresAppPassword
-        $userSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+    # `docker exec -e PGPASSWORD` with NO value forwards it from this process,
+    # so the secret stays out of the docker argument list; `-e "PGPASSWORD=..."`
+    # would put it there in plain sight. Both branches read it from the
+    # environment, which is also restored afterwards.
+    Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresAppPassword -Action {
+        if ($UsePostgresDocker)
+        {
+            $userSql | & docker exec -i -e PGPASSWORD edfiadminapp-postgres psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+        }
+        else
+        {
+            $userSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1
+        }
     }
     if ($LASTEXITCODE -ne 0) { throw "psql failed (exit $LASTEXITCODE). Check -PostgresAppPassword / -PostgresHost / -PostgresPort / -PostgresAppUser / -DatabaseName." }
 }

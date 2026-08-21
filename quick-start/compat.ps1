@@ -102,6 +102,54 @@ function Read-Secret
     return $value
 }
 
+function Invoke-WithDbPassword
+{
+    <#
+    .SYNOPSIS
+        Runs a scriptblock with a database password in an environment variable,
+        then puts back whatever the variable held before.
+    .DESCRIPTION
+        Keeps the secret off the command line. A password passed as `sqlcmd -P`
+        or as `docker exec -e VAR=value` is visible to anyone who can list
+        processes, for as long as the call runs; both tools read the value from
+        the environment instead, which is not. This is how the edorg-sync
+        scripts have always passed theirs.
+
+        The variable is RESTORED, not deleted: a parent automation process may
+        have exported its own SQLCMDPASSWORD or PGPASSWORD, and clearing it
+        would break the rest of that parent's run. When the variable did not
+        exist beforehand it is removed, so nothing is left behind either.
+
+        -WhatIf:$false / -Confirm:$false on the two item calls is load-bearing:
+        a caller declaring [CmdletBinding(SupportsShouldProcess)] would
+        otherwise turn setting the variable into a prompt, or skip it under
+        -WhatIf and run the query with no password at all.
+    .EXAMPLE
+        Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $pw -Action {
+            & sqlcmd -S $server -U $user @trustArgs -Q $sql
+        }
+    #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('SQLCMDPASSWORD', 'PGPASSWORD')][string]$Name,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
+        [Parameter(Mandatory = $true)][scriptblock]$Action
+    )
+
+    $path = "Env:$Name"
+    $had = Test-Path $path
+    $previous = if ($had) { (Get-Item $path).Value } else { $null }
+    Set-Item -Path $path -Value $Password -WhatIf:$false -Confirm:$false
+    try
+    {
+        & $Action
+    }
+    finally
+    {
+        if ($had) { Set-Item -Path $path -Value $previous -WhatIf:$false -Confirm:$false }
+        else { Remove-Item -Path $path -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false }
+    }
+}
+
 function Test-IsRemoteSqlTarget
 {
     <#

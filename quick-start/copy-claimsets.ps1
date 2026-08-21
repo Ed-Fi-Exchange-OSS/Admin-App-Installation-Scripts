@@ -118,7 +118,9 @@ if ($DbEngine -eq 'mssql')
     # The @(...) wrap is load-bearing: assignment from an if-expression unrolls
     # a one-element array to a scalar string, and splatting a scalar to a
     # native command garbles the argument list.
-    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $SqlUser, '-P', $SqlPassword })
+    # No -P: the password reaches sqlcmd through SQLCMDPASSWORD at each call
+    # site, so it is never visible in this process's argument list.
+    $authArgs = @(if ($UseIntegratedSecurity) { '-E' } else { '-U', $SqlUser })
 
     # -C (trust server certificate) only where it is safe: a loopback target or
     # an explicit opt-in. Same @(...) rule as $authArgs above.
@@ -133,20 +135,25 @@ if ($ClaimSetNames.Count -eq 0)
     if ($DbEngine -eq 'mssql')
     {
         $listSql = 'SET NOCOUNT ON; SELECT ClaimSetName FROM dbo.ClaimSets WHERE IsEdfiPreset = 1 AND ForApplicationUseOnly = 0 ORDER BY ClaimSetId;'
-        $raw = & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -Q $listSql
+        $raw = Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $SqlPassword -Action {
+            & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -Q $listSql
+        }
         if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed listing claimsets (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
     }
     else
     {
         $listSql = 'SELECT claimsetname FROM dbo.claimsets WHERE isedfipreset = TRUE AND forapplicationuseonly = FALSE ORDER BY claimsetid;'
-        if ($UsePostgresDocker)
-        {
-            $raw = $listSql | & docker exec -i -e "PGPASSWORD=$PostgresPassword" $PostgresContainerName psql -U $PostgresUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A
-        }
-        else
-        {
-            $env:PGPASSWORD = $PostgresPassword
-            $raw = $listSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A
+        # `docker exec -e PGPASSWORD` with NO value forwards it from this
+        # process, keeping the secret out of the docker argument list.
+        $raw = Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresPassword -Action {
+            if ($UsePostgresDocker)
+            {
+                $listSql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A
+            }
+            else
+            {
+                $listSql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A
+            }
         }
         if ($LASTEXITCODE -ne 0) { throw "psql failed listing claimsets (exit $LASTEXITCODE). Check -PostgresPassword / -PostgresHost / -PostgresPort / -PostgresUser / -DatabaseName." }
     }
@@ -220,7 +227,9 @@ END
 "@
         # -b makes sqlcmd exit nonzero on SQL errors; without it $LASTEXITCODE
         # stays 0 and failures would pass silently.
-        & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -Q $sql
+        Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $SqlPassword -Action {
+            & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -Q $sql
+        }
         if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed for claimset '$name' (exit $LASTEXITCODE). Check -SqlServer / -SqlUser / -SqlPassword / -DatabaseName." }
     }
     else
@@ -271,14 +280,15 @@ BEGIN
 END
 `$`$;
 "@
-        if ($UsePostgresDocker)
-        {
-            $sql | & docker exec -i -e "PGPASSWORD=$PostgresPassword" $PostgresContainerName psql -U $PostgresUser -d $DatabaseName -v ON_ERROR_STOP=1
-        }
-        else
-        {
-            $env:PGPASSWORD = $PostgresPassword
-            $sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresUser -d $DatabaseName -v ON_ERROR_STOP=1
+        Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresPassword -Action {
+            if ($UsePostgresDocker)
+            {
+                $sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresUser -d $DatabaseName -v ON_ERROR_STOP=1
+            }
+            else
+            {
+                $sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresUser -d $DatabaseName -v ON_ERROR_STOP=1
+            }
         }
         if ($LASTEXITCODE -ne 0) { throw "psql failed for claimset '$name' (exit $LASTEXITCODE). Check -PostgresPassword / -PostgresHost / -PostgresPort / -PostgresUser / -DatabaseName." }
     }

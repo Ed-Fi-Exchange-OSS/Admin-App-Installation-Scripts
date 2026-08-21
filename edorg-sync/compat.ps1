@@ -41,6 +41,50 @@ function Read-Secret
     return $value
 }
 
+function Invoke-WithDbPassword
+{
+    <#
+    .SYNOPSIS
+        Runs a scriptblock with a database password in an environment variable,
+        then puts back whatever the variable held before.
+    .DESCRIPTION
+        These scripts already kept the secret off the command line by exporting
+        SQLCMDPASSWORD / PGPASSWORD around each call, but they CLEARED the
+        variable afterwards. A parent automation process may have exported its
+        own value, and deleting it breaks the rest of that parent's run. This
+        restores the previous value instead, and removes the variable only when
+        it did not exist beforehand, so nothing is left behind either.
+
+        -WhatIf:$false / -Confirm:$false on the two item calls is load-bearing:
+        cleanup-edorgs.ps1 declares [CmdletBinding(SupportsShouldProcess)], so
+        without them setting the variable would turn into a prompt, or be
+        skipped under -WhatIf and the query would run with no password at all.
+    .EXAMPLE
+        Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $pw -Action {
+            & sqlcmd -S $server -U $user @trustArgs -Q $sql
+        }
+    #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('SQLCMDPASSWORD', 'PGPASSWORD')][string]$Name,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
+        [Parameter(Mandatory = $true)][scriptblock]$Action
+    )
+
+    $path = "Env:$Name"
+    $had = Test-Path $path
+    $previous = if ($had) { (Get-Item $path).Value } else { $null }
+    Set-Item -Path $path -Value $Password -WhatIf:$false -Confirm:$false
+    try
+    {
+        & $Action
+    }
+    finally
+    {
+        if ($had) { Set-Item -Path $path -Value $previous -WhatIf:$false -Confirm:$false }
+        else { Remove-Item -Path $path -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false }
+    }
+}
+
 function Test-IsRemoteSqlTarget
 {
     <#

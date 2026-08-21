@@ -195,14 +195,10 @@ FOR JSON PATH, INCLUDE_NULL_VALUES;
     # -y 0 stops sqlcmd truncating the (long) JSON column (and excludes -h -1,
     # so a header line comes along); the document also arrives wrapped across
     # lines. Join everything and cut from the first '[' to the last ']'.
-    if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
-    try
-    {
-        $raw = & sqlcmd -S $SqlServer @authArgs @trustArgs -d $OdsDatabaseName -b -y 0 -Q $sql
-    }
-    finally
-    {
-        Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
+    # Invoke-WithDbPassword restores whatever SQLCMDPASSWORD held before rather
+    # than deleting it: a parent automation process may have exported its own.
+    $raw = Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $(if ($UseIntegratedSecurity) { '' } else { $DbPassword }) -Action {
+        & sqlcmd -S $SqlServer @authArgs @trustArgs -d $OdsDatabaseName -b -y 0 -Q $sql
     }
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed (exit $LASTEXITCODE). Check -SqlServer / -DbUsername / -DbPassword / -OdsDatabaseName. If it reports that the certificate chain is not trusted, the server uses a self-signed certificate: pass -TrustServerCertificate (or set SQL_TRUST_SERVER_CERTIFICATE=true in the .env)." }
     $joined = @($raw) -join ''
@@ -241,22 +237,16 @@ COPY (
 "@
     # Pass the password through the environment, never on the command line:
     # `docker exec -e PGPASSWORD` (no value) forwards it from this process, so
-    # the secret stays out of the docker argv; cleared in the finally.
-    $env:PGPASSWORD = $PostgresPassword
-    try
-    {
+    # the secret stays out of the docker argv. Restored afterwards, not deleted.
+    $raw = Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresPassword -Action {
         if ($UsePostgresDocker)
         {
-            $raw = $sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresUser -d $OdsDatabaseName -v ON_ERROR_STOP=1
+            $sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresUser -d $OdsDatabaseName -v ON_ERROR_STOP=1
         }
         else
         {
-            $raw = $sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresUser -d $OdsDatabaseName -v ON_ERROR_STOP=1
+            $sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresUser -d $OdsDatabaseName -v ON_ERROR_STOP=1
         }
-    }
-    finally
-    {
-        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
     }
     if ($LASTEXITCODE -ne 0) { throw "psql failed (exit $LASTEXITCODE). Check -PostgresPassword / -PostgresHost / -PostgresPort / -PostgresUser / -OdsDatabaseName." }
     if (@($raw).Count -gt 1) { $rows = @($raw | ConvertFrom-Csv) }

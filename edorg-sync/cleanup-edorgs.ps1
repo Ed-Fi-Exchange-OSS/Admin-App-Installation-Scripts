@@ -256,8 +256,13 @@ function Invoke-AdminAppSql
             # UTF-8 with BOM so sqlcmd decodes non-ASCII input correctly
             # ('utf8BOM' is not a valid encoding name on 5.1).
             Write-Utf8BomFile -Path $tempFile -Content $Sql
-            if (-not $UseIntegratedSecurity) { $env:SQLCMDPASSWORD = $DbPassword }
-            $out = & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            # Invoke-WithDbPassword restores whatever SQLCMDPASSWORD held before
+            # rather than deleting it: a parent process may have exported its own.
+            # It also handles the -WhatIf:$false / -Confirm:$false this script's
+            # SupportsShouldProcess would otherwise propagate into the variable.
+            $out = Invoke-WithDbPassword -Name SQLCMDPASSWORD -Password $(if ($UseIntegratedSecurity) { '' } else { $DbPassword }) -Action {
+                & sqlcmd -S $SqlServer @authArgs @trustArgs -d $DatabaseName -b -h -1 -W -s '|' -i $tempFile
+            }
             if ($LASTEXITCODE -ne 0)
             {
                 $out | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
@@ -269,31 +274,23 @@ function Invoke-AdminAppSql
         {
             # -WhatIf:$false -Confirm:$false: housekeeping must always run --
             # the script's own SupportsShouldProcess would otherwise propagate
-            # -WhatIf here and leave the password in the environment.
-            Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
+            # -WhatIf here and leave the temporary SQL file on disk.
             Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
         }
     }
 
     # Pass the password through the environment, never on the command line:
     # `docker exec -e PGPASSWORD` (no value) forwards it from this process, so
-    # the secret stays out of the docker argv; cleared in the finally.
-    $env:PGPASSWORD = $PostgresAppPassword
-    try
-    {
+    # the secret stays out of the docker argv. Restored afterwards, not deleted.
+    $out = Invoke-WithDbPassword -Name PGPASSWORD -Password $PostgresAppPassword -Action {
         if ($UsePostgresDocker)
         {
-            $out = $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+            $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
         }
         else
         {
-            $out = $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
+            $Sql | & psql -h $PostgresHost -p $PostgresPort -U $PostgresAppUser -d $DatabaseName -v ON_ERROR_STOP=1 -t -A -F '|'
         }
-    }
-    finally
-    {
-        # Always runs (see the SQLCMDPASSWORD note above).
-        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false
     }
     if ($LASTEXITCODE -ne 0)
     {
