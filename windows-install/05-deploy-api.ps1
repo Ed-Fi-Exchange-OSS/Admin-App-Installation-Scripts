@@ -161,8 +161,8 @@ param(
 
     # Data-at-rest encryption key (64 hex chars / 32 bytes) the AdminApp uses to
     # encrypt stored ODS/API environment secrets (aes-256-cbc). Empty -> reuse an
-    # already-deployed non-default key, or generate a fresh one on a clean box. A
-    # post-patch guard rejects the shipped default. Losing or changing this key
+    # already-deployed non-default key, or generate a fresh one on a clean box.
+    # Delivered through the App Pool's NODE_CONFIG. Losing or changing this key
     # makes previously-encrypted environment secrets unrecoverable.
     [string]$DbEncryptionKey = "",
 
@@ -217,6 +217,39 @@ function New-IisServerManager {
         Add-Type -Path "$env:SystemRoot\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
     }
     New-Object Microsoft.Web.Administration.ServerManager
+}
+
+# Returns the App Pool's NODE_CONFIG as an object, or $null on a clean box (no pool or
+# no variable yet). A read or parse failure also returns $null with a warning: the
+# caller then treats the install as new, and the encryption-key guard below still
+# stops a key rotation that would orphan existing data. The parse error is not shown
+# because its message can quote part of the JSON, which holds secrets.
+function Get-AppPoolNodeConfig {
+    param([Parameter(Mandatory)][string]$AppPoolName)
+
+    $nodeConfigText = $null
+    $readManager = $null
+    try {
+        $readManager = New-IisServerManager
+        $pool = $readManager.ApplicationPools[$AppPoolName]
+        if ($pool) {
+            $variable = @($pool.GetCollection('environmentVariables') | Where-Object { $_.GetAttributeValue('name') -eq 'NODE_CONFIG' }) | Select-Object -First 1
+            if ($variable) { $nodeConfigText = [string]$variable.GetAttributeValue('value') }
+        }
+    } catch {
+        Write-Warning "Could not read the existing NODE_CONFIG of App Pool '$AppPoolName', so secrets from an earlier install cannot be reused. Original: $($_.Exception.Message)"
+        return $null
+    } finally {
+        if ($readManager) { $readManager.Dispose() }
+    }
+
+    if (-not $nodeConfigText) { return $null }
+    try {
+        return $nodeConfigText | ConvertFrom-Json
+    } catch {
+        Write-Warning "The existing NODE_CONFIG of App Pool '$AppPoolName' is not valid JSON, so secrets from an earlier install cannot be reused."
+        return $null
+    }
 }
 
 # Precondition: IIS must be available (01-prereqs-iis.ps1 installs the IIS pieces).
@@ -301,15 +334,29 @@ if (-not (Test-Path "$apiBuildDir\main.js")) {
 #   3. node_modules (runtime deps)                      from repository root
 # Each piece is mirrored independently so /MIR doesn't wipe sibling content
 # (web.config, logs\, the other source piece).
-# Capture any already-deployed non-default encryption key BEFORE the file-copy
-# phase below overwrites production.js. The source ships a stub production.js that
-# the config copy would otherwise clobber, defeating key reuse and silently
-# rotating the key on every re-run. Reusing it keeps previously-encrypted ODS/API
-# environment secrets decryptable across a reinstall.
+# Capture the per-install secrets of an earlier deploy BEFORE the file-copy phase
+# below overwrites production.js, so a re-run reuses them instead of rotating them.
+# Reusing the encryption key keeps previously-encrypted ODS/API environment secrets
+# decryptable; reusing the session secret keeps signed-in users signed in.
+#   1. The App Pool's NODE_CONFIG, where this script delivers both secrets.
+#   2. A non-default KEY in the deployed production.js, where earlier versions of
+#      this script wrote the encryption key (no session secret existed then).
 $defaultKey = 'bbeadc2d4d15f5c9cfc2239b682cca392b233ee6979b6b9578d256aa01a7c565'
 $existingDeployedKey = ''
+$existingSessionSecret = @()
+$existingNodeConfig = Get-AppPoolNodeConfig -AppPoolName $AppPoolName
+if ($existingNodeConfig) {
+    $existingEncryption = $existingNodeConfig.DB_ENCRYPTION_SECRET_VALUE
+    if ($existingEncryption -and "$($existingEncryption.KEY)" -match '^[0-9a-f]{64}$' -and $existingEncryption.KEY -ne $defaultKey) {
+        $existingDeployedKey = $existingEncryption.KEY
+    }
+    $candidateSessionSecret = @($existingNodeConfig.SESSION_SECRET_VALUE | Where-Object { $_ -is [string] -and $_.Trim() })
+    if ($candidateSessionSecret.Count -gt 0) {
+        $existingSessionSecret = $candidateSessionSecret
+    }
+}
 $deployedProdJs = "$DestPath\packages\api\config\production.js"
-if (Test-Path $deployedProdJs) {
+if (-not $existingDeployedKey -and (Test-Path $deployedProdJs)) {
     if ((Get-Content $deployedProdJs -Raw) -match "KEY: '([0-9a-f]{64})'" -and $Matches[1] -ne $defaultKey) {
         $existingDeployedKey = $Matches[1]
     }
@@ -595,10 +642,10 @@ $prodJs = "$DestPath\packages\api\config\production.js"
 $prodJsTemplate = "$DestPath\packages\api\config\production.js-edfi"
 
 # Resolve the data-at-rest encryption key. Precedence: an explicit -DbEncryptionKey
-# wins; else reuse the key captured from the previously-deployed production.js
-# (grabbed before the copy phase clobbered it); a clean box with no prior key
-# generates a fresh one. Rotating this key makes previously-encrypted ODS/API
-# environment secrets unrecoverable, which the guard below defends against.
+# wins; else reuse the key captured from the earlier deploy (grabbed before the
+# copy phase clobbered production.js); a clean box with no prior key generates a
+# fresh one. Rotating this key makes previously-encrypted ODS/API environment
+# secrets unrecoverable, which the guard below defends against.
 $freshKeyGenerated = $false
 if (-not $DbEncryptionKey -and $existingDeployedKey) {
     $DbEncryptionKey = $existingDeployedKey
@@ -610,6 +657,26 @@ if (-not $DbEncryptionKey) {
     $DbEncryptionKey = ($keyBytes | ForEach-Object { $_.ToString('x2') }) -join ''
     $freshKeyGenerated = $true
     Write-Host "Generated a per-install data-encryption key."
+}
+# Admin App 4.1 refuses to start unless the key is exactly 64 hex characters, so
+# reject a malformed -DbEncryptionKey here, before anything is deployed.
+if ($DbEncryptionKey -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "-DbEncryptionKey must be 64 hexadecimal characters (32 bytes), for example the output of: openssl rand -hex 32"
+}
+
+# Resolve the session-signing secret. Admin App 4.1 refuses to start without one;
+# 4.0 ignores it. It is a list, newest first: the first entry signs new session
+# cookies and the rest still verify, so an operator can rotate it by hand without
+# signing everyone out. Reuse the earlier install's list; else generate one entry
+# (32 random bytes, base64, the format the Admin App's own Docker setup generates).
+if ($existingSessionSecret.Count -gt 0) {
+    $sessionSecret = $existingSessionSecret
+    Write-Host "Reusing the existing session-signing secret."
+} else {
+    $sessionBytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($sessionBytes)
+    $sessionSecret = @([Convert]::ToBase64String($sessionBytes))
+    Write-Host "Generated a session-signing secret."
 }
 
 # Guard (defense-in-depth): a freshly generated key cannot decrypt environment
@@ -661,13 +728,13 @@ if (Test-Path $prodJsTemplate) {
 # Configure the deployed API. Two delivery paths:
 #   1. NODE_CONFIG (built here, injected on the App Pool environment below): a JSON
 #      document node-config deep-merges OVER production.js at load time. It
-#      carries every value that is plain data -- database credentials, URLs, OIDC, yopass,
-#      admin user -- so those need no fragile text patching.
-#   2. Two residual production.js text patches that can't be expressed as JSON
-#      data: the per-install encryption KEY (install-all reads it back for the
-#      summary) and API_PORT (a JS expression reading a runtime environment variable). Both
-#      are guarded so a template-formatting change fails loudly instead of
-#      silently shipping a default (PR #234 Architecture concern #4 / T2.8).
+#      carries every value that is plain data -- database credentials, the encryption
+#      key, the session secret, URLs, OIDC, yopass, admin user -- so those need no
+#      fragile text patching.
+#   2. One residual production.js text patch that can't be expressed as JSON data:
+#      API_PORT (a JS expression reading a runtime environment variable). It is
+#      guarded so a template-formatting change fails loudly instead of silently
+#      shipping a default (PR #234 Architecture concern #4 / T2.8).
 
 # Guard helper: apply a regex replacement, aborting if the anchor is absent.
 # Anchors key on the config NAME (not the default value), so they survive value
@@ -688,9 +755,11 @@ function Set-ConfigAnchor {
 # Build the NODE_CONFIG document from the resolved values. node-config deep-merges
 # objects, so partial DB_SECRET_VALUE / AUTH0_CONFIG_SECRET_VALUE objects keep
 # their untouched siblings (unused engine keys). A single-element
-# WHITELISTED_REDIRECTS array serializes correctly here (nested arrays don't
-# collapse in ConvertTo-Json; verified on PS 5.1).
+# WHITELISTED_REDIRECTS or SESSION_SECRET_VALUE array serializes correctly here
+# (nested arrays don't collapse in ConvertTo-Json; verified on PS 5.1).
 $nodeConfig = @{
+    DB_ENCRYPTION_SECRET_VALUE = @{ KEY = $DbEncryptionKey }
+    SESSION_SECRET_VALUE      = @($sessionSecret)
     MY_URL                    = $ApiUrl
     FE_URL                    = $FeUrl
     WHITELISTED_REDIRECTS     = @($FeUrl)
@@ -758,22 +827,28 @@ if (Test-Path $prodJs) {
     # the guard fires only if the API_PORT key vanished entirely.
     $c = Set-ConfigAnchor $c "API_PORT:\s*[^,\r\n]+," "API_PORT: process.env.HTTP_PLATFORM_PORT || 3333," 'API_PORT'
 
-    # Residual patch 2: per-install encryption key. Kept in production.js because
-    # install-all.ps1 reads it back for the (access control list-locked) install summary. The
-    # existing default-key check below is its silent-no-op guard.
-    $c = $c.Replace("KEY: '$defaultKey',", "KEY: '$DbEncryptionKey',")
-    if ($c -match $defaultKey) {
-        throw "The default DB_ENCRYPTION_SECRET_VALUE.KEY is still present in $prodJs after patching. Refusing to deploy with the well-known default key."
+    # Scrub the sample secrets the template may still carry. Every one of these
+    # values reaches the API through NODE_CONFIG, which overrides production.js, so
+    # the scrub only keeps a well-known sample from being used if NODE_CONFIG ever
+    # fails to load. Each regex keys on the name and matches ANY value, so it stays
+    # idempotent on re-run. Both engines' password samples are scrubbed regardless
+    # of the active engine. A line that is absent is expected, not drift: the Admin
+    # App 4.0 template ships these samples, the 4.1 template ships none of them.
+    $sampleSecretPatterns = @(
+        "(?m)^(\s*KEY:\s*')[^']*(')",
+        "(clientSecret:\s*')[^']*(')",
+        "(CLIENT_SECRET:\s*')[^']*(')",
+        "(MSSQL_DB_PASSWORD:\s*')[^']*(')",
+        "(?<![A-Za-z_])(DB_PASSWORD:\s*')[^']*(')"
+    )
+    foreach ($pattern in $sampleSecretPatterns) {
+        $c = [regex]::Replace($c, $pattern, '${1}' + $scrubMarker + '${2}')
     }
-
-    # Scrub the default secrets for values now delivered via NODE_CONFIG. Each
-    # regex keys on the name and matches ANY value, so it neutralizes the default
-    # AND stays idempotent on re-run. Both engines' password defaults are scrubbed
-    # regardless of the active engine, so no default secret is left in the file.
-    $c = Set-ConfigAnchor $c "(clientSecret:\s*')[^']*(')"              ('${1}' + $scrubMarker + '${2}') 'clientSecret'
-    $c = Set-ConfigAnchor $c "(CLIENT_SECRET:\s*')[^']*(')"             ('${1}' + $scrubMarker + '${2}') 'CLIENT_SECRET'
-    $c = Set-ConfigAnchor $c "(MSSQL_DB_PASSWORD:\s*')[^']*(')"         ('${1}' + $scrubMarker + '${2}') 'MSSQL_DB_PASSWORD'
-    $c = Set-ConfigAnchor $c "(?<![A-Za-z_])(DB_PASSWORD:\s*')[^']*(')" ('${1}' + $scrubMarker + '${2}') 'DB_PASSWORD'
+    # The sample encryption key is the one default worth a format-independent check:
+    # it is publicly known and protects stored ODS/API credentials.
+    if ($c -match $defaultKey) {
+        throw "The sample DB_ENCRYPTION_SECRET_VALUE.KEY is still present in $prodJs after scrubbing. The template (production.js-edfi) formatting likely changed. Refusing to deploy with the well-known sample key on disk."
+    }
 
     if ($c -ne $original) {
         try {
@@ -781,7 +856,7 @@ if (Test-Path $prodJs) {
         } catch {
             throw "Failed to write the patched production.js at $prodJs. Check the config folder is writable. Original: $($_.Exception.Message)"
         }
-        Write-Host "production.js patched (API_PORT + encryption key; default secrets scrubbed; application configuration delivered via NODE_CONFIG)."
+        Write-Host "production.js patched (API_PORT; sample secrets scrubbed; application configuration and secrets delivered via NODE_CONFIG)."
         $prodJsChanged = $true
     } else {
         Write-Host "production.js already has the desired values — not rewriting."
@@ -813,8 +888,9 @@ if (-not (Test-Path $NpmCachePath)) {
     New-Item -ItemType Directory -Path $NpmCachePath -Force | Out-Null
 }
 & icacls $NpmCachePath /grant "${appPoolIdentity}:(OI)(CI)M" /T | Out-Null
-# NODE_CONFIG carries the structured app configuration (database credentials, URLs, OIDC,
-# yopass, admin user); node-config deep-merges it over production.js at boot. It lives in
+# NODE_CONFIG carries the structured app configuration (database credentials, the
+# encryption key, the session secret, URLs, OIDC, yopass, admin user); node-config
+# deep-merges it over production.js at boot. It lives in
 # the admin-only applicationHost.config, not the site's production.js, so it is never
 # echoed here. Each variable is removed before being added so a re-run replaces rather
 # than duplicates it.

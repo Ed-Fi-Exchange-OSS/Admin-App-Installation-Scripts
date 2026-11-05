@@ -932,11 +932,32 @@ if ($DbEngine -eq 'mssql') {
 & "$scriptDir\05-deploy-api.ps1" @apiArgs
 
 # Read back the resolved per-install encryption key (05 preserves an existing one
-# or generates a fresh one) so the summary can record it for backup.
+# or generates a fresh one) so the summary can record it for backup. 05 delivers it
+# in the API App Pool's NODE_CONFIG (05's default -AppPoolName, which is not
+# overridden here), read through the same ServerManager assembly 05 uses.
 $DbEncryptionKey = ''
-$deployedProdJs = "$apiDestPath\packages\api\config\production.js"
-if ((Test-Path $deployedProdJs) -and ((Get-Content $deployedProdJs -Raw) -match "KEY: '([0-9a-f]{64})'")) {
-    $DbEncryptionKey = $Matches[1]
+$summaryManager = $null
+try {
+    if (-not ('Microsoft.Web.Administration.ServerManager' -as [type])) {
+        Add-Type -Path "$env:SystemRoot\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
+    }
+    $summaryManager = New-Object Microsoft.Web.Administration.ServerManager
+    $apiPool = $summaryManager.ApplicationPools['EdFi-AdminApp-API']
+    if ($apiPool) {
+        $nodeConfigVariable = @($apiPool.GetCollection('environmentVariables') | Where-Object { $_.GetAttributeValue('name') -eq 'NODE_CONFIG' }) | Select-Object -First 1
+        if ($nodeConfigVariable) {
+            $deployedKey = "$((([string]$nodeConfigVariable.GetAttributeValue('value')) | ConvertFrom-Json).DB_ENCRYPTION_SECRET_VALUE.KEY)"
+            if ($deployedKey -match '^[0-9a-fA-F]{64}$') { $DbEncryptionKey = $deployedKey }
+        }
+    }
+} catch {
+    # Not shown: a JSON parse message can quote part of NODE_CONFIG, which holds secrets.
+    Write-Warning "Could not read the encryption key back from the App Pool's NODE_CONFIG, so the install summary will not include it."
+} finally {
+    if ($summaryManager) { $summaryManager.Dispose() }
+}
+if (-not $DbEncryptionKey) {
+    Write-Warning "The install summary will not include the data-encryption key. It is still configured on the App Pool 'EdFi-AdminApp-API' (NODE_CONFIG, DB_ENCRYPTION_SECRET_VALUE.KEY); back it up from there."
 }
 
 Write-Phase "Phase 3.3: Deploy the web application (06-deploy-fe.ps1)"
@@ -1291,7 +1312,11 @@ Notes
 # default) so the user can recover the generated key later. Lives outside the
 # scripts folder because it's an install artifact, not a script. The console copy
 # redacts the generated key (the file is the access control list-protected place it lives).
-$summaryConsole = $summary.Replace($DbEncryptionKey, "(written to the protected install-summary.txt -- Administrators only)")
+$summaryConsole = if ($DbEncryptionKey) {
+    $summary.Replace($DbEncryptionKey, "(written to the protected install-summary.txt -- Administrators only)")
+} else {
+    $summary
+}
 Write-Host $summaryConsole -ForegroundColor Green
 $summaryDir = Split-Path $SourcePath -Parent   # e.g., C:\Ed-Fi
 if (-not (Test-Path $summaryDir)) { New-Item -ItemType Directory -Path $summaryDir -Force | Out-Null }
