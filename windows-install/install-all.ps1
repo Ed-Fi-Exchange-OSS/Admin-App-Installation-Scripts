@@ -971,6 +971,7 @@ Write-Phase "Phase 3.3: Deploy the web application (06-deploy-fe.ps1)"
 $feArgs = @{
     SourcePath = "$SourcePath\dist\packages\fe"
     ApiUrl     = $ApiUrl
+    OidcIssuer = $OidcIssuer
     HttpsPort  = $HttpsFePort
 }
 if ($CertificateThumbprint) { $feArgs.CertificateThumbprint = $CertificateThumbprint }
