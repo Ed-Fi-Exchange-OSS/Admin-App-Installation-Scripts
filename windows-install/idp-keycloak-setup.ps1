@@ -932,6 +932,15 @@ if ($clients.Count -gt 0) {
     # Doc says these must be off; catch drift if someone toggles them in the UI.
     if (Get-KcClientProp $existing 'implicitFlowEnabled') { $needsUpdate = $true }
     if (Get-KcClientProp $existing 'authorizationServicesEnabled') { $needsUpdate = $true }
+    # The secret is not in the client JSON compared above. Without this check, a re-run
+    # with a different -ClientSecret left Keycloak on the old secret while the Admin App
+    # was configured with the new one, and every login failed at the token exchange
+    # with 'Invalid client or Invalid client credentials'.
+    $currentSecret = (Invoke-KcApi -Method Get -Path "/realms/$RealmName/clients/$clientUuid/client-secret").value
+    if ($currentSecret -ne $ClientSecretPlain) {
+        Write-Host "Client '$ClientId' secret differs from -ClientSecret; it will be updated."
+        $needsUpdate = $true
+    }
 
     if ($needsUpdate) {
         Write-Host "Client '$ClientId' exists but needs updating..."
@@ -940,7 +949,6 @@ if ($clients.Count -gt 0) {
         Invoke-KcApi -Method Put -Path "/realms/$RealmName/clients/$clientUuid" -Body $payloadWithId | Out-Null
     } else {
         Write-Host "Client '$ClientId' already matches -- skipping update."
-        Write-Host "(Note: secret may still be reset if you've passed a new value; this script doesn't verify.)" -ForegroundColor DarkGray
     }
 } else {
     Write-Host "Creating client '$ClientId'..."
