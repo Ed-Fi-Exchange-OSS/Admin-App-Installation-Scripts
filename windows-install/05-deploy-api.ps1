@@ -45,7 +45,14 @@ into production.js as MSSQL_DB_PASSWORD.
 SQL Server database name. Default: sbaa. Must match what 02-prereqs-sql.ps1 created.
 
 .PARAMETER OidcIssuer
-OIDC issuer URL. Default (Keycloak example): http://localhost:8080/realms/edfi.
+OIDC issuer URL. Default (Keycloak example): https://localhost:8443/realms/edfi.
+Must be HTTPS: Admin App 4.1 rejects any other issuer.
+
+.PARAMETER ExtraCaCertificatePath
+Optional PEM file with extra CA certificates the API should trust, set as
+NODE_EXTRA_CA_CERTS on the App Pool. install-all.ps1 passes the local Keycloak's
+self-signed certificate here, because Node does not read the Windows certificate
+store. Empty -> NODE_EXTRA_CA_CERTS is not set.
 
 .PARAMETER OidcClientId
 OIDC client id. Default (Keycloak example): edfiadminapp.
@@ -132,7 +139,7 @@ param(
 
     # OIDC settings written into production.js. Defaults are the local-Keycloak
     # example; override for any other provider (Entra, Google, Auth0, ...).
-    [string]$OidcIssuer = "http://localhost:8080/realms/edfi",
+    [string]$OidcIssuer = "https://localhost:8443/realms/edfi",
     [string]$OidcClientId = "edfiadminapp",
 
     [Parameter(Mandatory = $true)]
@@ -196,7 +203,11 @@ param(
     # upstream uses a self-signed/dev certificate that Node's CA store won't trust
     # (Node ignores the Windows certificate store); prefer NODE_EXTRA_CA_CERTS over this
     # where possible. Do not disable in production.
-    [switch]$DisableSslVerification
+    [switch]$DisableSslVerification,
+
+    # PEM file set as NODE_EXTRA_CA_CERTS on the App Pool. install-all.ps1 passes the
+    # local Keycloak's self-signed certificate so the API's OIDC discovery trusts it.
+    [string]$ExtraCaCertificatePath = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -888,6 +899,17 @@ if (-not (Test-Path $NpmCachePath)) {
     New-Item -ItemType Directory -Path $NpmCachePath -Force | Out-Null
 }
 & icacls $NpmCachePath /grant "${appPoolIdentity}:(OI)(CI)M" /T | Out-Null
+
+# Extra CA certificates for Node (NODE_EXTRA_CA_CERTS), e.g. the local Keycloak's
+# self-signed certificate. Node reads the file once at startup and only warns when it
+# is missing, so check it here, and let the App Pool identity read it.
+if ($ExtraCaCertificatePath) {
+    if (-not (Test-Path $ExtraCaCertificatePath -PathType Leaf)) {
+        throw "-ExtraCaCertificatePath '$ExtraCaCertificatePath' does not exist. For the local Keycloak, re-run idp-keycloak-setup.ps1, which writes it."
+    }
+    & icacls $ExtraCaCertificatePath /grant "${appPoolIdentity}:(R)" | Out-Null
+}
+
 # NODE_CONFIG carries the structured app configuration (database credentials, the
 # encryption key, the session secret, URLs, OIDC, yopass, admin user); node-config
 # deep-merges it over production.js at boot. It lives in
@@ -917,7 +939,7 @@ try {
     $environmentStage = 'read the environmentVariables collection'
     $environmentVariables = $environmentPool.GetCollection('environmentVariables')
     $environmentStage = 'remove stale variables'
-    foreach ($variableName in @('NPM_CONFIG_CACHE', 'NODE_CONFIG')) {
+    foreach ($variableName in @('NPM_CONFIG_CACHE', 'NODE_CONFIG', 'NODE_EXTRA_CA_CERTS')) {
         foreach ($stale in @($environmentVariables | Where-Object { $_.GetAttributeValue('name') -eq $variableName })) {
             $environmentVariables.Remove($stale)
         }
@@ -932,14 +954,21 @@ try {
     $configVariable.SetAttributeValue('name', 'NODE_CONFIG')
     $configVariable.SetAttributeValue('value', [string]$nodeConfigJson)
     $environmentVariables.Add($configVariable) | Out-Null
+    if ($ExtraCaCertificatePath) {
+        $environmentStage = 'add NODE_EXTRA_CA_CERTS'
+        $caVariable = $environmentVariables.CreateElement('add')
+        $caVariable.SetAttributeValue('name', 'NODE_EXTRA_CA_CERTS')
+        $caVariable.SetAttributeValue('value', [string](Resolve-Path $ExtraCaCertificatePath).ProviderPath)
+        $environmentVariables.Add($caVariable) | Out-Null
+    }
     $environmentStage = 'commit the changes'
     $environmentManager.CommitChanges()
 } catch {
-    throw "Failed to set NPM_CONFIG_CACHE and NODE_CONFIG on the App Pool '$AppPoolName' while trying to $environmentStage. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
+    throw "Failed to set the environment variables on the App Pool '$AppPoolName' while trying to $environmentStage. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
 } finally {
     if ($environmentManager) { $environmentManager.Dispose() }
 }
-Write-Host "Permissions granted to $appPoolIdentity; NPM_CONFIG_CACHE and NODE_CONFIG set on App Pool."
+Write-Host "Permissions granted to $appPoolIdentity; NPM_CONFIG_CACHE, NODE_CONFIG$(if ($ExtraCaCertificatePath) { " and NODE_EXTRA_CA_CERTS" }) set on App Pool."
 
 # ---------- OIDC connection row reconciliation (Gap A) ----------
 # The seed migration inserts the [oidc]/"oidc" row only when the table is empty

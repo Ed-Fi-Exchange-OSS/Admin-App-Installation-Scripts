@@ -40,7 +40,7 @@ of its own HTTP site).
 
 .PARAMETER ViteIdpAccountUrl
 The identity provider account-management URL the web application links to. Default (Keycloak example):
-http://localhost:8080/realms/edfi/account/.
+https://localhost:8443/realms/edfi/account/.
 
 .PARAMETER ViteOidcId
 The `oidc` database row id the web application initiates login against. Written into
@@ -76,7 +76,7 @@ param(
     [switch]$Force,
     [string]$ViteApiUrl = "http://localhost:3333",
     [string]$ViteBasePath = "/",
-    [string]$ViteIdpAccountUrl = "http://localhost:8080/realms/edfi/account/",
+    [string]$ViteIdpAccountUrl = "https://localhost:8443/realms/edfi/account/",
     [int]$ViteOidcId = 1,
     [switch]$FeOnly
 )

@@ -256,7 +256,9 @@ Re-running on a working install is mostly a no-op — most steps detect existing
 - **Admin App (web application)**: `https://localhost:4443/` (HTTP `http://localhost:4200/` redirects here)
 - **API**: `https://localhost:3443/` (HTTP `http://localhost:3333/` redirects here)
 - **Keycloak admin console**: `http://localhost:8080/admin/`
-- **Keycloak `edfi` realm**: `http://localhost:8080/realms/edfi/`
+- **Keycloak `edfi` realm (the Admin App's OIDC issuer)**: `https://localhost:8443/realms/edfi/`
+
+The local Keycloak listens on both ports. Admin App 4.1 only accepts an HTTPS issuer, so `idp-keycloak-setup.ps1` adds an HTTPS listener on `8443` with a self-signed `localhost` certificate (FriendlyName `Ed-Fi Admin App Keycloak self-signed`), configured in `C:\keycloak\conf\keycloak.conf`. The certificate is trusted in `LocalMachine\Root` unless `-SkipSelfSignedTrust` is passed. The API trusts it through `NODE_EXTRA_CA_CERTS` on its App Pool, pointing at `C:\keycloak\edfi-adminapp-https.pem`, because Node does not read the Windows certificate store. The HTTP port `8080` stays on for the scripts' provisioning calls and health checks.
 
 ---
 
@@ -313,7 +315,7 @@ See the [Admin App User's Guide](https://docs.ed-fi.org/reference/admin-app/) fo
 Keycloak runs as an ordinary background process, so it does not come back on its own after a reboot — and a stopped Keycloak breaks login in a way that is easy to misread. The Admin App API registers its OIDC strategies **once, when it starts, with no retry**. If the API starts before Keycloak is reachable, every login returns a 404 and the API log (`C:\inetpub\EdFi-AdminApp-API\logs\node-stdout*.log`) shows:
 
 ```
-ERROR Error registering OIDC provider http://localhost:8080/realms/edfi: AggregateError
+ERROR Error registering OIDC provider https://localhost:8443/realms/edfi: AggregateError
 ERROR Error: Unknown authentication strategy "oidc-1"
 ```
 

@@ -11,6 +11,8 @@ Steps (each best-effort, continues past individual failures):
   1. Stop any running Keycloak process (java.exe whose command line matches
      kc.bat / keycloak / quarkus, plus a java.exe listening on :8080).
   2. Delete the Keycloak install directory (unless -KeepKeycloakDownload).
+  2b. Delete the self-signed Keycloak HTTPS certificate from LocalMachine\My and
+      LocalMachine\Root (matched by its FriendlyName).
   3. Unset the Machine environment variable JAVA_HOME.
 
 Does NOT touch the JDK install, Node.js, SQL Server, IIS, or the AdminApp's own
@@ -72,6 +74,7 @@ Write-Host "This will remove:"
 Write-Host "  - Running Keycloak process (java.exe matching kc.bat/keycloak/quarkus, plus the :8080 listener)"
 Write-Host "  - Startup Scheduled Task 'Ed-Fi Admin App Keycloak' (if registered)"
 if (-not $KeepKeycloakDownload) { Write-Host "  - $KeycloakInstallPath (Keycloak install directory)" }
+Write-Host "  - The self-signed Keycloak HTTPS certificate (LocalMachine\My and Root)"
 Write-Host "  - Machine environment variable JAVA_HOME"
 Write-Host ""
 Write-Host "Leaves alone: the JDK install, Node.js, SQL Server, IIS, and the AdminApp's own state (use uninstall.ps1 for those)." -ForegroundColor DarkGray
@@ -170,6 +173,28 @@ if ($KeepKeycloakDownload) {
     }
 } else {
     Record "Delete $KeycloakInstallPath" "SKIP" "Not present"
+}
+
+# ========================================================
+Write-Section "2b. Keycloak HTTPS certificate"
+# ========================================================
+# idp-keycloak-setup.ps1 creates it in LocalMachine\My and adds a public copy to
+# LocalMachine\Root, both carrying this FriendlyName. Match only that name so other
+# localhost certificates (including the Admin App sites' own) are left alone.
+$keycloakHttpsFriendlyName = 'Ed-Fi Admin App Keycloak self-signed'
+foreach ($store in @('My', 'Root')) {
+    try {
+        $certs = @(Get-ChildItem "Cert:\LocalMachine\$store" -ErrorAction Stop |
+            Where-Object { $_.FriendlyName -eq $keycloakHttpsFriendlyName })
+        if ($certs.Count -gt 0) {
+            $certs | Remove-Item -ErrorAction Stop
+            Record "Remove Keycloak HTTPS certificate ($store)" "OK" "$($certs.Count) removed"
+        } else {
+            Record "Remove Keycloak HTTPS certificate ($store)" "SKIP" "Not present"
+        }
+    } catch {
+        Record "Remove Keycloak HTTPS certificate ($store)" "FAIL" $_.Exception.Message
+    }
 }
 
 # ========================================================

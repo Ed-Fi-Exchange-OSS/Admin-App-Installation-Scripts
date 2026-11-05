@@ -501,9 +501,14 @@ $idpIsKeycloak = ($IdpProvider -eq 'keycloak')
 if ($idpIsKeycloak) {
     if (-not $KeycloakAdminPassword) { $KeycloakAdminPassword = Read-Host -AsSecureString "Keycloak master-realm admin password" }
     if (-not $TestUserPassword)      { $TestUserPassword = Read-Host -AsSecureString "Keycloak test user password" }
-    if (-not $OidcIssuer)        { $OidcIssuer = "http://localhost:8080/realms/edfi" }
+    # HTTPS listener idp-keycloak-setup.ps1 adds (its -KeycloakHttpsPort default). Admin
+    # App 4.1 only accepts an HTTPS issuer; the HTTP port 8080 is for provisioning only.
+    if (-not $OidcIssuer)        { $OidcIssuer = "https://localhost:8443/realms/edfi" }
     if (-not $OidcClientId)      { $OidcClientId = "edfiadminapp" }
-    if (-not $ViteIdpAccountUrl) { $ViteIdpAccountUrl = "http://localhost:8080/realms/edfi/account/" }
+    if (-not $ViteIdpAccountUrl) { $ViteIdpAccountUrl = "https://localhost:8443/realms/edfi/account/" }
+    # Public certificate idp-keycloak-setup.ps1 writes (its -KeycloakInstallPath default);
+    # 05-deploy-api.ps1 points the API's NODE_EXTRA_CA_CERTS at it.
+    $keycloakCaCertificatePath = 'C:\keycloak\edfi-adminapp-https.pem'
 } else {
     switch ($IdpProvider) {
         'microsoft' { if (-not $ViteIdpAccountUrl) { $ViteIdpAccountUrl = "https://myaccount.microsoft.com/" } }
@@ -847,6 +852,7 @@ if ($idpIsKeycloak) {
     if ($IncludeAudienceMapper) { $kcArgs.IncludeAudienceMapper = $true }
     if ($EnableDirectAccessGrants) { $kcArgs.EnableDirectAccessGrants = $true }
     if ($SkipKeycloakStartupTask) { $kcArgs.SkipStartupTask = $true }
+    if ($SkipSelfSignedTrust) { $kcArgs.SkipSelfSignedTrust = $true }
     & "$scriptDir\idp-keycloak-setup.ps1" @kcArgs
 } else {
     Write-Phase "Phase 3.1: External OIDC provider ($IdpProvider)"
@@ -917,6 +923,7 @@ if ($CertificatePfxPath)    { $apiArgs.CertificatePfxPath    = $CertificatePfxPa
 if ($CertificatePassword)   { $apiArgs.CertificatePassword   = $CertificatePassword }
 if ($SkipSelfSignedTrust)   { $apiArgs.SkipSelfSignedTrust   = $true }
 if ($DisableSslVerification) { $apiArgs.DisableSslVerification = $true }
+if ($idpIsKeycloak) { $apiArgs.ExtraCaCertificatePath = $keycloakCaCertificatePath }
 if ($DbEngine -eq 'mssql') {
     $apiArgs.AppDbUsername = $AppDbUsername
     $apiArgs.AppDbPassword = $AppDbPassword
@@ -1253,7 +1260,7 @@ Keycloak (Identity Provider)
   Sign in with:
     Username:         admin
     Password:         (the value you supplied via -KeycloakAdminPassword)
-  edfi realm:         http://localhost:8080/realms/edfi/
+  edfi realm:         $OidcIssuer/
   Client secret:      (the value you supplied via -OidcClientSecret)
 "@
 } else {
