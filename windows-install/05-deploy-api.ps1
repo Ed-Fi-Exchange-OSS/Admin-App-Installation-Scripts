@@ -356,12 +356,6 @@ if (-not (Test-Path "$apiBuildDir\main.js")) {
     throw "Build output not found at $apiBuildDir\main.js. Did you run 'npm run build:api'?"
 }
 
-# Selective copy. The deployment needs three pieces, NOT a full source-tree mirror:
-#   1. Built API output (main.js + assets\)             from dist\packages\api\
-#   2. Config files (production.js etc.)                from packages\api\config\
-#   3. node_modules (runtime deps)                      from repository root
-# Each piece is mirrored independently so /MIR doesn't wipe sibling content
-# (web.config, logs\, the other source piece).
 # Capture the per-install secrets of an earlier deploy BEFORE the file-copy phase
 # below overwrites production.js, so a re-run reuses them instead of rotating them.
 # Reusing the encryption key keeps previously-encrypted ODS/API environment secrets
@@ -392,6 +386,12 @@ if (-not $existingDeployedKey -and (Test-Path $deployedProdJs)) {
 
 New-Item -ItemType Directory -Path $DestPath -Force | Out-Null
 
+# Selective copy. The deployment needs three pieces, NOT a full source-tree mirror:
+#   1. Built API output (main.js + assets\)             from dist\packages\api\
+#   2. Config files (production.js etc.)                from packages\api\config\
+#   3. node_modules (runtime deps)                      from repository root
+# Each piece is copied independently so a mirror doesn't wipe sibling content
+# (web.config, logs\, the other source piece).
 Write-Host "Copying built API output..."
 & robocopy $apiBuildDir $DestPath /E /NFL /NDL /NJH /NJS /XF web.config /XD logs packages node_modules | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Failed to copy the built API output from $apiBuildDir to $DestPath (robocopy exit $LASTEXITCODE). Check free disk space and that the destination isn't locked by a running app pool." }
@@ -401,8 +401,14 @@ New-Item -ItemType Directory -Path "$DestPath\packages\api" -Force | Out-Null
 & robocopy "$SourcePath\packages\api\config" "$DestPath\packages\api\config" /E /NFL /NDL /NJH /NJS | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Failed to copy api/config from $SourcePath\packages\api\config to $DestPath\packages\api\config (robocopy exit $LASTEXITCODE)." }
 
+# node_modules is mirrored (/MIR), not merged (/E): a merge over an older release
+# leaves packages the new release no longer has. Upgrading 4.0.1 to 4.1 left 4.0.1's
+# openid-client\node_modules\jose (4.x) next to 4.1's openid-client 6, which then
+# resolved that stale jose and crashed the API at startup with
+# ERR_PACKAGE_PATH_NOT_EXPORTED. /R:2 /W:2 keeps a locked file from stalling
+# robocopy on its default of a million 30-second retries.
 Write-Host "Copying node_modules (this takes a minute)..."
-& robocopy "$SourcePath\node_modules" "$DestPath\node_modules" /E /NFL /NDL /NJH /NJS | Out-Null
+& robocopy "$SourcePath\node_modules" "$DestPath\node_modules" /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Failed to copy node_modules from $SourcePath\node_modules to $DestPath\node_modules (robocopy exit $LASTEXITCODE). Check free disk space." }
 
 # App Pool. The collection indexer returns $null for a name that does not exist.
