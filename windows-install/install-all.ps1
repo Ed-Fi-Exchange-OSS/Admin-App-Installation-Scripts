@@ -935,6 +935,7 @@ if ($DbEngine -eq 'mssql') {
     $apiArgs.PgDbPort     = $PostgresPort
     $apiArgs.PgDbUsername = $PostgresAppUser
     $apiArgs.PgDbPassword = $PostgresAppPassword
+    if ($UsePostgresDocker) { $apiArgs.PostgresContainerName = 'edfiadminapp-postgres' }
 }
 & "$scriptDir\05-deploy-api.ps1" @apiArgs
 

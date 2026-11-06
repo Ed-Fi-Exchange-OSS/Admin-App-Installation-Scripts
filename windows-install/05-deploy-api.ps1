@@ -139,6 +139,11 @@ param(
     [string]$PgDbUsername = "edfiadminapp",
     [SecureString]$PgDbPassword,
 
+    # Docker container that runs PostgreSQL (install-all passes edfiadminapp-postgres
+    # with -UsePostgresDocker). When set, the OIDC row is reconciled through the
+    # container's psql, so psql does not need to be installed on the host.
+    [string]$PostgresContainerName = "",
+
     # OIDC settings written into production.js. Defaults are the local-Keycloak
     # example; override for any other provider (Entra, Google, Auth0, ...).
     [string]$OidcIssuer = "https://localhost:8443/realms/edfi",
@@ -1100,14 +1105,41 @@ END
             Write-Host "Could not reconcile the OIDC connection row (sqlcmd exit $oidcUpsertExit). If login uses stale OIDC settings, update the [oidc] row manually." -ForegroundColor Yellow
         }
     } else {
-        # PG best-effort: 05 has no docker awareness, so reach the database via psql on
-        # PATH. Probe for the table first (absent on a pre-boot first install) so
-        # the UPDATE can't error on a missing table -- the boot seed covers that.
-        if (Get-Command psql -ErrorAction SilentlyContinue) {
+        # PG best-effort: reach the database through the container's psql when
+        # install-all runs PostgreSQL in Docker (-PostgresContainerName), otherwise
+        # through psql on PATH. Without this, a re-run over an install whose oidc row
+        # still has an old issuer (for example the HTTP Keycloak issuer of a 4.0
+        # install) keeps it, and Admin App 4.1 cannot log in. Probe for the table first
+        # (absent on a pre-boot first install) so the UPDATE can't error on a missing
+        # table -- the boot seed covers that. The password travels in PGPASSWORD
+        # (docker exec -e PGPASSWORD copies it from this process), never on a
+        # command line.
+        $invokePsql = $null
+        if ($PostgresContainerName) {
+            if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+                throw "-PostgresContainerName '$PostgresContainerName' was given, but docker is not on PATH."
+            }
+            $invokePsql = {
+                param([string]$Sql, [string[]]$PsqlArguments)
+                # Local scope only: Windows PowerShell 5.1 turns native stderr into a
+                # terminating error under 'Stop', even when it is redirected.
+                $ErrorActionPreference = 'Continue'
+                $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PgDbUsername -d $DatabaseName @PsqlArguments 2>$null
+            }
+        } elseif (Get-Command psql -ErrorAction SilentlyContinue) {
+            $invokePsql = {
+                param([string]$Sql, [string[]]$PsqlArguments)
+                $ErrorActionPreference = 'Continue'
+                $Sql | & psql -h $PgDbHost -p $PgDbPort -U $PgDbUsername -d $DatabaseName @PsqlArguments 2>$null
+            }
+        }
+        if ($invokePsql) {
             $env:PGPASSWORD = $PgDbPasswordPlain
             try {
-                $reg = 'SELECT to_regclass(''oidc'');' | & psql -h $PgDbHost -p $PgDbPort -U $PgDbUsername -d $DatabaseName -tA 2>$null
-                if ($LASTEXITCODE -eq 0 -and "$reg".Trim() -ne '') {
+                $reg = & $invokePsql 'SELECT to_regclass(''oidc'');' @('-tA')
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Could not connect to PostgreSQL to reconcile the OIDC connection row (psql exit $LASTEXITCODE). Update the `"oidc`" row manually if login uses stale settings." -ForegroundColor Yellow
+                } elseif ("$reg".Trim() -ne '') {
                     $oidcUpsert = @"
 INSERT INTO "oidc" ("issuer", "clientId", "clientSecret", "scope")
     SELECT '$oidcIssuerSql', '$oidcClientIdSql', '$oidcSecretSql', '$oidcScopeSql'
@@ -1115,7 +1147,7 @@ INSERT INTO "oidc" ("issuer", "clientId", "clientSecret", "scope")
 UPDATE "oidc" SET "issuer" = '$oidcIssuerSql', "clientSecret" = '$oidcSecretSql', "scope" = '$oidcScopeSql'
     WHERE "clientId" = '$oidcClientIdSql';
 "@
-                    $oidcUpsert | & psql -h $PgDbHost -p $PgDbPort -U $PgDbUsername -d $DatabaseName -v ON_ERROR_STOP=1 1>$null 2>$null
+                    & $invokePsql $oidcUpsert @('-v', 'ON_ERROR_STOP=1') | Out-Null
                     if ($LASTEXITCODE -eq 0) {
                         Write-Host "OIDC connection row reconciled with the supplied settings."
                     } else {
@@ -1128,7 +1160,7 @@ UPDATE "oidc" SET "issuer" = '$oidcIssuerSql', "clientSecret" = '$oidcSecretSql'
                 Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
             }
         } else {
-            Write-Host "psql not on PATH; skipping OIDC-row reconciliation. If you re-deployed corrected OIDC settings on Postgres, update the `"oidc`" row manually." -ForegroundColor Yellow
+            Write-Host "psql not on PATH and no -PostgresContainerName; skipping OIDC-row reconciliation. If you re-deployed corrected OIDC settings on Postgres, update the `"oidc`" row manually." -ForegroundColor Yellow
         }
     }
 }
