@@ -52,7 +52,9 @@ Must be HTTPS: Admin App 4.1 rejects any other issuer.
 Optional PEM file with extra CA certificates the API should trust, set as
 NODE_EXTRA_CA_CERTS on the App Pool. install-all.ps1 passes the local Keycloak's
 self-signed certificate here, because Node does not read the Windows certificate
-store. Empty -> NODE_EXTRA_CA_CERTS is not set.
+store. If the App Pool already has NODE_EXTRA_CA_CERTS pointing at another file
+(set by hand), that file is kept: both are combined into one bundle. Empty -> a
+value set by hand is kept as it is.
 
 .PARAMETER OidcClientId
 OIDC client id. Default (Keycloak example): edfiadminapp.
@@ -235,23 +237,33 @@ function New-IisServerManager {
 # caller then treats the install as new, and the encryption-key guard below still
 # stops a key rotation that would orphan existing data. The parse error is not shown
 # because its message can quote part of the JSON, which holds secrets.
-function Get-AppPoolNodeConfig {
-    param([Parameter(Mandatory)][string]$AppPoolName)
+function Get-AppPoolEnvironmentValue {
+    param(
+        [Parameter(Mandatory)][string]$AppPoolName,
+        [Parameter(Mandatory)][string]$VariableName
+    )
 
-    $nodeConfigText = $null
     $readManager = $null
     try {
         $readManager = New-IisServerManager
         $pool = $readManager.ApplicationPools[$AppPoolName]
-        if ($pool) {
-            $variable = @($pool.GetCollection('environmentVariables') | Where-Object { $_.GetAttributeValue('name') -eq 'NODE_CONFIG' }) | Select-Object -First 1
-            if ($variable) { $nodeConfigText = [string]$variable.GetAttributeValue('value') }
-        }
-    } catch {
-        Write-Warning "Could not read the existing NODE_CONFIG of App Pool '$AppPoolName', so secrets from an earlier install cannot be reused. Original: $($_.Exception.Message)"
+        if (-not $pool) { return $null }
+        $variable = @($pool.GetCollection('environmentVariables') | Where-Object { $_.GetAttributeValue('name') -eq $VariableName }) | Select-Object -First 1
+        if ($variable) { return [string]$variable.GetAttributeValue('value') }
         return $null
     } finally {
         if ($readManager) { $readManager.Dispose() }
+    }
+}
+
+function Get-AppPoolNodeConfig {
+    param([Parameter(Mandatory)][string]$AppPoolName)
+
+    try {
+        $nodeConfigText = Get-AppPoolEnvironmentValue -AppPoolName $AppPoolName -VariableName 'NODE_CONFIG'
+    } catch {
+        Write-Warning "Could not read the existing NODE_CONFIG of App Pool '$AppPoolName', so secrets from an earlier install cannot be reused. Original: $($_.Exception.Message)"
+        return $null
     }
 
     if (-not $nodeConfigText) { return $null }
@@ -903,11 +915,61 @@ if (-not (Test-Path $NpmCachePath)) {
 # Extra CA certificates for Node (NODE_EXTRA_CA_CERTS), e.g. the local Keycloak's
 # self-signed certificate. Node reads the file once at startup and only warns when it
 # is missing, so check it here, and let the App Pool identity read it.
+#
+# NODE_EXTRA_CA_CERTS holds a single file, and an administrator may already have
+# pointed it at their own CA file (for a self-signed ODS/API or PostgreSQL; see
+# docker/README.md). Keep that file. When the Keycloak certificate is needed too,
+# combine both into one bundle next to the Keycloak certificate, and record the
+# administrator's file in the bundle's first line so a re-run can rebuild it.
+$keycloakCaFileName = 'edfi-adminapp-https.pem'
+$caBundleFileName = 'edfi-adminapp-node-ca-bundle.pem'
+$caBundleSourcePrefix = '# Ed-Fi Admin App bundle source: '
+$existingExtraCa = $null
+try {
+    $existingExtraCa = Get-AppPoolEnvironmentValue -AppPoolName $AppPoolName -VariableName 'NODE_EXTRA_CA_CERTS'
+} catch {
+    Write-Warning "Could not read the existing NODE_EXTRA_CA_CERTS of App Pool '$AppPoolName'; a value set by hand is not kept. Original: $($_.Exception.Message)"
+}
+
+$administratorCaPath = $null
+if ($existingExtraCa) {
+    $existingLeaf = Split-Path $existingExtraCa -Leaf
+    if ($existingLeaf -eq $caBundleFileName) {
+        if (Test-Path -LiteralPath $existingExtraCa -PathType Leaf) {
+            $sourceLine = Get-Content -LiteralPath $existingExtraCa -TotalCount 1
+            if ($sourceLine -and $sourceLine.StartsWith($caBundleSourcePrefix)) {
+                $administratorCaPath = $sourceLine.Substring($caBundleSourcePrefix.Length)
+            }
+        } else {
+            Write-Warning "NODE_EXTRA_CA_CERTS pointed at the CA bundle '$existingExtraCa', which no longer exists (Keycloak was uninstalled?). It is cleared; set it again if the API needs your own CA file."
+        }
+    } elseif ($existingLeaf -ne $keycloakCaFileName) {
+        $administratorCaPath = $existingExtraCa
+    }
+}
+
+$extraCaValue = $null
 if ($ExtraCaCertificatePath) {
     if (-not (Test-Path $ExtraCaCertificatePath -PathType Leaf)) {
         throw "-ExtraCaCertificatePath '$ExtraCaCertificatePath' does not exist. For the local Keycloak, re-run idp-keycloak-setup.ps1, which writes it."
     }
     & icacls $ExtraCaCertificatePath /grant "${appPoolIdentity}:(R)" | Out-Null
+    $extraCaValue = [string](Resolve-Path -LiteralPath $ExtraCaCertificatePath).ProviderPath
+    if ($administratorCaPath -and (Test-Path -LiteralPath $administratorCaPath -PathType Leaf)) {
+        $caBundlePath = Join-Path (Split-Path $extraCaValue -Parent) $caBundleFileName
+        $caBundleText = "$caBundleSourcePrefix$administratorCaPath`n" +
+            "$((Get-Content -LiteralPath $administratorCaPath -Raw).Trim())`n" +
+            "$((Get-Content -LiteralPath $extraCaValue -Raw).Trim())`n"
+        [System.IO.File]::WriteAllText($caBundlePath, $caBundleText, [System.Text.UTF8Encoding]::new($false))
+        & icacls $caBundlePath /grant "${appPoolIdentity}:(R)" | Out-Null
+        $extraCaValue = $caBundlePath
+        Write-Host "Kept the existing NODE_EXTRA_CA_CERTS file '$administratorCaPath' and combined it with '$ExtraCaCertificatePath' in '$caBundlePath'."
+    } elseif ($administratorCaPath) {
+        Write-Warning "NODE_EXTRA_CA_CERTS pointed at '$administratorCaPath', which no longer exists. It is replaced by '$ExtraCaCertificatePath'."
+    }
+} elseif ($administratorCaPath) {
+    $extraCaValue = $administratorCaPath
+    Write-Host "Kept the existing NODE_EXTRA_CA_CERTS file '$administratorCaPath'."
 }
 
 # NODE_CONFIG carries the structured app configuration (database credentials, the
@@ -954,11 +1016,11 @@ try {
     $configVariable.SetAttributeValue('name', 'NODE_CONFIG')
     $configVariable.SetAttributeValue('value', [string]$nodeConfigJson)
     $environmentVariables.Add($configVariable) | Out-Null
-    if ($ExtraCaCertificatePath) {
+    if ($extraCaValue) {
         $environmentStage = 'add NODE_EXTRA_CA_CERTS'
         $caVariable = $environmentVariables.CreateElement('add')
         $caVariable.SetAttributeValue('name', 'NODE_EXTRA_CA_CERTS')
-        $caVariable.SetAttributeValue('value', [string](Resolve-Path $ExtraCaCertificatePath).ProviderPath)
+        $caVariable.SetAttributeValue('value', [string]$extraCaValue)
         $environmentVariables.Add($caVariable) | Out-Null
     }
     $environmentStage = 'commit the changes'
@@ -968,7 +1030,7 @@ try {
 } finally {
     if ($environmentManager) { $environmentManager.Dispose() }
 }
-Write-Host "Permissions granted to $appPoolIdentity; NPM_CONFIG_CACHE, NODE_CONFIG$(if ($ExtraCaCertificatePath) { " and NODE_EXTRA_CA_CERTS" }) set on App Pool."
+Write-Host "Permissions granted to $appPoolIdentity; NPM_CONFIG_CACHE, NODE_CONFIG$(if ($extraCaValue) { " and NODE_EXTRA_CA_CERTS" }) set on App Pool."
 
 # ---------- OIDC connection row reconciliation (Gap A) ----------
 # The seed migration inserts the [oidc]/"oidc" row only when the table is empty

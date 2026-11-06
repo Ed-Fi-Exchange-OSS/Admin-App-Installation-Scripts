@@ -103,7 +103,7 @@ DB_SSL: false,
    </httpPlatform>
    ```
 
-   `05-deploy-api.ps1` regenerates `web.config` on every deploy, so a hand-edit here is lost on the next run. To make it survive redeploys, set `NODE_EXTRA_CA_CERTS` at the IIS App Pool level instead (Application Pool → Advanced Settings → Environment Variables) and recycle the pool.
+   `05-deploy-api.ps1` regenerates `web.config` on every deploy, so a hand-edit here is lost on the next run. To make it survive redeploys, set `NODE_EXTRA_CA_CERTS` at the IIS App Pool level instead (Application Pool → Advanced Settings → Environment Variables) and recycle the pool. Re-runs of `05-deploy-api.ps1` keep it. With the local Keycloak, the script combines it with the Keycloak certificate in one bundle, because the variable holds a single file.
 
 3. Recycle the AdminApp App Pool (or `iisreset`).
 
