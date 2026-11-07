@@ -1370,6 +1370,10 @@ if (-not $DisableSslVerification) {
     Write-Host "  If your ODS/API or Admin API uses a self-signed/dev certificate, adding an" -ForegroundColor Yellow
     Write-Host "  Environment will fail with a certificate error. For local dev, re-run with" -ForegroundColor Yellow
     Write-Host "  -DisableSslVerification, or keep verification on and set NODE_EXTRA_CA_CERTS" -ForegroundColor Yellow
-    Write-Host "  on the API App Pool (re-runs keep it, combined with the Keycloak certificate)." -ForegroundColor Yellow
+    if ($idpIsKeycloak) {
+        Write-Host "  on the API App Pool (re-runs keep it, combined with the Keycloak certificate)." -ForegroundColor Yellow
+    } else {
+        Write-Host "  on the API App Pool (re-runs keep it)." -ForegroundColor Yellow
+    }
     Write-Host "  See the README (Upstream TLS verification)." -ForegroundColor Yellow
 }
