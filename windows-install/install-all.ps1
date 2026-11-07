@@ -541,6 +541,11 @@ if ($IdpProvider -eq 'auth0') {
     $M2mIssuer  = "$OidcIssuer/"
 }
 
+# A warning, not an error: Admin App 4.0.1 still accepts an HTTP issuer.
+if (([Uri]$OidcIssuer).Scheme -ne 'https') {
+    Write-Warning "-OidcIssuer '$OidcIssuer' is not HTTPS. Admin App 4.1 and later reject it, and sign-in returns 404. Admin App 4.0.1 accepts it."
+}
+
 # TLS (always-on): the web application bundle bakes the API URL at build time, and 05/06 read
 # their URLs from these too, so derive both as https on the mirror ports.
 $ApiUrl = "https://localhost:$HttpsApiPort"
