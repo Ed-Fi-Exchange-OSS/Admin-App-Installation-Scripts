@@ -237,11 +237,8 @@ function New-IisServerManager {
     New-Object Microsoft.Web.Administration.ServerManager
 }
 
-# Returns the App Pool's NODE_CONFIG as an object, or $null on a clean box (no pool or
-# no variable yet). A read or parse failure also returns $null with a warning: the
-# caller then treats the install as new, and the encryption-key guard below still
-# stops a key rotation that would orphan existing data. The parse error is not shown
-# because its message can quote part of the JSON, which holds secrets.
+# Returns the named environment variable of the App Pool as a string, or $null when
+# the pool or the variable does not exist. An IIS read failure is thrown to the caller.
 function Get-AppPoolEnvironmentValue {
     param(
         [Parameter(Mandatory)][string]$AppPoolName,
@@ -261,6 +258,12 @@ function Get-AppPoolEnvironmentValue {
     }
 }
 
+# Returns the App Pool's NODE_CONFIG as an object, or $null on a clean box (no pool or
+# no variable yet). A read or parse failure also returns $null with a warning, and the
+# caller then treats the install as new. On SQL Server the encryption-key guard below
+# still stops a key rotation that would orphan existing data; PostgreSQL has no such
+# guard yet. The parse error is not shown because its message can quote part of the
+# JSON, which holds secrets.
 function Get-AppPoolNodeConfig {
     param([Parameter(Mandatory)][string]$AppPoolName)
 
