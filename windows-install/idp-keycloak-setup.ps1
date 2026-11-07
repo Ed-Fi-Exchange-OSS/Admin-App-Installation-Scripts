@@ -784,6 +784,12 @@ $pemLines = for ($offset = 0; $offset -lt $certificateBase64.Length; $offset += 
 }
 $pemText = "-----BEGIN CERTIFICATE-----`n$($pemLines -join "`n")`n-----END CERTIFICATE-----`n"
 [System.IO.File]::WriteAllText($caCertificatePath, $pemText, [System.Text.Encoding]::ASCII)
+# The API trusts every certificate in this file, so only Administrators and SYSTEM may
+# change it. The install folder inherits Modify for Authenticated Users from C:\, which
+# would let any local user add a CA of their own. Users keep read access: it is a
+# public certificate, and 05-deploy-api.ps1 also grants the API App Pool read access.
+& icacls $caCertificatePath /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' '*S-1-5-32-545:R' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to restrict the access control list on $caCertificatePath (icacls exit $LASTEXITCODE)." }
 
 # Managed block in keycloak.conf. Re-exporting the keystore is skipped when the block
 # already names this certificate and port, so a re-run does not restart Keycloak.

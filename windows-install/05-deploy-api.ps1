@@ -972,7 +972,11 @@ if ($ExtraCaCertificatePath) {
             "$((Get-Content -LiteralPath $administratorCaPath -Raw).Trim())`n" +
             "$((Get-Content -LiteralPath $extraCaValue -Raw).Trim())`n"
         [System.IO.File]::WriteAllText($caBundlePath, $caBundleText, [System.Text.UTF8Encoding]::new($false))
-        & icacls $caBundlePath /grant "${appPoolIdentity}:(R)" | Out-Null
+        # Same access as the Keycloak certificate (see idp-keycloak-setup.ps1): the API
+        # trusts every certificate in the bundle and a re-run trusts its first line, so
+        # only Administrators and SYSTEM may change it.
+        & icacls $caBundlePath /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' '*S-1-5-32-545:R' "${appPoolIdentity}:(R)" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to restrict the access control list on $caBundlePath (icacls exit $LASTEXITCODE)." }
         $extraCaValue = $caBundlePath
         Write-Host "Kept the existing NODE_EXTRA_CA_CERTS file '$administratorCaPath' and combined it with '$ExtraCaCertificatePath' in '$caBundlePath'."
     } elseif ($administratorCaPath) {
