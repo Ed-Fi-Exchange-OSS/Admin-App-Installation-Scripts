@@ -245,6 +245,24 @@ catch
     Write-Host "Authentication failed calling /auth/me: $($_.Exception.Message)" -ForegroundColor Red
     $body = Get-HttpErrorBody $_
     if ($body) { Write-Host $body -ForegroundColor Red }
+    # Admin App 4.1 accepts only an HTTPS issuer, and a Keycloak without a fixed
+    # hostname writes the URL it was called on into iss, so the most common cause
+    # is a token requested on the HTTP port. Name it when the token shows it.
+    $tokenIssuer = $null
+    try
+    {
+        $payload = $BearerToken.Split('.')[1].Replace('-', '+').Replace('_', '/')
+        $payload = $payload.PadRight($payload.Length + (4 - $payload.Length % 4) % 4, '=')
+        $tokenIssuer = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json).iss
+    }
+    catch
+    {
+        Write-Verbose "Could not read the token's iss claim: $($_.Exception.Message)"
+    }
+    if ($tokenIssuer -like 'http://*')
+    {
+        Write-Host "The token's issuer is '$tokenIssuer'. The Admin App accepts only an HTTPS issuer, so this token is always rejected. Request the token from the identity provider's HTTPS URL; for the windows-install Keycloak set TOKEN_URL=https://localhost:8443/realms/edfi/protocol/openid-connect/token (and KEYCLOAK_BASE_URL=https://localhost:8443)." -ForegroundColor Yellow
+    }
     throw "Authentication was not accepted. Confirm a matching 'machine' user exists in the Admin App (clientId = the token's client_id/azp/appid) and the token carries aud = MACHINE_AUDIENCE and grants 'login:app' (Keycloak: in scope), and that its iss matches the Admin App's AUTH0_CONFIG_SECRET.ISSUER."
 }
 $userId = $me.id

@@ -176,7 +176,7 @@ else
     }
     if ($provider -eq 'keycloak')
     {
-        $bootstrapArgs.KeycloakBaseUrl = Get-EnvValue 'KEYCLOAK_BASE_URL' 'http://localhost:8080'
+        $bootstrapArgs.KeycloakBaseUrl = Get-EnvValue 'KEYCLOAK_BASE_URL' 'https://localhost:8443'
         $bootstrapArgs.AdminUser = Get-EnvValue 'KEYCLOAK_ADMIN_USER' 'admin'
         $bootstrapArgs.AdminPassword = Get-EnvValue 'KEYCLOAK_ADMIN_PASSWORD'
         $bootstrapArgs.RealmName = Get-EnvValue 'KEYCLOAK_REALM' 'edfi'
