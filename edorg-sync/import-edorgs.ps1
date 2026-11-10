@@ -678,5 +678,5 @@ Write-Host "  1. In the Admin App, create (or edit) an Application: the imported
 Write-Host "     now appear in the Education Organization dropdown for ODS '$resolvedOdsDbName'."
 Write-Host "  2. Non-admin teams see them only once they are granted ownership of the"
 Write-Host "     tenant, environment, ODS, or individual ed orgs (Admin App > team access)."
-Write-Host "  3. This import is a one-time bridge: Admin App v4.1 is slated to keep ed"
-Write-Host "     orgs in sync natively, after which re-running it is unnecessary."
+Write-Host "  3. This import is a one-time bridge for Admin App v4.0. Admin App v4.1"
+Write-Host "     syncs ed orgs itself when an environment is synced."

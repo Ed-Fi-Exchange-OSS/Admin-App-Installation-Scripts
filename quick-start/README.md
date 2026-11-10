@@ -223,7 +223,6 @@ Server (`DB_ENGINE=mssql`) and PostgreSQL (`DB_ENGINE=pgsql`, optionally
 `USE_POSTGRES_DOCKER=true`). Also removes the claimset copies from
 EdFi_Security (via the `SECURITY_*` values) — pass `-SkipClaimsets` to leave
 them in place, e.g. when an application still uses one.
-`USE_POSTGRES_DOCKER=true`).
 
 Cleanup is scoped to the Admin App database. The Keycloak artifacts
 `bootstrap.ps1` created (the machine client, the `login:app` client scope, and
