@@ -258,12 +258,30 @@ function Get-AppPoolEnvironmentValue {
     }
 }
 
+# Parses JSON that holds secrets, returning $null when it is not valid JSON. The
+# parse runs in a separate runspace with no host because the ConvertFrom-Json error
+# quotes the JSON: Windows PowerShell 5.1 writes even a caught error to an active
+# transcript (Start-Transcript or system-wide transcription), but a hostless runspace
+# is not transcribed.
+function ConvertFrom-SecretJson {
+    param([Parameter(Mandatory)][string]$JsonText)
+
+    $shell = [powershell]::Create()
+    try {
+        $null = $shell.AddScript('param($text) try { $text | ConvertFrom-Json } catch { }').AddArgument($JsonText)
+        $parsed = @($shell.Invoke())
+        if ($parsed.Count -eq 0) { return $null }
+        return $parsed[0]
+    } finally {
+        $shell.Dispose()
+    }
+}
+
 # Returns the App Pool's NODE_CONFIG as an object, or $null on a clean box (no pool or
 # no variable yet). A NODE_CONFIG that exists but cannot be read or parsed throws:
 # after the first deploy it is the only place the encryption key lives, so treating
 # the install as new would generate a key that cannot decrypt the stored ODS/API
-# secrets (PostgreSQL has no key guard to stop that). The parse error is not shown
-# because its message can quote part of the JSON, which holds secrets.
+# secrets (PostgreSQL has no key guard to stop that).
 function Get-AppPoolNodeConfig {
     param([Parameter(Mandatory)][string]$AppPoolName)
 
@@ -275,11 +293,11 @@ function Get-AppPoolNodeConfig {
     }
 
     if (-not $nodeConfigText) { return $null }
-    try {
-        return $nodeConfigText | ConvertFrom-Json
-    } catch {
+    $nodeConfig = ConvertFrom-SecretJson -JsonText $nodeConfigText
+    if (-not $nodeConfig) {
         throw "The existing NODE_CONFIG of App Pool '$AppPoolName' is not valid JSON. $recovery"
     }
+    return $nodeConfig
 }
 
 # Precondition: IIS must be available (01-prereqs-iis.ps1 installs the IIS pieces).
