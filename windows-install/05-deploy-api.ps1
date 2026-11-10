@@ -259,27 +259,26 @@ function Get-AppPoolEnvironmentValue {
 }
 
 # Returns the App Pool's NODE_CONFIG as an object, or $null on a clean box (no pool or
-# no variable yet). A read or parse failure also returns $null with a warning, and the
-# caller then treats the install as new. On SQL Server the encryption-key guard below
-# still stops a key rotation that would orphan existing data; PostgreSQL has no such
-# guard yet. The parse error is not shown because its message can quote part of the
-# JSON, which holds secrets.
+# no variable yet). A NODE_CONFIG that exists but cannot be read or parsed throws:
+# after the first deploy it is the only place the encryption key lives, so treating
+# the install as new would generate a key that cannot decrypt the stored ODS/API
+# secrets (PostgreSQL has no key guard to stop that). The parse error is not shown
+# because its message can quote part of the JSON, which holds secrets.
 function Get-AppPoolNodeConfig {
     param([Parameter(Mandatory)][string]$AppPoolName)
 
+    $recovery = "It holds the data-encryption key of this install, and a new key would make the stored ODS/API environment secrets unreadable. Fix NODE_CONFIG on the App Pool in IIS Manager (Configuration Editor, system.applicationHost/applicationPools), or run 05-deploy-api.ps1 with -DbEncryptionKey set to the key in install-summary.txt."
     try {
         $nodeConfigText = Get-AppPoolEnvironmentValue -AppPoolName $AppPoolName -VariableName 'NODE_CONFIG'
     } catch {
-        Write-Warning "Could not read the existing NODE_CONFIG of App Pool '$AppPoolName', so secrets from an earlier install cannot be reused. Original: $($_.Exception.Message)"
-        return $null
+        throw "Could not read the existing NODE_CONFIG of App Pool '$AppPoolName'. $recovery Original: $($_.Exception.Message)"
     }
 
     if (-not $nodeConfigText) { return $null }
     try {
         return $nodeConfigText | ConvertFrom-Json
     } catch {
-        Write-Warning "The existing NODE_CONFIG of App Pool '$AppPoolName' is not valid JSON, so secrets from an earlier install cannot be reused."
-        return $null
+        throw "The existing NODE_CONFIG of App Pool '$AppPoolName' is not valid JSON. $recovery"
     }
 }
 
@@ -369,7 +368,14 @@ if (-not (Test-Path "$apiBuildDir\main.js")) {
 $defaultKey = 'bbeadc2d4d15f5c9cfc2239b682cca392b233ee6979b6b9578d256aa01a7c565'
 $existingDeployedKey = ''
 $existingSessionSecret = @()
-$existingNodeConfig = Get-AppPoolNodeConfig -AppPoolName $AppPoolName
+try {
+    $existingNodeConfig = Get-AppPoolNodeConfig -AppPoolName $AppPoolName
+} catch {
+    if (-not $DbEncryptionKey) { throw }
+    # The caller supplied the key, so only the session secret is lost.
+    Write-Warning "The existing NODE_CONFIG of App Pool '$AppPoolName' could not be read or parsed. Continuing with the -DbEncryptionKey value; a new session secret is generated, which signs current users out."
+    $existingNodeConfig = $null
+}
 if ($existingNodeConfig) {
     $existingEncryption = $existingNodeConfig.DB_ENCRYPTION_SECRET_VALUE
     if ($existingEncryption -and "$($existingEncryption.KEY)" -match '^[0-9a-f]{64}$' -and $existingEncryption.KEY -ne $defaultKey) {
