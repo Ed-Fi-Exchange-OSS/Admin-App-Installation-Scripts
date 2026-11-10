@@ -301,3 +301,24 @@ function Get-HttpErrorBody
     }
     return $null
 }
+
+function Get-ClaimSetCopyName
+{
+    <#
+    .SYNOPSIS
+        Returns the name copy-claimsets.ps1 gives the copy of a claimset.
+    .DESCRIPTION
+        Prefix plus source name, with every space run (and the spaces around a
+        hyphen) turned into a single hyphen: 'AA-' + 'Ed-Fi API Publisher -
+        Reader' -> 'AA-Ed-Fi-API-Publisher-Reader'. Admin API 2.x in v3 mode,
+        which Admin App 4.1 uses, rejects a claimset name that contains white
+        space, and every built-in claimset name has a space. A prefix written
+        the old way ('AA ') gives the same name as 'AA-'.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Prefix,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    return ("$Prefix$Name".Trim() -replace '\s*-\s*', '-') -replace '\s+', '-'
+}

@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Copy built-in Ed-Fi claimsets in the EdFi_Security database under an "AA "
-  prefix (e.g. 'SIS Vendor' -> 'AA SIS Vendor') so they can be assigned to
+  Copy built-in Ed-Fi claimsets in the EdFi_Security database under an "AA-"
+  prefix (e.g. 'SIS Vendor' -> 'AA-SIS-Vendor') so they can be assigned to
   applications in the Admin App. Idempotent.
 
 .DESCRIPTION
@@ -16,9 +16,11 @@
   specific list instead (including, if wanted, an internal-use one). For each
   claimset it:
 
-    * inserts a new row into dbo.ClaimSets named '<Prefix><name>' with
-      IsEdfiPreset = 0 and ForApplicationUseOnly = 0 (same as the Admin API's
-      "copy claimset" feature),
+    * inserts a new row into dbo.ClaimSets named '<Prefix><name>' with the
+      spaces turned into hyphens, IsEdfiPreset = 0 and ForApplicationUseOnly =
+      0 (same as the Admin API's "copy claimset" feature). Admin API 2.x in v3
+      mode, which Admin App 4.1 uses, rejects a claimset name with white space
+      when an application is created,
     * copies every dbo.ClaimSetResourceClaimActions row of the source, and
     * copies every dbo.ClaimSetResourceClaimActionAuthorizationStrategyOverrides
       row, remapped to the new action rows.
@@ -59,15 +61,15 @@
 .EXAMPLE
   # Copy only specific claimsets, or use a different prefix:
   ./copy-claimsets.ps1 -SqlUser 'edfi_security_user' -SqlPassword '...' `
-    -ClaimSetNames 'SIS Vendor', 'Ed-Fi Sandbox', 'Assessment Vendor' -Prefix 'AA '
+    -ClaimSetNames 'SIS Vendor', 'Ed-Fi Sandbox', 'Assessment Vendor' -Prefix 'AA-'
 #>
 #requires -Version 5.1
 param(
     # Claimsets to copy. Empty (the default) = all built-in claimsets
     # (IsEdfiPreset = 1, excluding ForApplicationUseOnly = 1).
     [string[]]$ClaimSetNames = @(),
-    # Prefix for the copies (trailing space intentional): 'SIS Vendor' -> 'AA SIS Vendor'.
-    [string]$Prefix = 'AA ',
+    # Prefix for the copies: 'SIS Vendor' -> 'AA-SIS-Vendor'. Spaces become hyphens.
+    [string]$Prefix = 'AA-',
 
     [ValidateSet('mssql', 'pgsql')][string]$DbEngine = 'mssql',
     [string]$DatabaseName = 'EdFi_Security',
@@ -165,7 +167,7 @@ if ($ClaimSetNames.Count -eq 0)
 $copies = @()
 foreach ($name in $ClaimSetNames)
 {
-    $targetDisplay = "$Prefix$name"
+    $targetDisplay = Get-ClaimSetCopyName -Prefix $Prefix -Name $name
     # Escape for use inside SQL string literals.
     $sourceName = $name.Replace("'", "''")
     $targetName = $targetDisplay.Replace("'", "''")
