@@ -234,6 +234,41 @@ function Invoke-Api
     return Invoke-RestMethod @reqArgs
 }
 
+function Wait-ApiReady
+{
+    <# Sends GET requests to Uri until it answers with a status below 500, for up to MaxAttempts tries of TimeoutSeconds each. Warns instead of failing, so the call that needs the API reports its own error. #>
+    param(
+        [string]$Uri,
+        [int]$MaxAttempts = 3,
+        [int]$TimeoutSeconds = 60
+    )
+    $requestArgs = @{ Method = 'Get'; Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSeconds }
+    if ($script:useSkipCertParam) { $requestArgs.SkipCertificateCheck = $true }
+    if ($script:allowInsecureRedirect) { $requestArgs.AllowInsecureRedirect = $true }
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++)
+    {
+        Write-Host "GET $Uri (waiting until it answers, attempt $attempt of $MaxAttempts)" -ForegroundColor Cyan
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $statusCode = 0
+        try
+        {
+            $statusCode = [int](Invoke-WebRequest @requestArgs).StatusCode
+        }
+        catch
+        {
+            if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
+            else { Write-Verbose "No response from ${Uri}: $($_.Exception.Message)" }
+        }
+        if ($statusCode -gt 0 -and $statusCode -lt 500)
+        {
+            Write-Host "$Uri answered HTTP $statusCode in $([int]$watch.Elapsed.TotalSeconds) s." -ForegroundColor Green
+            return
+        }
+        if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds 5 }
+    }
+    Write-Host "$Uri did not answer after $MaxAttempts attempts; continuing, the next step reports the error." -ForegroundColor Yellow
+}
+
 # ---- Step 1: identify the calling user (GET /auth/me) ------------------------
 Write-Host "GET $ApiBaseUrl/auth/me" -ForegroundColor Cyan
 try
@@ -353,6 +388,16 @@ if ($existingEnv)
 }
 else
 {
+    # The Admin App gives the ODS/API discovery call only 5 seconds, and an IIS
+    # application pool that is starting (first request after an install or an
+    # idle timeout) takes longer, so the create would fail with "Connection to
+    # Ed-Fi API Discovery URL timed out". Wake both APIs first, waiting up to
+    # three minutes for each.
+    foreach ($warmUpUrl in @($OdsApiDiscoveryUrl, $AdminApiUrl))
+    {
+        Wait-ApiReady -Uri $warmUpUrl
+    }
+
     # version and isMultitenant are intentionally omitted: create() auto-detects them
     # from the ODS/API metadata. configPrivate is produced + encrypted by the API.
     $payload = @{
