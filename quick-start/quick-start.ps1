@@ -236,7 +236,15 @@ function Invoke-Api
 
 function Wait-ApiReady
 {
-    <# Sends GET requests to Uri until it answers with a status below 500, for up to MaxAttempts tries of TimeoutSeconds each. Warns instead of failing, so the call that needs the API reports its own error. #>
+    <#
+    .SYNOPSIS
+        Sends GET requests to Uri until it answers with a status below 500.
+    .DESCRIPTION
+        Up to MaxAttempts tries of TimeoutSeconds each. It warns instead of
+        failing, so the call that needs the API reports its own error. A 4xx
+        means the API is up (for example 401 without a token) and is shown in
+        yellow, because a 404 can also mean a wrong URL.
+    #>
     param(
         [string]$Uri,
         [int]$MaxAttempts = 3,
@@ -245,6 +253,7 @@ function Wait-ApiReady
     $requestArgs = @{ Method = 'Get'; Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSeconds }
     if ($script:useSkipCertParam) { $requestArgs.SkipCertificateCheck = $true }
     if ($script:allowInsecureRedirect) { $requestArgs.AllowInsecureRedirect = $true }
+    $lastProblem = 'no response'
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++)
     {
         Write-Host "GET $Uri (waiting until it answers, attempt $attempt of $MaxAttempts)" -ForegroundColor Cyan
@@ -257,16 +266,18 @@ function Wait-ApiReady
         catch
         {
             if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
-            else { Write-Verbose "No response from ${Uri}: $($_.Exception.Message)" }
+            $lastProblem = $_.Exception.Message
         }
         if ($statusCode -gt 0 -and $statusCode -lt 500)
         {
-            Write-Host "$Uri answered HTTP $statusCode in $([int]$watch.Elapsed.TotalSeconds) s." -ForegroundColor Green
+            $statusColor = if ($statusCode -lt 400) { 'Green' } else { 'Yellow' }
+            Write-Host "$Uri answered HTTP $statusCode in $([int]$watch.Elapsed.TotalSeconds) s." -ForegroundColor $statusColor
             return
         }
+        if ($statusCode -ge 500) { $lastProblem = "HTTP $statusCode" }
         if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds 5 }
     }
-    Write-Host "$Uri did not answer after $MaxAttempts attempts; continuing, the next step reports the error." -ForegroundColor Yellow
+    Write-Host "$Uri did not answer after $MaxAttempts attempts (last: $lastProblem); continuing, the next step reports the error." -ForegroundColor Yellow
 }
 
 # ---- Step 1: identify the calling user (GET /auth/me) ------------------------

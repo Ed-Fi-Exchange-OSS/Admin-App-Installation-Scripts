@@ -322,3 +322,37 @@ function Get-ClaimSetCopyName
 
     return ("$Prefix$Name".Trim() -replace '\s*-\s*', '-') -replace '\s+', '-'
 }
+
+function Get-ClaimSetCopyPrefixes
+{
+    <#
+    .SYNOPSIS
+        Returns the prefixes that claimset copies made with Prefix can start with.
+    .DESCRIPTION
+        The current form comes from Get-ClaimSetCopyName ('AA-' -> 'AA-'). Older
+        runs kept the prefix and the spaces of the name, so the legacy form is the
+        prefix as written ('Copy of ' -> 'Copy of '), except that a prefix ending
+        in a hyphen stands for the old default with a space ('AA-' -> 'AA ').
+        Prefixes that are empty or only white space are left out, so a caller
+        never builds a match on an empty prefix.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Prefix)
+
+    $currentForm = (Get-ClaimSetCopyName -Prefix $Prefix -Name 'X') -replace 'X$', ''
+    $legacyForm = $Prefix -replace '-$', ' '
+    return @(@($currentForm, $legacyForm) | Where-Object { $_.Trim() } | Select-Object -Unique)
+}
+
+function Get-ClaimSetLegacyPrefix
+{
+    <#
+    .SYNOPSIS
+        Returns the prefix older runs put in front of a claimset name, or ''.
+    .DESCRIPTION
+        See Get-ClaimSetCopyPrefixes. An empty or white-space prefix returns ''.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Prefix)
+
+    if (-not $Prefix.Trim()) { return '' }
+    return $Prefix -replace '-$', ' '
+}

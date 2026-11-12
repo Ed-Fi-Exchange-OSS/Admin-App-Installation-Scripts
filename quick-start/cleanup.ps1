@@ -156,14 +156,13 @@ $securityUseIntegratedSecurity = (Get-EnvValue 'SECURITY_USE_INTEGRATED_SECURITY
 $securityPostgresContainer = Get-EnvValue 'SECURITY_POSTGRES_CONTAINER' 'ed-fi-db-admin'
 # Copies are named by Get-ClaimSetCopyName ('AA-SIS-Vendor'); older runs kept the
 # spaces ('AA SIS Vendor'), so both forms are matched.
-$claimsetCopyPrefix = if ($ClaimSetPrefix) { (Get-ClaimSetCopyName -Prefix $ClaimSetPrefix -Name 'X') -replace 'X$', '' } else { '' }
-$claimsetLegacyPrefix = $claimsetCopyPrefix -replace '-$', ' '
-$claimsetPrefixes = @($claimsetCopyPrefix, $claimsetLegacyPrefix | Where-Object { $_ } | Select-Object -Unique)
-$claimsetTargets = @($ClaimSetNames | ForEach-Object { Get-ClaimSetCopyName -Prefix $ClaimSetPrefix -Name $_; "$claimsetLegacyPrefix$_" } | Select-Object -Unique)
+$claimsetPrefixes = @(Get-ClaimSetCopyPrefixes -Prefix "$ClaimSetPrefix")
+$claimsetLegacyPrefix = Get-ClaimSetLegacyPrefix -Prefix "$ClaimSetPrefix"
+$claimsetTargets = @($ClaimSetNames | ForEach-Object { Get-ClaimSetCopyName -Prefix $ClaimSetPrefix -Name $_; if ($claimsetLegacyPrefix) { "$claimsetLegacyPrefix$_" } } | Select-Object -Unique)
 $claimsetSkipReason = if ($SkipClaimsets) { '-SkipClaimsets' } else { 'COPY_CLAIMSETS=false' }
 # No names = remove every non-preset claimset starting with the prefix -- but
 # never with an empty prefix, which would match every custom claimset.
-if ($claimsetTargets.Count -eq 0 -and -not $ClaimSetPrefix)
+if ($claimsetTargets.Count -eq 0 -and $claimsetPrefixes.Count -eq 0)
 {
     $removeClaimsets = $false
     $claimsetSkipReason = 'no claimset names and an empty prefix'

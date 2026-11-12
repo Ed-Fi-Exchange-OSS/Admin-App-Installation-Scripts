@@ -85,6 +85,13 @@ reverse-proxy path of the Docker deployment. On an Admin App installed with
 wrong base URL the very first call, `GET /auth/me`, fails with an IIS 404 that
 misleadingly looks like a machine-user authentication problem.
 
+`KEYCLOAK_BASE_URL` and `TOKEN_URL` default to the HTTPS listener of the
+`windows-install/install-all.ps1` Keycloak (`https://localhost:8443`), because
+Admin App 4.1 accepts only an HTTPS issuer and a token requested on HTTP port
+8080 gets a 401. On the Docker deployment, Keycloak is behind the reverse proxy:
+set `KEYCLOAK_BASE_URL=https://localhost/auth` and
+`TOKEN_URL=https://localhost/auth/realms/edfi/protocol/openid-connect/token`.
+
 On SQL Server, a loopback `APP_SQL_SERVER` / `SECURITY_SQL_SERVER` is connected
 to with `sqlcmd -C` (trust server certificate), because a local instance
 presents a self-signed certificate that the sqlcmd shipped with SQL Server 2025
