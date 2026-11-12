@@ -29,6 +29,12 @@ Base URL of the API the web application bundle calls. Only its origin (scheme://
 used, to populate the Content-Security-Policy connect-src. Must match the
 VITE_API_URL baked into the bundle at build time. Default: https://localhost:3443.
 
+.PARAMETER OidcIssuer
+OIDC issuer the API signs in against. Its origin, plus the API origin, is allowed in
+the Content-Security-Policy form-action so the Admin App 4.1 logout (a form POST to
+the API that redirects to the provider's end-session endpoint) is not blocked.
+Default: https://localhost:8443/realms/edfi.
+
 .PARAMETER AppPoolName
 Dedicated IIS App Pool for the web application site, created and started here so the SPA does
 not depend on DefaultAppPool (which is often Stopped after a reboot). Default:
@@ -45,6 +51,10 @@ param(
     [string]$SiteName = "EdFi-AdminApp-FE",
     [int]$Port = 4200,
     [string]$ApiUrl = "https://localhost:3443",
+    # The OIDC issuer the API signs in against. Its origin is added to the CSP
+    # form-action so the logout POST can follow the redirect to the provider's
+    # end-session endpoint. Empty -> only the API origin is added.
+    [string]$OidcIssuer = "https://localhost:8443/realms/edfi",
     [string]$AppPoolName = "EdFi-AdminApp-FE",
 
     # TLS (see 05-deploy-api.ps1 for the certificate model). HTTPS always-on on
@@ -293,15 +303,20 @@ $webConfig = @'
     <!-- Baseline security headers. The CSP is enforcing (flipped from Report-Only
          once TLS was always-on; validated in a browser with no violations). connect-src
          must match the API origin the FE bundle calls (VITE_API_URL). style-src allows
-         'unsafe-inline' because MUI / emotion inject styles at runtime. -->
+         'unsafe-inline' because MUI / emotion inject styles at runtime.
+         Referrer-Policy is strict-origin-when-cross-origin, not no-referrer: Admin App
+         4.1 logs out with a form POST to the API, whose CSRF guard requires an Origin
+         header matching FE_URL, and under no-referrer the browser sends "Origin: null"
+         on that cross-origin POST, so logout returned 403 Forbidden. This policy sends
+         only the origin cross-origin, never the path or query. -->
     <httpProtocol>
       <customHeaders>
         <remove name="X-Powered-By" />
         __HSTS_HEADER__
         <add name="X-Content-Type-Options" value="nosniff" />
         <add name="X-Frame-Options" value="DENY" />
-        <add name="Referrer-Policy" value="no-referrer" />
-        <add name="Content-Security-Policy" value="default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' __API_ORIGIN__; form-action 'self'" />
+        <add name="Referrer-Policy" value="strict-origin-when-cross-origin" />
+        <add name="Content-Security-Policy" value="default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' __API_ORIGIN__; form-action 'self' __FORM_ACTION_ORIGINS__" />
       </customHeaders>
     </httpProtocol>
   </system.webServer>
@@ -312,6 +327,20 @@ $webConfig = @'
 # browser allows the FE's XHR calls to the API. Strip any path/query from -ApiUrl.
 $apiOrigin = ([Uri]$ApiUrl).GetLeftPart([System.UriPartial]::Authority)
 $webConfig = $webConfig.Replace('__API_ORIGIN__', $apiOrigin)
+
+# form-action must allow the logout chain. Admin App 4.1 signs out with a form POST
+# to the API (4.0 used a plain navigation), the API redirects to the identity
+# provider's end-session endpoint, and browsers check form-action on every redirect
+# of a form submission. With 'self' alone the browser blocks the POST and the Log
+# out button silently does nothing. The end-session endpoint is on the issuer's
+# origin for Keycloak, Entra ID and Auth0; Google has none and the API redirects
+# back to the web application instead.
+$formActionOrigins = @($apiOrigin)
+if ($OidcIssuer) {
+    $issuerOrigin = ([Uri]$OidcIssuer).GetLeftPart([System.UriPartial]::Authority)
+    if ($issuerOrigin -ne $apiOrigin) { $formActionOrigins += $issuerOrigin }
+}
+$webConfig = $webConfig.Replace('__FORM_ACTION_ORIGINS__', ($formActionOrigins -join ' '))
 $webConfig = $webConfig.Replace('__HTTPS_PORT__', "$HttpsPort")
 
 # HSTS only on a real hostname / CA-issued certificate. On the default self-signed localhost

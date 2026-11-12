@@ -35,7 +35,7 @@ windows-install/
 ├─ 02-prereqs-sql.ps1     # SQL Server mixed mode + TCP + least-privilege app login (Windows Authentication)
 ├─ 03-prereqs-node.ps1    # Node.js install / npm cache
 ├─ 04-build.ps1           # npm ci + build:api (webpack) + build:fe (vite)
-├─ 05-deploy-api.ps1      # deploy API site, NODE_CONFIG, TLS, OIDC row, encryption key
+├─ 05-deploy-api.ps1      # deploy API site, NODE_CONFIG, TLS, OIDC row, encryption key, session secret
 ├─ 06-deploy-fe.ps1       # deploy web application site + SPA fallback
 ├─ idp-keycloak-setup.ps1 # provision local Keycloak realm/client/user
 ├─ idp-keycloak-start.ps1 # start Keycloak (optional reboot-survival scheduled task)
@@ -125,7 +125,8 @@ MSI is left in place on uninstall, switching may require removing the current ha
 | 3333 / **3443** | API HTTP → redirects to HTTPS |
 | 4200 / **4443** | Web application HTTP → redirects to HTTPS |
 | 5432 | PostgreSQL (loopback-bound by default) |
-| 8080 | Keycloak (local dev) |
+| 8080 | Keycloak HTTP (local dev; provisioning and health checks) |
+| 8443 | Keycloak HTTPS (the OIDC issuer Admin App 4.1 accepts) |
 
 Use `curl.exe` for HTTPS smoke checks — `Invoke-WebRequest` on PS 5.1 cannot handshake the
 self-signed binding:
@@ -157,8 +158,9 @@ Changes must not weaken these properties (each is exercised by the E2E suite):
   (SQL Server: `db_owner` of `sbaa`, `sysadmin = 0`; PostgreSQL: non-superuser owning `public`
   with `CONNECT` + `CREATE`, never a database-wide `GRANT ALL`). PostgreSQL needs `CREATE` on the
   database to build the `citext` extension and the `pgboss` schema at first boot.
-- **Per-install data-encryption key** — generated per install, recorded only in the
-  Administrators-only summary, reused (not rotated) on idempotent re-runs.
+- **Per-install data-encryption key and session secret** — generated per install, delivered
+  only through the API App Pool's `NODE_CONFIG`, reused (not rotated) on idempotent re-runs.
+  The key is also recorded in the Administrators-only summary for backup.
 - **TLS always-on** — HTTPS bindings on both sites, HTTP ports redirect, self-signed certificate
   auto-trusted when none is supplied, enforcing (not Report-Only) CSP.
 - **Upstream TLS verification on by default** (`-DisableSslVerification` is an explicit opt-out).

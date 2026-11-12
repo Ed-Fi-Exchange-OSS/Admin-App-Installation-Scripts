@@ -45,7 +45,16 @@ into production.js as MSSQL_DB_PASSWORD.
 SQL Server database name. Default: sbaa. Must match what 02-prereqs-sql.ps1 created.
 
 .PARAMETER OidcIssuer
-OIDC issuer URL. Default (Keycloak example): http://localhost:8080/realms/edfi.
+OIDC issuer URL. Default (Keycloak example): https://localhost:8443/realms/edfi.
+Must be HTTPS: Admin App 4.1 rejects any other issuer.
+
+.PARAMETER ExtraCaCertificatePath
+Optional PEM file with extra CA certificates the API should trust, set as
+NODE_EXTRA_CA_CERTS on the App Pool. install-all.ps1 passes the local Keycloak's
+self-signed certificate here, because Node does not read the Windows certificate
+store. If the App Pool already has NODE_EXTRA_CA_CERTS pointing at another file
+(set by hand), that file is kept: both are combined into one bundle. Empty -> a
+value set by hand is kept as it is.
 
 .PARAMETER OidcClientId
 OIDC client id. Default (Keycloak example): edfiadminapp.
@@ -130,9 +139,14 @@ param(
     [string]$PgDbUsername = "edfiadminapp",
     [SecureString]$PgDbPassword,
 
+    # Docker container that runs PostgreSQL (install-all passes edfiadminapp-postgres
+    # with -UsePostgresDocker). When set, the OIDC row is reconciled through the
+    # container's psql, so psql does not need to be installed on the host.
+    [string]$PostgresContainerName = "",
+
     # OIDC settings written into production.js. Defaults are the local-Keycloak
     # example; override for any other provider (Entra, Google, Auth0, ...).
-    [string]$OidcIssuer = "http://localhost:8080/realms/edfi",
+    [string]$OidcIssuer = "https://localhost:8443/realms/edfi",
     [string]$OidcClientId = "edfiadminapp",
 
     [Parameter(Mandatory = $true)]
@@ -161,9 +175,10 @@ param(
 
     # Data-at-rest encryption key (64 hex chars / 32 bytes) the AdminApp uses to
     # encrypt stored ODS/API environment secrets (aes-256-cbc). Empty -> reuse an
-    # already-deployed non-default key, or generate a fresh one on a clean box. A
-    # post-patch guard rejects the shipped default. Losing or changing this key
+    # already-deployed non-default key, or generate a fresh one on a clean box.
+    # Delivered through the App Pool's NODE_CONFIG. Losing or changing this key
     # makes previously-encrypted environment secrets unrecoverable.
+    [ValidatePattern('^([0-9a-fA-F]{64})?$')]
     [string]$DbEncryptionKey = "",
 
     # Escape hatch for the key-rotation guard: proceed even when a freshly
@@ -196,7 +211,13 @@ param(
     # upstream uses a self-signed/dev certificate that Node's CA store won't trust
     # (Node ignores the Windows certificate store); prefer NODE_EXTRA_CA_CERTS over this
     # where possible. Do not disable in production.
-    [switch]$DisableSslVerification
+    [switch]$DisableSslVerification,
+
+    # PEM file set as NODE_EXTRA_CA_CERTS on the App Pool. install-all.ps1 passes the
+    # local Keycloak's self-signed certificate so the API's OIDC discovery trusts it,
+    # and an empty value for any other identity provider. When this parameter is not
+    # passed at all, the Keycloak certificate or bundle already set is kept.
+    [string]$ExtraCaCertificatePath = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -219,6 +240,55 @@ function New-IisServerManager {
     New-Object Microsoft.Web.Administration.ServerManager
 }
 
+# Returns the named environment variable of the App Pool as a string, or $null when
+# the pool or the variable does not exist. An IIS read failure is thrown to the caller.
+function Get-AppPoolEnvironmentValue {
+    param(
+        [Parameter(Mandatory)][string]$AppPoolName,
+        [Parameter(Mandatory)][string]$VariableName
+    )
+
+    $readManager = $null
+    try {
+        $readManager = New-IisServerManager
+        $pool = $readManager.ApplicationPools[$AppPoolName]
+        if (-not $pool) { return $null }
+        $variable = @($pool.GetCollection('environmentVariables') | Where-Object { $_.GetAttributeValue('name') -eq $VariableName }) | Select-Object -First 1
+        if ($variable) { return [string]$variable.GetAttributeValue('value') }
+        return $null
+    } finally {
+        if ($readManager) { $readManager.Dispose() }
+    }
+}
+
+# Sample-secret lists, ConvertFrom-SecretJson and New-RandomSecretBytes, shared with
+# install-all.ps1.
+. "$PSScriptRoot\secret-compat.ps1"
+
+# Returns the App Pool's NODE_CONFIG as an object, or $null on a clean box (no pool or
+# no variable yet). A NODE_CONFIG that exists but cannot be read or parsed throws:
+# after the first deploy it is the only place the encryption key lives, so treating
+# the install as new would generate a key that cannot decrypt the stored ODS/API
+# secrets (PostgreSQL has no key guard to stop that).
+function Get-AppPoolNodeConfig {
+    param([Parameter(Mandatory)][string]$AppPoolName)
+
+    $summaryPath = Join-Path (Split-Path $SourcePath -Parent) 'install-summary.txt'
+    $recovery = "It holds the data-encryption key of this install, and a new key would make the stored ODS/API environment secrets unreadable. Fix NODE_CONFIG on the App Pool in IIS Manager (Configuration Editor, system.applicationHost/applicationPools), or re-run install-all.ps1 with the same parameters plus -DbEncryptionKey set to the key in $summaryPath. The key then appears in this console's history; clear it afterwards."
+    try {
+        $nodeConfigText = Get-AppPoolEnvironmentValue -AppPoolName $AppPoolName -VariableName 'NODE_CONFIG'
+    } catch {
+        throw "Could not read the existing NODE_CONFIG of App Pool '$AppPoolName'. $recovery Original: $($_.Exception.Message)"
+    }
+
+    if (-not $nodeConfigText) { return $null }
+    $nodeConfig = ConvertFrom-SecretJson -JsonText $nodeConfigText
+    if (-not $nodeConfig) {
+        throw "The existing NODE_CONFIG of App Pool '$AppPoolName' is not valid JSON. $recovery"
+    }
+    return $nodeConfig
+}
+
 # Precondition: IIS must be available (01-prereqs-iis.ps1 installs the IIS pieces).
 # Fail early with an actionable message instead of a cryptic type-load error.
 try {
@@ -239,6 +309,9 @@ if ($DbEngine -eq 'pgsql' -and -not $PgDbPassword) {
 if ($DbEngine -ne 'mssql' -and $SqlServerHost -ne 'localhost') {
     throw "-SqlServerHost only applies when -DbEngine is 'mssql'."
 }
+if ($DbEngine -eq 'pgsql' -and $PostgresContainerName -and -not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    throw "-PostgresContainerName '$PostgresContainerName' was given, but docker is not on PATH."
+}
 
 # The Admin App builds its database connection string as a URL and interpolates the database
 # credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
@@ -247,7 +320,8 @@ if ($DbEngine -ne 'mssql' -and $SqlServerHost -ne 'localhost') {
 # App URL-encodes its credentials (the real fix), restrict the database password to characters
 # that are safe unencoded in a URL. This does NOT weaken the password: SQL's CHECK_POLICY
 # needs 3 of 4 categories and upper+lower+digit alone satisfies it (symbols stay optional).
-# Example passwords such as 'YourStrong!Passw0rd' and 'EdFi-App-Local!2026' remain valid.
+# A password such as 'EdFi-App-Local!2026' passes this check. Sample values such as
+# 'YourStrong!Passw0rd' pass it too, but Admin App 4.1 rejects them (see below).
 function Test-DbPasswordUrlSafe {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
@@ -280,6 +354,22 @@ if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbPasswordPlain
 if ($DbEngine -eq 'mssql') { Test-DbPasswordUrlSafe -Password $AppDbUsername -Label "Admin App DB username (-AppDbUsername)" }
 if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbUsername   -Label "Postgres app username (-PgDbUsername)" }
 
+# Admin App 4.1 refuses to start in production when the database password or the OIDC
+# client secret is a known sample value or a placeholder, and the install would
+# otherwise finish with an API that never comes up. 4.0 has no such check, so its
+# installs are not held to it.
+if (Test-AdminAppChecksProductionSecrets -SourcePath $SourcePath) {
+    if ($DbEngine -eq 'mssql') { Assert-NotSampleSecret -Value $AppDbPasswordPlain -Label "Admin App DB login password (-AppDbPassword)" }
+    if ($DbEngine -eq 'pgsql') { Assert-NotSampleSecret -Value $PgDbPasswordPlain  -Label "Postgres app user password (-PgDbPassword)" }
+    Assert-NotSampleSecret -Value $OidcClientSecretPlain -Label "OIDC client secret (-OidcClientSecret)"
+}
+
+# The parameter's ValidatePattern already rejects a malformed key. A sample key is
+# publicly known, so it would not protect the stored ODS/API secrets (and 4.1 refuses it).
+if ($DbEncryptionKey -and (Test-IsSampleEncryptionKey -Key $DbEncryptionKey)) {
+    throw "-DbEncryptionKey is a publicly known sample key from the Admin App repository. Pass the key of this install (from install-summary.txt), or omit -DbEncryptionKey."
+}
+
 # Remote/Azure SQL target (mssql only). A non-loopback -SqlServerHost switches to
 # remote mode: the app validates the server certificate (DB_TRUST_CERTIFICATE=false)
 # and the installer's sqlcmd calls encrypt and validate too (-N), unless
@@ -295,28 +385,80 @@ if (-not (Test-Path "$apiBuildDir\main.js")) {
     throw "Build output not found at $apiBuildDir\main.js. Did you run 'npm run build:api'?"
 }
 
-# Selective copy. The deployment needs three pieces, NOT a full source-tree mirror:
-#   1. Built API output (main.js + assets\)             from dist\packages\api\
-#   2. Config files (production.js etc.)                from packages\api\config\
-#   3. node_modules (runtime deps)                      from repository root
-# Each piece is mirrored independently so /MIR doesn't wipe sibling content
-# (web.config, logs\, the other source piece).
-# Capture any already-deployed non-default encryption key BEFORE the file-copy
-# phase below overwrites production.js. The source ships a stub production.js that
-# the config copy would otherwise clobber, defeating key reuse and silently
-# rotating the key on every re-run. Reusing it keeps previously-encrypted ODS/API
-# environment secrets decryptable across a reinstall.
-$defaultKey = 'bbeadc2d4d15f5c9cfc2239b682cca392b233ee6979b6b9578d256aa01a7c565'
+# Capture the per-install secrets of an earlier deploy BEFORE the file-copy phase
+# below overwrites production.js, so a re-run reuses them instead of rotating them.
+# Reusing the encryption key keeps previously-encrypted ODS/API environment secrets
+# decryptable; reusing the session secret keeps signed-in users signed in.
+#   1. The App Pool's NODE_CONFIG, where this script delivers both secrets.
+#   2. A non-sample KEY in the deployed production.js, where earlier versions of
+#      this script wrote the encryption key (no session secret existed then).
 $existingDeployedKey = ''
+$existingKeyFromProductionJs = $false
+$existingSessionSecret = @()
+try {
+    $existingNodeConfig = Get-AppPoolNodeConfig -AppPoolName $AppPoolName
+} catch {
+    if (-not $DbEncryptionKey) { throw }
+    # The caller supplied the key, so only the session secret is lost.
+    Write-Warning "The existing NODE_CONFIG of App Pool '$AppPoolName' could not be read or parsed. Continuing with the -DbEncryptionKey value; a new session secret is generated, which signs current users out."
+    $existingNodeConfig = $null
+}
+if ($existingNodeConfig) {
+    $existingEncryption = $existingNodeConfig.DB_ENCRYPTION_SECRET_VALUE
+    if ($existingEncryption -and "$($existingEncryption.KEY)" -match '^[0-9a-fA-F]{64}$' -and -not (Test-IsSampleEncryptionKey -Key $existingEncryption.KEY)) {
+        $existingDeployedKey = $existingEncryption.KEY
+    }
+    $candidateSessionSecret = @($existingNodeConfig.SESSION_SECRET_VALUE | Where-Object { $_ -is [string] -and $_.Trim() })
+    if ($candidateSessionSecret.Count -gt 0) {
+        $existingSessionSecret = $candidateSessionSecret
+    }
+}
 $deployedProdJs = "$DestPath\packages\api\config\production.js"
-if (Test-Path $deployedProdJs) {
-    if ((Get-Content $deployedProdJs -Raw) -match "KEY: '([0-9a-f]{64})'" -and $Matches[1] -ne $defaultKey) {
+if (-not $existingDeployedKey -and (Test-Path $deployedProdJs)) {
+    if ((Get-Content $deployedProdJs -Raw) -match "KEY: '([0-9a-fA-F]{64})'" -and -not (Test-IsSampleEncryptionKey -Key $Matches[1])) {
         $existingDeployedKey = $Matches[1]
+        $existingKeyFromProductionJs = $true
+    }
+}
+
+# A key found only in the deployed production.js has no other copy, and the copy
+# phase below overwrites that file. If a later step failed, the next run would find
+# no key and generate a new one, and the stored ODS/API secrets would become
+# unreadable (PostgreSQL has no guard against that). So write it to the App Pool's
+# NODE_CONFIG first; the full NODE_CONFIG replaces it at the end of this script.
+if ($existingKeyFromProductionJs) {
+    $keyOnlyNodeConfig = @{ DB_ENCRYPTION_SECRET_VALUE = @{ KEY = $existingDeployedKey } } | ConvertTo-Json -Depth 3 -Compress
+    $keyManager = $null
+    try {
+        $keyManager = New-IisServerManager
+        $keyPool = $keyManager.ApplicationPools[$AppPoolName]
+        if ($keyPool) {
+            $keyVariables = $keyPool.GetCollection('environmentVariables')
+            foreach ($stale in @($keyVariables | Where-Object { $_.GetAttributeValue('name') -eq 'NODE_CONFIG' })) {
+                $keyVariables.Remove($stale)
+            }
+            $keyVariable = $keyVariables.CreateElement('add')
+            $keyVariable.SetAttributeValue('name', 'NODE_CONFIG')
+            $keyVariable.SetAttributeValue('value', [string]$keyOnlyNodeConfig)
+            $keyVariables.Add($keyVariable) | Out-Null
+            $keyManager.CommitChanges()
+            Write-Host "Saved the existing data-encryption key to the App Pool's NODE_CONFIG before replacing production.js."
+        }
+    } catch {
+        throw "Could not save the existing data-encryption key to the NODE_CONFIG of App Pool '$AppPoolName' before replacing production.js, so nothing was changed. Original: $($_.Exception.Message)"
+    } finally {
+        if ($keyManager) { $keyManager.Dispose() }
     }
 }
 
 New-Item -ItemType Directory -Path $DestPath -Force | Out-Null
 
+# Selective copy. The deployment needs three pieces, NOT a full source-tree mirror:
+#   1. Built API output (main.js + assets\)             from dist\packages\api\
+#   2. Config files (production.js etc.)                from packages\api\config\
+#   3. node_modules (runtime deps)                      from repository root
+# Each piece is copied independently so a mirror doesn't wipe sibling content
+# (web.config, logs\, the other source piece).
 Write-Host "Copying built API output..."
 & robocopy $apiBuildDir $DestPath /E /NFL /NDL /NJH /NJS /XF web.config /XD logs packages node_modules | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Failed to copy the built API output from $apiBuildDir to $DestPath (robocopy exit $LASTEXITCODE). Check free disk space and that the destination isn't locked by a running app pool." }
@@ -326,9 +468,15 @@ New-Item -ItemType Directory -Path "$DestPath\packages\api" -Force | Out-Null
 & robocopy "$SourcePath\packages\api\config" "$DestPath\packages\api\config" /E /NFL /NDL /NJH /NJS | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Failed to copy api/config from $SourcePath\packages\api\config to $DestPath\packages\api\config (robocopy exit $LASTEXITCODE)." }
 
+# node_modules is mirrored (/MIR), not merged (/E): a merge over an older release
+# leaves packages the new release no longer has. Upgrading 4.0.1 to 4.1 left 4.0.1's
+# openid-client\node_modules\jose (4.x) next to 4.1's openid-client 6, which then
+# resolved that stale jose and crashed the API at startup with
+# ERR_PACKAGE_PATH_NOT_EXPORTED. /R:2 /W:2 keeps a locked file from stalling
+# robocopy on its default of a million 30-second retries.
 Write-Host "Copying node_modules (this takes a minute)..."
-& robocopy "$SourcePath\node_modules" "$DestPath\node_modules" /E /NFL /NDL /NJH /NJS | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "Failed to copy node_modules from $SourcePath\node_modules to $DestPath\node_modules (robocopy exit $LASTEXITCODE). Check free disk space." }
+& robocopy "$SourcePath\node_modules" "$DestPath\node_modules" /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+if ($LASTEXITCODE -ge 8) { throw "Failed to copy node_modules from $SourcePath\node_modules to $DestPath\node_modules (robocopy exit $LASTEXITCODE). Check free disk space, and that no file is locked by the running App Pool: stop the '$AppPoolName' App Pool in IIS Manager and re-run." }
 
 # App Pool. The collection indexer returns $null for a name that does not exist.
 $appPoolManager = $null
@@ -595,21 +743,34 @@ $prodJs = "$DestPath\packages\api\config\production.js"
 $prodJsTemplate = "$DestPath\packages\api\config\production.js-edfi"
 
 # Resolve the data-at-rest encryption key. Precedence: an explicit -DbEncryptionKey
-# wins; else reuse the key captured from the previously-deployed production.js
-# (grabbed before the copy phase clobbered it); a clean box with no prior key
-# generates a fresh one. Rotating this key makes previously-encrypted ODS/API
-# environment secrets unrecoverable, which the guard below defends against.
+# wins; else reuse the key captured from the earlier deploy (grabbed before the
+# copy phase clobbered production.js); a clean box with no prior key generates a
+# fresh one. Rotating this key makes previously-encrypted ODS/API environment
+# secrets unrecoverable, which the guard below defends against.
 $freshKeyGenerated = $false
 if (-not $DbEncryptionKey -and $existingDeployedKey) {
     $DbEncryptionKey = $existingDeployedKey
     Write-Host "Reusing the existing per-install data-encryption key."
 }
 if (-not $DbEncryptionKey) {
-    $keyBytes = [byte[]]::new(32)
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($keyBytes)
+    $keyBytes = New-RandomSecretBytes -Count 32
     $DbEncryptionKey = ($keyBytes | ForEach-Object { $_.ToString('x2') }) -join ''
     $freshKeyGenerated = $true
     Write-Host "Generated a per-install data-encryption key."
+}
+
+# Resolve the session-signing secret. Admin App 4.1 refuses to start without one;
+# 4.0 ignores it. It is a list, newest first: the first entry signs new session
+# cookies and the rest still verify, so an operator can rotate it by hand without
+# signing everyone out. Reuse the earlier install's list; else generate one entry
+# (32 random bytes, base64, the format the Admin App's own Docker setup generates).
+if ($existingSessionSecret.Count -gt 0) {
+    $sessionSecret = $existingSessionSecret
+    Write-Host "Reusing the existing session-signing secret."
+} else {
+    $sessionBytes = New-RandomSecretBytes -Count 32
+    $sessionSecret = @([Convert]::ToBase64String($sessionBytes))
+    Write-Host "Generated a session-signing secret."
 }
 
 # Guard (defense-in-depth): a freshly generated key cannot decrypt environment
@@ -661,13 +822,13 @@ if (Test-Path $prodJsTemplate) {
 # Configure the deployed API. Two delivery paths:
 #   1. NODE_CONFIG (built here, injected on the App Pool environment below): a JSON
 #      document node-config deep-merges OVER production.js at load time. It
-#      carries every value that is plain data -- database credentials, URLs, OIDC, yopass,
-#      admin user -- so those need no fragile text patching.
-#   2. Two residual production.js text patches that can't be expressed as JSON
-#      data: the per-install encryption KEY (install-all reads it back for the
-#      summary) and API_PORT (a JS expression reading a runtime environment variable). Both
-#      are guarded so a template-formatting change fails loudly instead of
-#      silently shipping a default (PR #234 Architecture concern #4 / T2.8).
+#      carries every value that is plain data -- database credentials, the encryption
+#      key, the session secret, URLs, OIDC, yopass, admin user -- so those need no
+#      fragile text patching.
+#   2. One residual production.js text patch that can't be expressed as JSON data:
+#      API_PORT (a JS expression reading a runtime environment variable). It is
+#      guarded so a template-formatting change fails loudly instead of silently
+#      shipping a default (PR #234 Architecture concern #4 / T2.8).
 
 # Guard helper: apply a regex replacement, aborting if the anchor is absent.
 # Anchors key on the config NAME (not the default value), so they survive value
@@ -688,9 +849,11 @@ function Set-ConfigAnchor {
 # Build the NODE_CONFIG document from the resolved values. node-config deep-merges
 # objects, so partial DB_SECRET_VALUE / AUTH0_CONFIG_SECRET_VALUE objects keep
 # their untouched siblings (unused engine keys). A single-element
-# WHITELISTED_REDIRECTS array serializes correctly here (nested arrays don't
-# collapse in ConvertTo-Json; verified on PS 5.1).
+# WHITELISTED_REDIRECTS or SESSION_SECRET_VALUE array serializes correctly here
+# (nested arrays don't collapse in ConvertTo-Json; verified on PS 5.1).
 $nodeConfig = @{
+    DB_ENCRYPTION_SECRET_VALUE = @{ KEY = $DbEncryptionKey }
+    SESSION_SECRET_VALUE      = @($sessionSecret)
     MY_URL                    = $ApiUrl
     FE_URL                    = $FeUrl
     WHITELISTED_REDIRECTS     = @($FeUrl)
@@ -758,22 +921,28 @@ if (Test-Path $prodJs) {
     # the guard fires only if the API_PORT key vanished entirely.
     $c = Set-ConfigAnchor $c "API_PORT:\s*[^,\r\n]+," "API_PORT: process.env.HTTP_PLATFORM_PORT || 3333," 'API_PORT'
 
-    # Residual patch 2: per-install encryption key. Kept in production.js because
-    # install-all.ps1 reads it back for the (access control list-locked) install summary. The
-    # existing default-key check below is its silent-no-op guard.
-    $c = $c.Replace("KEY: '$defaultKey',", "KEY: '$DbEncryptionKey',")
-    if ($c -match $defaultKey) {
-        throw "The default DB_ENCRYPTION_SECRET_VALUE.KEY is still present in $prodJs after patching. Refusing to deploy with the well-known default key."
+    # Scrub the sample secrets the template may still carry. Every one of these
+    # values reaches the API through NODE_CONFIG, which overrides production.js, so
+    # the scrub only keeps a well-known sample from being used if NODE_CONFIG ever
+    # fails to load. Each regex keys on the name and matches ANY value, so it stays
+    # idempotent on re-run. Both engines' password samples are scrubbed regardless
+    # of the active engine. A line that is absent is expected, not drift: the Admin
+    # App 4.0 template ships these samples, the 4.1 template ships none of them.
+    $sampleSecretPatterns = @(
+        "(?m)^(\s*KEY:\s*')[^']*(')",
+        "(clientSecret:\s*')[^']*(')",
+        "(CLIENT_SECRET:\s*')[^']*(')",
+        "(MSSQL_DB_PASSWORD:\s*')[^']*(')",
+        "(?<![A-Za-z_])(DB_PASSWORD:\s*')[^']*(')"
+    )
+    foreach ($pattern in $sampleSecretPatterns) {
+        $c = [regex]::Replace($c, $pattern, '${1}' + $scrubMarker + '${2}')
     }
-
-    # Scrub the default secrets for values now delivered via NODE_CONFIG. Each
-    # regex keys on the name and matches ANY value, so it neutralizes the default
-    # AND stays idempotent on re-run. Both engines' password defaults are scrubbed
-    # regardless of the active engine, so no default secret is left in the file.
-    $c = Set-ConfigAnchor $c "(clientSecret:\s*')[^']*(')"              ('${1}' + $scrubMarker + '${2}') 'clientSecret'
-    $c = Set-ConfigAnchor $c "(CLIENT_SECRET:\s*')[^']*(')"             ('${1}' + $scrubMarker + '${2}') 'CLIENT_SECRET'
-    $c = Set-ConfigAnchor $c "(MSSQL_DB_PASSWORD:\s*')[^']*(')"         ('${1}' + $scrubMarker + '${2}') 'MSSQL_DB_PASSWORD'
-    $c = Set-ConfigAnchor $c "(?<![A-Za-z_])(DB_PASSWORD:\s*')[^']*(')" ('${1}' + $scrubMarker + '${2}') 'DB_PASSWORD'
+    # The sample encryption keys are the one default worth a format-independent check:
+    # they are publicly known and protect stored ODS/API credentials.
+    if (@($script:AdminAppSampleEncryptionKeys | Where-Object { $c -match $_ }).Count -gt 0) {
+        throw "The sample DB_ENCRYPTION_SECRET_VALUE.KEY is still present in $prodJs after scrubbing. The template (production.js-edfi) formatting likely changed. Refusing to deploy with the well-known sample key on disk."
+    }
 
     if ($c -ne $original) {
         try {
@@ -781,7 +950,7 @@ if (Test-Path $prodJs) {
         } catch {
             throw "Failed to write the patched production.js at $prodJs. Check the config folder is writable. Original: $($_.Exception.Message)"
         }
-        Write-Host "production.js patched (API_PORT + encryption key; default secrets scrubbed; application configuration delivered via NODE_CONFIG)."
+        Write-Host "production.js patched (API_PORT; sample secrets scrubbed; application configuration and secrets delivered via NODE_CONFIG)."
         $prodJsChanged = $true
     } else {
         Write-Host "production.js already has the desired values — not rewriting."
@@ -813,8 +982,99 @@ if (-not (Test-Path $NpmCachePath)) {
     New-Item -ItemType Directory -Path $NpmCachePath -Force | Out-Null
 }
 & icacls $NpmCachePath /grant "${appPoolIdentity}:(OI)(CI)M" /T | Out-Null
-# NODE_CONFIG carries the structured app configuration (database credentials, URLs, OIDC,
-# yopass, admin user); node-config deep-merges it over production.js at boot. It lives in
+
+# Extra CA certificates for Node (NODE_EXTRA_CA_CERTS), e.g. the local Keycloak's
+# self-signed certificate. Node reads the file once at startup and only warns when it
+# is missing, so check it here, and let the App Pool identity read it.
+#
+# NODE_EXTRA_CA_CERTS holds a single file, and an administrator may already have
+# pointed it at their own CA file (for a self-signed ODS/API or PostgreSQL; see
+# docker/README.md). Keep that file. When the Keycloak certificate is needed too,
+# combine both into one bundle next to the Keycloak certificate, and record the
+# administrator's file in the bundle's first line so a re-run can rebuild it.
+$keycloakCaFileName = 'edfi-adminapp-https.pem'
+$caBundleFileName = 'edfi-adminapp-node-ca-bundle.pem'
+$caBundleSourcePrefix = '# Ed-Fi Admin App bundle source: '
+$existingExtraCa = $null
+try {
+    $existingExtraCa = Get-AppPoolEnvironmentValue -AppPoolName $AppPoolName -VariableName 'NODE_EXTRA_CA_CERTS'
+} catch {
+    Write-Warning "Could not read the existing NODE_EXTRA_CA_CERTS of App Pool '$AppPoolName'; a value set by hand is not kept. Original: $($_.Exception.Message)"
+}
+
+# A run of this script on its own (for example to recover a NODE_CONFIG) does not pass
+# -ExtraCaCertificatePath, but the API still needs the Keycloak certificate, so an
+# existing Keycloak certificate or bundle is kept. install-all.ps1 always passes the
+# parameter: the Keycloak certificate, or an empty value to drop it (another identity
+# provider).
+$keepExistingKeycloakTrust = -not $PSBoundParameters.ContainsKey('ExtraCaCertificatePath')
+$existingKeycloakTrust = $null
+$administratorCaPath = $null
+if ($existingExtraCa) {
+    $existingLeaf = Split-Path $existingExtraCa -Leaf
+    if ($existingLeaf -eq $caBundleFileName) {
+        if (Test-Path -LiteralPath $existingExtraCa -PathType Leaf) {
+            $existingKeycloakTrust = $existingExtraCa
+            $sourceLine = Get-Content -LiteralPath $existingExtraCa -TotalCount 1
+            if ($sourceLine -and $sourceLine.StartsWith($caBundleSourcePrefix)) {
+                $administratorCaPath = $sourceLine.Substring($caBundleSourcePrefix.Length)
+            }
+        } else {
+            Write-Warning "NODE_EXTRA_CA_CERTS pointed at the CA bundle '$existingExtraCa', which no longer exists (Keycloak was uninstalled?). It is cleared; set it again if the API needs your own CA file."
+        }
+    } elseif ($existingLeaf -eq $keycloakCaFileName) {
+        if (Test-Path -LiteralPath $existingExtraCa -PathType Leaf) {
+            $existingKeycloakTrust = $existingExtraCa
+        }
+    } else {
+        $administratorCaPath = $existingExtraCa
+    }
+}
+
+$extraCaValue = $null
+if ($ExtraCaCertificatePath) {
+    if (-not (Test-Path $ExtraCaCertificatePath -PathType Leaf)) {
+        throw "-ExtraCaCertificatePath '$ExtraCaCertificatePath' does not exist. For the local Keycloak, re-run idp-keycloak-setup.ps1, which writes it."
+    }
+    & icacls $ExtraCaCertificatePath /grant "${appPoolIdentity}:(R)" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to let '$appPoolIdentity' read $ExtraCaCertificatePath (icacls exit $LASTEXITCODE). Without it the API cannot reach the identity provider." }
+    $extraCaValue = [string](Resolve-Path -LiteralPath $ExtraCaCertificatePath).ProviderPath
+    # The same file set by hand earlier is not a second CA file: bundling it would
+    # only duplicate it.
+    if ($administratorCaPath -and [System.IO.Path]::GetFullPath($administratorCaPath) -ieq $extraCaValue) {
+        $administratorCaPath = $null
+    }
+    if ($administratorCaPath -and (Test-Path -LiteralPath $administratorCaPath -PathType Leaf)) {
+        $caBundlePath = Join-Path (Split-Path $extraCaValue -Parent) $caBundleFileName
+        $caBundleText = "$caBundleSourcePrefix$administratorCaPath`n" +
+            "$((Get-Content -LiteralPath $administratorCaPath -Raw).Trim())`n" +
+            "$((Get-Content -LiteralPath $extraCaValue -Raw).Trim())`n"
+        [System.IO.File]::WriteAllText($caBundlePath, $caBundleText, [System.Text.UTF8Encoding]::new($false))
+        # Same access as the Keycloak certificate (see idp-keycloak-setup.ps1): the API
+        # trusts every certificate in the bundle and a re-run trusts its first line, so
+        # only Administrators and SYSTEM may change it.
+        & icacls $caBundlePath /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' '*S-1-5-32-545:R' "${appPoolIdentity}:(R)" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to restrict the access control list on $caBundlePath (icacls exit $LASTEXITCODE)." }
+        $extraCaValue = $caBundlePath
+        Write-Host "Kept the existing NODE_EXTRA_CA_CERTS file '$administratorCaPath' and combined it with '$ExtraCaCertificatePath' in '$caBundlePath'."
+    } elseif ($administratorCaPath) {
+        Write-Warning "NODE_EXTRA_CA_CERTS pointed at '$administratorCaPath', which no longer exists. It is replaced by '$ExtraCaCertificatePath'."
+    }
+} elseif ($keepExistingKeycloakTrust -and $existingKeycloakTrust) {
+    $extraCaValue = $existingKeycloakTrust
+    Write-Host "Kept the existing NODE_EXTRA_CA_CERTS file '$existingKeycloakTrust' (-ExtraCaCertificatePath was not passed)."
+} elseif ($administratorCaPath -and (Test-Path -LiteralPath $administratorCaPath -PathType Leaf)) {
+    $extraCaValue = $administratorCaPath
+    Write-Host "Kept the existing NODE_EXTRA_CA_CERTS file '$administratorCaPath'."
+} elseif ($administratorCaPath) {
+    Write-Warning "NODE_EXTRA_CA_CERTS pointed at '$administratorCaPath', which no longer exists. It is cleared; set it again if the API needs your own CA file."
+} elseif ($existingKeycloakTrust) {
+    Write-Host "Removed NODE_EXTRA_CA_CERTS '$existingKeycloakTrust': the identity provider is not the local Keycloak."
+}
+
+# NODE_CONFIG carries the structured app configuration (database credentials, the
+# encryption key, the session secret, URLs, OIDC, yopass, admin user); node-config
+# deep-merges it over production.js at boot. It lives in
 # the admin-only applicationHost.config, not the site's production.js, so it is never
 # echoed here. Each variable is removed before being added so a re-run replaces rather
 # than duplicates it.
@@ -841,7 +1101,7 @@ try {
     $environmentStage = 'read the environmentVariables collection'
     $environmentVariables = $environmentPool.GetCollection('environmentVariables')
     $environmentStage = 'remove stale variables'
-    foreach ($variableName in @('NPM_CONFIG_CACHE', 'NODE_CONFIG')) {
+    foreach ($variableName in @('NPM_CONFIG_CACHE', 'NODE_CONFIG', 'NODE_EXTRA_CA_CERTS')) {
         foreach ($stale in @($environmentVariables | Where-Object { $_.GetAttributeValue('name') -eq $variableName })) {
             $environmentVariables.Remove($stale)
         }
@@ -856,14 +1116,21 @@ try {
     $configVariable.SetAttributeValue('name', 'NODE_CONFIG')
     $configVariable.SetAttributeValue('value', [string]$nodeConfigJson)
     $environmentVariables.Add($configVariable) | Out-Null
+    if ($extraCaValue) {
+        $environmentStage = 'add NODE_EXTRA_CA_CERTS'
+        $caVariable = $environmentVariables.CreateElement('add')
+        $caVariable.SetAttributeValue('name', 'NODE_EXTRA_CA_CERTS')
+        $caVariable.SetAttributeValue('value', [string]$extraCaValue)
+        $environmentVariables.Add($caVariable) | Out-Null
+    }
     $environmentStage = 'commit the changes'
     $environmentManager.CommitChanges()
 } catch {
-    throw "Failed to set NPM_CONFIG_CACHE and NODE_CONFIG on the App Pool '$AppPoolName' while trying to $environmentStage. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
+    throw "Failed to set the environment variables on the App Pool '$AppPoolName' while trying to $environmentStage. App Pool environment variables require IIS 10 or newer. Original: $($_.Exception.Message)"
 } finally {
     if ($environmentManager) { $environmentManager.Dispose() }
 }
-Write-Host "Permissions granted to $appPoolIdentity; NPM_CONFIG_CACHE and NODE_CONFIG set on App Pool."
+Write-Host "Permissions granted to $appPoolIdentity; NPM_CONFIG_CACHE, NODE_CONFIG$(if ($extraCaValue) { " and NODE_EXTRA_CA_CERTS" }) set on App Pool."
 
 # ---------- OIDC connection row reconciliation (Gap A) ----------
 # The seed migration inserts the [oidc]/"oidc" row only when the table is empty
@@ -933,14 +1200,38 @@ END
             Write-Host "Could not reconcile the OIDC connection row (sqlcmd exit $oidcUpsertExit). If login uses stale OIDC settings, update the [oidc] row manually." -ForegroundColor Yellow
         }
     } else {
-        # PG best-effort: 05 has no docker awareness, so reach the database via psql on
-        # PATH. Probe for the table first (absent on a pre-boot first install) so
-        # the UPDATE can't error on a missing table -- the boot seed covers that.
-        if (Get-Command psql -ErrorAction SilentlyContinue) {
+        # PG best-effort: reach the database through the container's psql when
+        # install-all runs PostgreSQL in Docker (-PostgresContainerName), otherwise
+        # through psql on PATH. Without this, a re-run over an install whose oidc row
+        # still has an old issuer (for example the HTTP Keycloak issuer of a 4.0
+        # install) keeps it, and Admin App 4.1 cannot log in. Probe for the table first
+        # (absent on a pre-boot first install) so the UPDATE can't error on a missing
+        # table -- the boot seed covers that. The password travels in PGPASSWORD
+        # (docker exec -e PGPASSWORD copies it from this process), never on a
+        # command line.
+        $invokePsql = $null
+        if ($PostgresContainerName) {
+            $invokePsql = {
+                param([string]$Sql, [string[]]$PsqlArguments)
+                # Local scope only: Windows PowerShell 5.1 turns native stderr into a
+                # terminating error under 'Stop', even when it is redirected.
+                $ErrorActionPreference = 'Continue'
+                $Sql | & docker exec -i -e PGPASSWORD $PostgresContainerName psql -U $PgDbUsername -d $DatabaseName @PsqlArguments 2>$null
+            }
+        } elseif (Get-Command psql -ErrorAction SilentlyContinue) {
+            $invokePsql = {
+                param([string]$Sql, [string[]]$PsqlArguments)
+                $ErrorActionPreference = 'Continue'
+                $Sql | & psql -h $PgDbHost -p $PgDbPort -U $PgDbUsername -d $DatabaseName @PsqlArguments 2>$null
+            }
+        }
+        if ($invokePsql) {
             $env:PGPASSWORD = $PgDbPasswordPlain
             try {
-                $reg = 'SELECT to_regclass(''oidc'');' | & psql -h $PgDbHost -p $PgDbPort -U $PgDbUsername -d $DatabaseName -tA 2>$null
-                if ($LASTEXITCODE -eq 0 -and "$reg".Trim() -ne '') {
+                $reg = & $invokePsql 'SELECT to_regclass(''oidc'');' @('-tA')
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Could not connect to PostgreSQL to reconcile the OIDC connection row (psql exit $LASTEXITCODE). Update the `"oidc`" row manually if login uses stale settings." -ForegroundColor Yellow
+                } elseif ("$reg".Trim() -ne '') {
                     $oidcUpsert = @"
 INSERT INTO "oidc" ("issuer", "clientId", "clientSecret", "scope")
     SELECT '$oidcIssuerSql', '$oidcClientIdSql', '$oidcSecretSql', '$oidcScopeSql'
@@ -948,7 +1239,7 @@ INSERT INTO "oidc" ("issuer", "clientId", "clientSecret", "scope")
 UPDATE "oidc" SET "issuer" = '$oidcIssuerSql', "clientSecret" = '$oidcSecretSql', "scope" = '$oidcScopeSql'
     WHERE "clientId" = '$oidcClientIdSql';
 "@
-                    $oidcUpsert | & psql -h $PgDbHost -p $PgDbPort -U $PgDbUsername -d $DatabaseName -v ON_ERROR_STOP=1 1>$null 2>$null
+                    & $invokePsql $oidcUpsert @('-v', 'ON_ERROR_STOP=1') | Out-Null
                     if ($LASTEXITCODE -eq 0) {
                         Write-Host "OIDC connection row reconciled with the supplied settings."
                     } else {
@@ -961,7 +1252,7 @@ UPDATE "oidc" SET "issuer" = '$oidcIssuerSql', "clientSecret" = '$oidcSecretSql'
                 Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
             }
         } else {
-            Write-Host "psql not on PATH; skipping OIDC-row reconciliation. If you re-deployed corrected OIDC settings on Postgres, update the `"oidc`" row manually." -ForegroundColor Yellow
+            Write-Host "psql not on PATH and no -PostgresContainerName; skipping OIDC-row reconciliation. If you re-deployed corrected OIDC settings on Postgres, update the `"oidc`" row manually." -ForegroundColor Yellow
         }
     }
 }

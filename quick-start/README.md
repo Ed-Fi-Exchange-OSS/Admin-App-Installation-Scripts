@@ -17,7 +17,7 @@ Auth0 prerequisites are covered [below](#auth0-prerequisites).
 | `run.ps1` | One-step entry point: loads `.env` and runs `bootstrap.ps1`, `quick-start.ps1`, and `copy-claimsets.ps1`. |
 | `bootstrap.ps1` | Provisions the IdP machine client (Keycloak) or, for Microsoft Entra ID / Auth0 (`-Provider microsoft \| auth0`; `entra` is a deprecated alias for `microsoft`), skips provider calls (the registration is done in the provider's portal); seeds the matching machine user row in the Admin App database. For Auth0 it also verifies a real client-credentials token's claims. Idempotent. |
 | `quick-start.ps1` | Provisions the team, environment, tenant, ODS instances, and ownerships through the Admin App REST API, and adds the machine user — plus the human bootstrap admin when `ADMIN_USERNAME` is set — to the team. Idempotent. |
-| `copy-claimsets.ps1` | Copies every built-in claimset under an `AA` prefix in the ODS/API's EdFi_Security database so they can be assigned to applications in the Admin App (or only the ones in `CLAIMSET_NAMES`). Idempotent. |
+| `copy-claimsets.ps1` | Copies every built-in claimset under an `AA-` prefix in the ODS/API's EdFi_Security database so they can be assigned to applications in the Admin App (or only the ones in `CLAIMSET_NAMES`). Idempotent. |
 | `cleanup.ps1` | Tears down everything the quick start created (environment, team, machine user). The human bootstrap user is left in place. |
 | `load-dotenv.ps1` | Shared `.env` parser dot-sourced by `run.ps1` and `cleanup.ps1`. |
 | `compat.ps1` | Shared Windows PowerShell 5.1 / PowerShell 7+ compatibility helpers, plus the SQL-target helpers that decide local vs. remote, dot-sourced by the other scripts. |
@@ -84,6 +84,13 @@ reverse-proxy path of the Docker deployment. On an Admin App installed with
 `API_BASE_URL=https://localhost:3443/api` (the deployed `-HttpsApiPort`). With the
 wrong base URL the very first call, `GET /auth/me`, fails with an IIS 404 that
 misleadingly looks like a machine-user authentication problem.
+
+`KEYCLOAK_BASE_URL` and `TOKEN_URL` default to the HTTPS listener of the
+`windows-install/install-all.ps1` Keycloak (`https://localhost:8443`), because
+Admin App 4.1 accepts only an HTTPS issuer and a token requested on HTTP port
+8080 gets a 401. On the Docker deployment, Keycloak is behind the reverse proxy:
+set `KEYCLOAK_BASE_URL=https://localhost/auth` and
+`TOKEN_URL=https://localhost/auth/realms/edfi/protocol/openid-connect/token`.
 
 On SQL Server, a loopback `APP_SQL_SERVER` / `SECURITY_SQL_SERVER` is connected
 to with `sqlcmd -C` (trust server certificate), because a local instance
@@ -166,9 +173,13 @@ fallback (after v4.0.1).
 
 The Admin App hides built-in (Ed-Fi preset) claimsets from the application
 claimset dropdown, so `run.ps1` finishes by running `copy-claimsets.ps1`, which
-recreates every built-in claimset under an `AA` prefix (e.g. `SIS Vendor` →
-`AA SIS Vendor`) directly in the **EdFi_Security** database — a database on
-the ODS/API side, not the Admin App's. Internal-use claimsets (e.g.
+recreates every built-in claimset under an `AA-` prefix (e.g. `SIS Vendor` →
+`AA-SIS-Vendor`) directly in the **EdFi_Security** database — a database on
+the ODS/API side, not the Admin App's. The copy names have no spaces because
+Admin API 2.x in v3 mode, which Admin App 4.1 uses, rejects a claimset name
+with white space when an application is created. Copies made by earlier
+versions (`AA SIS Vendor`) cannot be assigned there; `cleanup.ps1` removes
+them along with the new ones. Internal-use claimsets (e.g.
 `Bootstrap Descriptors and EdOrgs`) are excluded; set `CLAIMSET_NAMES` to copy
 a specific list instead. Because `EdFi_Security` is a different database from
 the Admin App's, it has its own connection settings — it can even run on a
@@ -192,14 +203,14 @@ FROM dbo.ClaimSetResourceClaimActionAuthorizationStrategyOverrides ov
     INNER JOIN dbo.ClaimSetResourceClaimActions a
         ON a.ClaimSetResourceClaimActionId = ov.ClaimSetResourceClaimActionId
     INNER JOIN dbo.ClaimSets cs ON cs.ClaimSetId = a.ClaimSetId
-WHERE cs.ClaimSetName = 'AA SIS Vendor';
+WHERE cs.ClaimSetName = 'AA-SIS-Vendor';
 
 DELETE a
 FROM dbo.ClaimSetResourceClaimActions a
     INNER JOIN dbo.ClaimSets cs ON cs.ClaimSetId = a.ClaimSetId
-WHERE cs.ClaimSetName = 'AA SIS Vendor';
+WHERE cs.ClaimSetName = 'AA-SIS-Vendor';
 
-DELETE FROM dbo.ClaimSets WHERE ClaimSetName = 'AA SIS Vendor';
+DELETE FROM dbo.ClaimSets WHERE ClaimSetName = 'AA-SIS-Vendor';
 ```
 
 (For PostgreSQL use the same three deletes with lowercase identifiers and
@@ -219,7 +230,6 @@ Server (`DB_ENGINE=mssql`) and PostgreSQL (`DB_ENGINE=pgsql`, optionally
 `USE_POSTGRES_DOCKER=true`). Also removes the claimset copies from
 EdFi_Security (via the `SECURITY_*` values) — pass `-SkipClaimsets` to leave
 them in place, e.g. when an application still uses one.
-`USE_POSTGRES_DOCKER=true`).
 
 Cleanup is scoped to the Admin App database. The Keycloak artifacts
 `bootstrap.ps1` created (the machine client, the `login:app` client scope, and

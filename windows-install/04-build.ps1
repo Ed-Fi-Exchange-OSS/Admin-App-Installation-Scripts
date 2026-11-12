@@ -40,7 +40,7 @@ of its own HTTP site).
 
 .PARAMETER ViteIdpAccountUrl
 The identity provider account-management URL the web application links to. Default (Keycloak example):
-http://localhost:8080/realms/edfi/account/.
+https://localhost:8443/realms/edfi/account/.
 
 .PARAMETER ViteOidcId
 The `oidc` database row id the web application initiates login against. Written into
@@ -76,7 +76,7 @@ param(
     [switch]$Force,
     [string]$ViteApiUrl = "http://localhost:3333",
     [string]$ViteBasePath = "/",
-    [string]$ViteIdpAccountUrl = "http://localhost:8080/realms/edfi/account/",
+    [string]$ViteIdpAccountUrl = "https://localhost:8443/realms/edfi/account/",
     [int]$ViteOidcId = 1,
     [switch]$FeOnly
 )
@@ -162,7 +162,15 @@ try {
         $envText = Get-Content $envFile -Raw
         $envText = $envText -replace 'VITE_API_URL=.*',         "VITE_API_URL=$ViteApiUrl"
         $envText = $envText -replace 'VITE_BASE_PATH=.*',        "VITE_BASE_PATH=`"$ViteBasePath`""
-        $envText = $envText -replace 'VITE_IDP_ACCOUNT_URL=.*',  "VITE_IDP_ACCOUNT_URL=$ViteIdpAccountUrl"
+        # The Admin App 4.1 template ships this line commented out ("# VITE_IDP_ACCOUNT_URL=")
+        # while 4.0 ships it active. Replace either form with an active line, and append it
+        # when absent. Keeping the '#' left the account link out of the bundle and made the
+        # up-to-date check above miss on every run, so every re-run rebuilt everything.
+        if ($envText -match '(?m)^#?[ \t]*VITE_IDP_ACCOUNT_URL=') {
+            $envText = $envText -replace '(?m)^#?[ \t]*VITE_IDP_ACCOUNT_URL=[^\r\n]*', "VITE_IDP_ACCOUNT_URL=$ViteIdpAccountUrl"
+        } else {
+            $envText = $envText.TrimEnd() + "`r`nVITE_IDP_ACCOUNT_URL=$ViteIdpAccountUrl`r`n"
+        }
         # VITE_OIDC_ID may be absent from an older .env (the template ships it,
         # but a hand-rolled file may not) -- replace when present, append otherwise.
         if ($envText -match '(?m)^VITE_OIDC_ID=') {

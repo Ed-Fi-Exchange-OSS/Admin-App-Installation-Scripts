@@ -19,8 +19,9 @@
 
   Then removes the claimset copies made by copy-claimsets.ps1 from the
   EdFi_Security database: every non-preset claimset starting with the prefix
-  (default 'AA ') or, when -ClaimSetNames / CLAIMSET_NAMES is set, only those
-  prefixed names. EdFi_Security is a different database (ODS/API side), so the
+  (default 'AA-') or, when -ClaimSetNames / CLAIMSET_NAMES is set, only those
+  prefixed names. Copies made before the names lost their spaces ('AA SIS
+  Vendor') are removed too. EdFi_Security is a different database (ODS/API side), so the
   mssql connection uses its own SECURITY_DB_USERNAME / SECURITY_DB_PASSWORD
   login (or SECURITY_USE_INTEGRATED_SECURITY=true); pgsql reuses POSTGRES_*.
   Only non-preset claimsets are ever deleted, so the built-in originals are
@@ -145,7 +146,7 @@ if (-not $PSBoundParameters.ContainsKey('ClaimSetNames'))
 {
     $ClaimSetNames = @((Get-EnvValue 'CLAIMSET_NAMES') -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
-if (-not $PSBoundParameters.ContainsKey('ClaimSetPrefix')) { $ClaimSetPrefix = Get-EnvValue 'CLAIMSET_PREFIX' 'AA ' }
+if (-not $PSBoundParameters.ContainsKey('ClaimSetPrefix')) { $ClaimSetPrefix = Get-EnvValue 'CLAIMSET_PREFIX' 'AA-' }
 if (-not $PSBoundParameters.ContainsKey('SecuritySqlServer')) { $SecuritySqlServer = Get-EnvValue 'SECURITY_SQL_SERVER' 'tcp:localhost,1433' }
 if (-not $PSBoundParameters.ContainsKey('SecurityDbUsername')) { $SecurityDbUsername = Get-EnvValue 'SECURITY_DB_USERNAME' }
 if (-not $PSBoundParameters.ContainsKey('SecurityDbPassword')) { $SecurityDbPassword = Get-EnvValue 'SECURITY_DB_PASSWORD' }
@@ -153,11 +154,15 @@ if (-not $TrustServerCertificate) { $TrustServerCertificate = (Get-EnvValue 'SQL
 $securityDatabaseName = Get-EnvValue 'SECURITY_DATABASE_NAME' 'EdFi_Security'
 $securityUseIntegratedSecurity = (Get-EnvValue 'SECURITY_USE_INTEGRATED_SECURITY') -in @('true', 'True', 'TRUE', '1', 'yes')
 $securityPostgresContainer = Get-EnvValue 'SECURITY_POSTGRES_CONTAINER' 'ed-fi-db-admin'
-$claimsetTargets = @($ClaimSetNames | ForEach-Object { "$ClaimSetPrefix$_" })
+# Copies are named by Get-ClaimSetCopyName ('AA-SIS-Vendor'); older runs kept the
+# spaces ('AA SIS Vendor'), so both forms are matched.
+$claimsetPrefixes = @(Get-ClaimSetCopyPrefixes -Prefix "$ClaimSetPrefix")
+$claimsetLegacyPrefix = Get-ClaimSetLegacyPrefix -Prefix "$ClaimSetPrefix"
+$claimsetTargets = @($ClaimSetNames | ForEach-Object { Get-ClaimSetCopyName -Prefix $ClaimSetPrefix -Name $_; if ($claimsetLegacyPrefix) { "$claimsetLegacyPrefix$_" } } | Select-Object -Unique)
 $claimsetSkipReason = if ($SkipClaimsets) { '-SkipClaimsets' } else { 'COPY_CLAIMSETS=false' }
 # No names = remove every non-preset claimset starting with the prefix -- but
 # never with an empty prefix, which would match every custom claimset.
-if ($claimsetTargets.Count -eq 0 -and -not $ClaimSetPrefix)
+if ($claimsetTargets.Count -eq 0 -and $claimsetPrefixes.Count -eq 0)
 {
     $removeClaimsets = $false
     $claimsetSkipReason = 'no claimset names and an empty prefix'
@@ -201,7 +206,7 @@ Write-Host "  * machine user '$MachineUsername'"
 if ($removeClaimsets)
 {
     Write-Host "And from the '$securityDatabaseName' database:" -ForegroundColor Yellow
-    $targetDisplay = if ($claimsetTargets.Count -gt 0) { $claimsetTargets -join ', ' } else { "every claimset copy starting with '$ClaimSetPrefix'" }
+    $targetDisplay = if ($claimsetTargets.Count -gt 0) { $claimsetTargets -join ', ' } else { "every claimset copy starting with " + (($claimsetPrefixes | ForEach-Object { "'$_'" }) -join ' or ') }
     Write-Host "  * claimset copies: $targetDisplay (make sure no application still uses them)"
 }
 Write-Host "The human bootstrap user is NOT touched."
@@ -314,9 +319,13 @@ elseif ($securityDbEngine -eq 'mssql')
     }
     else
     {
-        # Escape LIKE wildcards in the prefix, then quote it for the literal.
-        $prefixLike = $ClaimSetPrefix.Replace('\', '\\').Replace('%', '\%').Replace('_', '\_').Replace('[', '\[').Replace("'", "''")
-        $claimsetFilter = "cs.ClaimSetName LIKE N'$prefixLike%' ESCAPE '\'"
+        # Escape LIKE wildcards in each prefix, then quote it for the literal.
+        $likeTerms = foreach ($prefix in $claimsetPrefixes)
+        {
+            $prefixLike = $prefix.Replace('\', '\\').Replace('%', '\%').Replace('_', '\_').Replace('[', '\[').Replace("'", "''")
+            "cs.ClaimSetName LIKE N'$prefixLike%' ESCAPE '\'"
+        }
+        $claimsetFilter = "($($likeTerms -join ' OR '))"
     }
     $claimsetSql = @"
 DELETE ov
@@ -370,8 +379,12 @@ else
     }
     else
     {
-        $prefixLike = $ClaimSetPrefix.Replace('\', '\\').Replace('%', '\%').Replace('_', '\_').Replace("'", "''")
-        $claimsetFilter = "cs.claimsetname LIKE '$prefixLike%'"
+        $likeTerms = foreach ($prefix in $claimsetPrefixes)
+        {
+            $prefixLike = $prefix.Replace('\', '\\').Replace('%', '\%').Replace('_', '\_').Replace("'", "''")
+            "cs.claimsetname LIKE '$prefixLike%'"
+        }
+        $claimsetFilter = "($($likeTerms -join ' OR '))"
     }
     $claimsetSql = @"
 DELETE FROM dbo.claimsetresourceclaimactionauthorizationstrategyoverrides ov

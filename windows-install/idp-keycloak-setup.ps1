@@ -17,9 +17,13 @@ Steps (each idempotent):
      Microsoft OpenJDK 21 (Keycloak 26.6 supports Java 17, 21, or 25) and set
      JAVA_HOME / PATH. -JdkDownloadUrl forces an offline zip install instead.
   2. Download + extract Keycloak to -KeycloakInstallPath.
-  3. Start Keycloak by delegating to idp-keycloak-start.ps1 (bootstraps the
-     master admin on first start, waits for the discovery endpoint).
-  4. Provision the realm, client (with redirect/origin URIs), optional audience
+  3. HTTPS: create (or reuse) a self-signed localhost certificate, export it to a
+     keystore, and point Keycloak's HTTPS listener at it in conf\keycloak.conf.
+     Admin App 4.1 only accepts an HTTPS OIDC issuer.
+  4. Start Keycloak by delegating to idp-keycloak-start.ps1 (bootstraps the
+     master admin on first start, waits for the discovery endpoint). A running
+     Keycloak that does not serve HTTPS yet is restarted first.
+  5. Provision the realm, client (with redirect/origin URIs), optional audience
      mapper, and the test user via the Keycloak admin REST API.
 
 .PARAMETER KeycloakInstallPath
@@ -51,6 +55,15 @@ Master-realm admin password.
 
 .PARAMETER KeycloakBaseUrl
 URL to probe and provision against. Default: http://localhost:8080.
+
+.PARAMETER KeycloakHttpsPort
+Port of Keycloak's HTTPS listener, which the Admin App uses as its OIDC issuer
+(https://localhost:<port>/realms/<realm>). Default: 8443.
+
+.PARAMETER SkipSelfSignedTrust
+Switch -- do not add the self-signed Keycloak certificate to LocalMachine\Root.
+Browsers then warn on the Keycloak login page. The Admin App API trusts the
+certificate either way, through NODE_EXTRA_CA_CERTS.
 
 .PARAMETER ReadyTimeoutSeconds
 How long to wait for Keycloak to be reachable. Default: 120.
@@ -112,6 +125,13 @@ param(
 
     [string]$KeycloakBaseUrl = "http://localhost:8080",
     [int]$ReadyTimeoutSeconds = 120,
+
+    # HTTPS listener the Admin App uses as its OIDC issuer. Admin App 4.1 rejects an
+    # issuer that is not HTTPS, so Keycloak also serves HTTPS on this port with a
+    # self-signed localhost certificate this script creates. KeycloakBaseUrl (HTTP)
+    # stays the address this script provisions and health-checks against.
+    [int]$KeycloakHttpsPort = 8443,
+    [switch]$SkipSelfSignedTrust,
 
     # --- Realm / client / user provisioning ---
     [string]$RealmName = "edfi",
@@ -711,6 +731,157 @@ if ($JdkDownloadUrl) {
 }
 
 # ---------------------------------------------------------------------------
+# HTTPS listener. Admin App 4.1 (openid-client 6) rejects an OIDC issuer that is not
+# HTTPS, so Keycloak serves HTTPS on -KeycloakHttpsPort with a self-signed localhost
+# certificate. The keystore settings live in conf\keycloak.conf, which kc.bat reads
+# on every start, so idp-keycloak-start.ps1 and the startup task need no extra
+# arguments. The HTTP listener (-KeycloakBaseUrl) stays on for this script's admin
+# REST calls and the health checks. The public certificate is also written as PEM to
+# <KeycloakInstallPath>\edfi-adminapp-https.pem, where install-all.ps1 points the API's
+# NODE_EXTRA_CA_CERTS: Node does not read the Windows certificate store.
+# ---------------------------------------------------------------------------
+$httpsFriendlyName = 'Ed-Fi Admin App Keycloak self-signed'
+$kcRoot = Split-Path (Split-Path (Resolve-KcBat -InstallPath $KeycloakInstallPath) -Parent) -Parent
+$kcConfPath = Join-Path $kcRoot 'conf\keycloak.conf'
+$keystorePath = Join-Path $kcRoot 'conf\edfi-adminapp-https.p12'
+$caCertificatePath = Join-Path $KeycloakInstallPath 'edfi-adminapp-https.pem'
+
+$httpsCert = Get-ChildItem Cert:\LocalMachine\My |
+    Where-Object { $_.FriendlyName -eq $httpsFriendlyName -and $_.NotAfter -gt (Get-Date).AddDays(30) } |
+    Sort-Object NotAfter -Descending | Select-Object -First 1
+if ($httpsCert) {
+    Write-Host "Reusing the existing Keycloak HTTPS certificate ($($httpsCert.Thumbprint))."
+} else {
+    Write-Host "Generating a self-signed certificate for Keycloak HTTPS (localhost)..."
+    $httpsCert = New-SelfSignedCertificate -DnsName 'localhost' -CertStoreLocation Cert:\LocalMachine\My `
+        -FriendlyName $httpsFriendlyName -NotAfter (Get-Date).AddYears(5) -KeyExportPolicy Exportable
+}
+
+# Trust it on this machine so the browser shows the Keycloak login page without a
+# warning. Same approach as Resolve-HttpsCertificate in 05-deploy-api.ps1 (WET): a
+# public-only copy carrying the same FriendlyName, so uninstall-keycloak.ps1 finds it.
+if (-not $SkipSelfSignedTrust) {
+    $rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+    $rootStore.Open('ReadWrite')
+    try {
+        $found = $rootStore.Certificates.Find(
+            [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $httpsCert.Thumbprint, $false)
+        if ($found.Count -eq 0) {
+            $publicCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($httpsCert.RawData)
+            $publicCert.FriendlyName = $httpsFriendlyName
+            $rootStore.Add($publicCert)
+            Write-Host "Trusted the Keycloak HTTPS certificate (added to LocalMachine\Root)."
+        }
+    } finally {
+        $rootStore.Close()
+    }
+}
+
+# PEM, 64-character lines, for NODE_EXTRA_CA_CERTS. Public certificate only.
+$certificateBase64 = [Convert]::ToBase64String($httpsCert.RawData)
+$pemLines = for ($offset = 0; $offset -lt $certificateBase64.Length; $offset += 64) {
+    $certificateBase64.Substring($offset, [Math]::Min(64, $certificateBase64.Length - $offset))
+}
+$pemText = "-----BEGIN CERTIFICATE-----`n$($pemLines -join "`n")`n-----END CERTIFICATE-----`n"
+[System.IO.File]::WriteAllText($caCertificatePath, $pemText, [System.Text.Encoding]::ASCII)
+# The API trusts every certificate in this file, so only Administrators and SYSTEM may
+# change it. The install folder inherits Modify for Authenticated Users from C:\, which
+# would let any local user add a CA of their own. Users keep read access: it is a
+# public certificate, and 05-deploy-api.ps1 also grants the API App Pool read access.
+& icacls $caCertificatePath /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' '*S-1-5-32-545:R' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to restrict the access control list on $caCertificatePath (icacls exit $LASTEXITCODE)." }
+
+# Managed block in keycloak.conf. Re-exporting the keystore is skipped when the block
+# already names this certificate and port, so a re-run does not restart Keycloak.
+$blockStart = '# BEGIN Ed-Fi Admin App HTTPS (managed by idp-keycloak-setup.ps1)'
+$blockEnd = '# END Ed-Fi Admin App HTTPS'
+$blockPattern = '(?s)\r?\n*' + [regex]::Escape($blockStart) + '.*?' + [regex]::Escape($blockEnd) + '\r?\n?'
+$confText = if (Test-Path $kcConfPath) { [System.IO.File]::ReadAllText($kcConfPath) } else { '' }
+$existingBlock = [regex]::Match($confText, $blockPattern).Value
+$httpsConfigCurrent = $existingBlock -and
+    ($existingBlock -match "(?m)^# certificate-thumbprint=$($httpsCert.Thumbprint)\s*$") -and
+    ($existingBlock -match "(?m)^https-port=$KeycloakHttpsPort\s*$") -and
+    ($existingBlock -match '(?m)^https-key-store-password=\S+') -and
+    (Test-Path $keystorePath)
+$httpsConfigChanged = -not $httpsConfigCurrent
+if ($httpsConfigChanged) {
+    $passwordBytes = [byte[]]::new(24)
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($passwordBytes)
+    $keystorePassword = ($passwordBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+    Export-PfxCertificate -Cert $httpsCert -FilePath $keystorePath `
+        -Password (ConvertTo-SecureString $keystorePassword -AsPlainText -Force) | Out-Null
+    $block = @(
+        $blockStart,
+        "# certificate-thumbprint=$($httpsCert.Thumbprint)",
+        "https-port=$KeycloakHttpsPort",
+        "https-key-store-file=$($keystorePath -replace '\\', '/')",
+        "https-key-store-password=$keystorePassword",
+        $blockEnd
+    ) -join "`r`n"
+    $confText = ([regex]::Replace($confText, $blockPattern, "`r`n")).TrimEnd() + "`r`n`r`n" + $block + "`r`n"
+    # keycloak.conf is read as UTF-8; write it without a BOM.
+    [System.IO.File]::WriteAllText($kcConfPath, $confText, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "Configured Keycloak HTTPS on port $KeycloakHttpsPort ($kcConfPath)."
+} else {
+    Write-Host "Keycloak HTTPS settings already current."
+}
+# The keystore and keycloak.conf (which holds the keystore password) are readable by
+# Administrators and SYSTEM only: Keycloak runs elevated or as the startup task.
+foreach ($restrictedPath in @($keystorePath, $kcConfPath)) {
+    & icacls $restrictedPath /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to restrict the access control list on $restrictedPath (icacls exit $LASTEXITCODE)." }
+}
+
+# A Keycloak that is already running only reads keycloak.conf at startup. Restart it
+# when the HTTPS settings changed or it is not serving HTTPS yet (for example one
+# started by an earlier version of these scripts). Only the java.exe of THIS install
+# is stopped: kc.bat passes its own folder on the command line (as
+# -Djboss.server.config.dir=<root>\bin\..\conf and -Dkc.home.dir=<root>/bin/..).
+$httpPort = ([Uri]$KeycloakBaseUrl).Port
+$kcBinPattern = '(?i)' + [regex]::Escape("$kcRoot\bin\") + '|' + [regex]::Escape(($kcRoot -replace '\\', '/') + '/bin/')
+$keycloakProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match $kcBinPattern })
+$keycloakProcessIds = @($keycloakProcesses | ForEach-Object { [int]$_.ProcessId })
+
+# Returns 'name (process ID n)' for each process listening on Port, or nothing.
+function Get-PortOwner {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    foreach ($processId in @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)) {
+        $owner = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        [pscustomobject]@{ ProcessId = [int]$processId; Text = "$(if ($owner) { $owner.ProcessName } else { 'unknown' }) (process ID $processId)" }
+    }
+}
+
+# Fail before stopping anything when another program holds the HTTPS port: Keycloak
+# could not bind it, and stopping a working Keycloak would only take sign-in down.
+$foreignHttpsOwners = @(Get-PortOwner -Port $KeycloakHttpsPort | Where-Object { $keycloakProcessIds -notcontains $_.ProcessId })
+if ($foreignHttpsOwners.Count -gt 0) {
+    throw "Port $KeycloakHttpsPort, which the Keycloak HTTPS listener needs, is in use by $(($foreignHttpsOwners | ForEach-Object { $_.Text }) -join ', '). Stop that program or free the port, then re-run."
+}
+
+$httpListening = [bool](Get-NetTCPConnection -LocalPort $httpPort -State Listen -ErrorAction SilentlyContinue)
+$httpsListening = [bool](Get-NetTCPConnection -LocalPort $KeycloakHttpsPort -State Listen -ErrorAction SilentlyContinue)
+if ($httpListening -and ($httpsConfigChanged -or -not $httpsListening)) {
+    Write-Host "Restarting Keycloak so it serves HTTPS on port $KeycloakHttpsPort..."
+    if ($keycloakProcesses.Count -eq 0) {
+        $httpOwners = @(Get-PortOwner -Port $httpPort | ForEach-Object { $_.Text })
+        throw "Port $httpPort is in use by $(if ($httpOwners) { $httpOwners -join ', ' } else { 'another program' }), not by the Keycloak in $kcRoot. Stop whatever holds port $httpPort, then re-run."
+    }
+    foreach ($keycloakProcess in $keycloakProcesses) {
+        Stop-Process -Id $keycloakProcess.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    $stopDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-NetTCPConnection -LocalPort $httpPort -State Listen -ErrorAction SilentlyContinue) -and (Get-Date) -lt $stopDeadline) {
+        Start-Sleep -Seconds 1
+    }
+    if (Get-NetTCPConnection -LocalPort $httpPort -State Listen -ErrorAction SilentlyContinue) {
+        $httpOwners = @(Get-PortOwner -Port $httpPort | ForEach-Object { $_.Text })
+        throw "Keycloak was stopped for the restart, but port $httpPort is still in use after 30 seconds (by $($httpOwners -join ', ')). Stop that process, then re-run."
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Start Keycloak (delegates to idp-keycloak-start.ps1) and wait until the admin
 # REST API is reachable, then provision the realm/client/user below.
 # ---------------------------------------------------------------------------
@@ -722,6 +893,22 @@ Write-Host "Starting Keycloak via idp-keycloak-start.ps1..."
     -AdminPassword $AdminPassword `
     -BaseUrl $KeycloakBaseUrl `
     -ReadyTimeoutSeconds $ReadyTimeoutSeconds
+
+# The start script waits on the HTTP listener. Confirm the HTTPS listener the Admin App
+# depends on answers too. curl.exe rather than Invoke-RestMethod: PowerShell 5.1's TLS
+# defaults are unreliable against a local self-signed endpoint (see the install-all.ps1
+# smoke test), and -k keeps this check independent of -SkipSelfSignedTrust.
+$httpsDiscoveryUrl = "https://localhost:$KeycloakHttpsPort/realms/master/.well-known/openid-configuration"
+$httpsStatus = ''
+for ($attempt = 0; $attempt -lt 12; $attempt++) {
+    $httpsStatus = & curl.exe -sk -o NUL -w "%{http_code}" $httpsDiscoveryUrl 2>$null
+    if ($httpsStatus -eq '200') { break }
+    Start-Sleep -Seconds 5
+}
+if ($httpsStatus -ne '200') {
+    throw "Keycloak answers on $KeycloakBaseUrl but not on HTTPS port $KeycloakHttpsPort (last status '$httpsStatus'). Check that no other program uses port $KeycloakHttpsPort, the managed block in $kcConfPath, and the startup log at $(Join-Path $KeycloakInstallPath 'keycloak-startup.log')."
+}
+Write-Host "Keycloak HTTPS listener ready at https://localhost:$KeycloakHttpsPort" -ForegroundColor Green
 
 function Invoke-KcApi {
     param(
@@ -932,6 +1119,15 @@ if ($clients.Count -gt 0) {
     # Doc says these must be off; catch drift if someone toggles them in the UI.
     if (Get-KcClientProp $existing 'implicitFlowEnabled') { $needsUpdate = $true }
     if (Get-KcClientProp $existing 'authorizationServicesEnabled') { $needsUpdate = $true }
+    # The secret is not in the client JSON compared above. Without this check, a re-run
+    # with a different -ClientSecret left Keycloak on the old secret while the Admin App
+    # was configured with the new one, and every login failed at the token exchange
+    # with 'Invalid client or Invalid client credentials'.
+    $currentSecret = (Invoke-KcApi -Method Get -Path "/realms/$RealmName/clients/$clientUuid/client-secret").value
+    if ($currentSecret -ne $ClientSecretPlain) {
+        Write-Host "Client '$ClientId' secret differs from -ClientSecret; it will be updated."
+        $needsUpdate = $true
+    }
 
     if ($needsUpdate) {
         Write-Host "Client '$ClientId' exists but needs updating..."
@@ -940,7 +1136,6 @@ if ($clients.Count -gt 0) {
         Invoke-KcApi -Method Put -Path "/realms/$RealmName/clients/$clientUuid" -Body $payloadWithId | Out-Null
     } else {
         Write-Host "Client '$ClientId' already matches -- skipping update."
-        Write-Host "(Note: secret may still be reset if you've passed a new value; this script doesn't verify.)" -ForegroundColor DarkGray
     }
 } else {
     Write-Host "Creating client '$ClientId'..."
@@ -1070,6 +1265,8 @@ if ($SkipStartupTask) {
 Write-Host ""
 Write-Host "SUCCESS: Keycloak bootstrap complete." -ForegroundColor Green
 Write-Host "  Realm:        $RealmName"
+Write-Host "  OIDC issuer:  https://localhost:$KeycloakHttpsPort/realms/$RealmName"
+Write-Host "  CA for Node:  $caCertificatePath"
 Write-Host "  Client:       $ClientId  (secret you passed in)"
 Write-Host "  User:         $TestUserEmail"
 Write-Host "  Redirect URIs:"

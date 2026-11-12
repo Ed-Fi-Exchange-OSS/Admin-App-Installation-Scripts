@@ -234,6 +234,52 @@ function Invoke-Api
     return Invoke-RestMethod @reqArgs
 }
 
+function Wait-ApiReady
+{
+    <#
+    .SYNOPSIS
+        Sends GET requests to Uri until it answers with a status below 500.
+    .DESCRIPTION
+        Up to MaxAttempts tries of TimeoutSeconds each. It warns instead of
+        failing, so the call that needs the API reports its own error. A 4xx
+        means the API is up (for example 401 without a token) and is shown in
+        yellow, because a 404 can also mean a wrong URL.
+    #>
+    param(
+        [string]$Uri,
+        [int]$MaxAttempts = 3,
+        [int]$TimeoutSeconds = 60
+    )
+    $requestArgs = @{ Method = 'Get'; Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSeconds }
+    if ($script:useSkipCertParam) { $requestArgs.SkipCertificateCheck = $true }
+    if ($script:allowInsecureRedirect) { $requestArgs.AllowInsecureRedirect = $true }
+    $lastProblem = 'no response'
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++)
+    {
+        Write-Host "GET $Uri (waiting until it answers, attempt $attempt of $MaxAttempts)" -ForegroundColor Cyan
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $statusCode = 0
+        try
+        {
+            $statusCode = [int](Invoke-WebRequest @requestArgs).StatusCode
+        }
+        catch
+        {
+            if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
+            $lastProblem = $_.Exception.Message
+        }
+        if ($statusCode -gt 0 -and $statusCode -lt 500)
+        {
+            $statusColor = if ($statusCode -lt 400) { 'Green' } else { 'Yellow' }
+            Write-Host "$Uri answered HTTP $statusCode in $([int]$watch.Elapsed.TotalSeconds) s." -ForegroundColor $statusColor
+            return
+        }
+        if ($statusCode -ge 500) { $lastProblem = "HTTP $statusCode" }
+        if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds 5 }
+    }
+    Write-Host "$Uri did not answer after $MaxAttempts attempts (last: $lastProblem); continuing, the next step reports the error." -ForegroundColor Yellow
+}
+
 # ---- Step 1: identify the calling user (GET /auth/me) ------------------------
 Write-Host "GET $ApiBaseUrl/auth/me" -ForegroundColor Cyan
 try
@@ -245,6 +291,24 @@ catch
     Write-Host "Authentication failed calling /auth/me: $($_.Exception.Message)" -ForegroundColor Red
     $body = Get-HttpErrorBody $_
     if ($body) { Write-Host $body -ForegroundColor Red }
+    # Admin App 4.1 accepts only an HTTPS issuer, and a Keycloak without a fixed
+    # hostname writes the URL it was called on into iss, so the most common cause
+    # is a token requested on the HTTP port. Name it when the token shows it.
+    $tokenIssuer = $null
+    try
+    {
+        $payload = $BearerToken.Split('.')[1].Replace('-', '+').Replace('_', '/')
+        $payload = $payload.PadRight($payload.Length + (4 - $payload.Length % 4) % 4, '=')
+        $tokenIssuer = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json).iss
+    }
+    catch
+    {
+        Write-Verbose "Could not read the token's iss claim: $($_.Exception.Message)"
+    }
+    if ($tokenIssuer -like 'http://*')
+    {
+        Write-Host "The token's issuer is '$tokenIssuer'. The Admin App accepts only an HTTPS issuer, so this token is always rejected. Request the token from the identity provider's HTTPS URL; for the windows-install Keycloak set TOKEN_URL=https://localhost:8443/realms/edfi/protocol/openid-connect/token (and KEYCLOAK_BASE_URL=https://localhost:8443)." -ForegroundColor Yellow
+    }
     throw "Authentication was not accepted. Confirm a matching 'machine' user exists in the Admin App (clientId = the token's client_id/azp/appid) and the token carries aud = MACHINE_AUDIENCE and grants 'login:app' (Keycloak: in scope), and that its iss matches the Admin App's AUTH0_CONFIG_SECRET.ISSUER."
 }
 $userId = $me.id
@@ -335,6 +399,16 @@ if ($existingEnv)
 }
 else
 {
+    # The Admin App gives the ODS/API discovery call only 5 seconds, and an IIS
+    # application pool that is starting (first request after an install or an
+    # idle timeout) takes longer, so the create would fail with "Connection to
+    # Ed-Fi API Discovery URL timed out". Wake both APIs first, waiting up to
+    # three minutes for each.
+    foreach ($warmUpUrl in @($OdsApiDiscoveryUrl, $AdminApiUrl))
+    {
+        Wait-ApiReady -Uri $warmUpUrl
+    }
+
     # version and isMultitenant are intentionally omitted: create() auto-detects them
     # from the ODS/API metadata. configPrivate is produced + encrypted by the API.
     $payload = @{

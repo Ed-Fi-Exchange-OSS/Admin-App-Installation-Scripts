@@ -223,6 +223,19 @@ $otherFolder = & {
 Assert-Equal -Expected ($thisFolder -join "`n") -Actual ($otherFolder -join "`n") -Because "edorg-sync/compat.ps1 returns the same flags for all $($hostMatrix.Count) targets"
 
 Write-Host ""
+Write-Host "Claimset copy names and the prefixes cleanup.ps1 matches" -ForegroundColor Cyan
+Assert-Equal -Expected 'AA-SIS-Vendor' -Actual (Get-ClaimSetCopyName -Prefix 'AA-' -Name 'SIS Vendor') -Because 'spaces become hyphens'
+Assert-Equal -Expected 'AA-Ed-Fi-API-Publisher-Reader' -Actual (Get-ClaimSetCopyName -Prefix 'AA-' -Name 'Ed-Fi API Publisher - Reader') -Because 'spaces around a hyphen collapse into it'
+Assert-Equal -Expected 'AA-SIS-Vendor' -Actual (Get-ClaimSetCopyName -Prefix 'AA ' -Name 'SIS Vendor') -Because "the old 'AA ' prefix gives the same name"
+Assert-Equal -Expected 'AA-|AA ' -Actual ((Get-ClaimSetCopyPrefixes -Prefix 'AA-') -join '|') -Because "the default prefix also matches the old 'AA SIS Vendor' copies"
+Assert-Equal -Expected 'Copy-of-|Copy of ' -Actual ((Get-ClaimSetCopyPrefixes -Prefix 'Copy of ') -join '|') -Because "a custom prefix matches its old copies as written, not 'Copy-of '"
+Assert-Equal -Expected 'Copy of ' -Actual (Get-ClaimSetLegacyPrefix -Prefix 'Copy of ') -Because 'old copies with a custom prefix are named with the prefix as written'
+Assert-Equal -Expected 'AA ' -Actual (Get-ClaimSetLegacyPrefix -Prefix 'AA-') -Because "old copies with the default prefix start with 'AA '"
+Assert-Equal -Expected '0' -Actual "$(@(Get-ClaimSetCopyPrefixes -Prefix '   ').Count)" -Because 'a white-space prefix gives no prefix to match, so cleanup cannot build an empty match'
+Assert-Equal -Expected '0' -Actual "$(@(Get-ClaimSetCopyPrefixes -Prefix '').Count)" -Because 'an empty prefix gives no prefix to match'
+Assert-Equal -Expected '' -Actual (Get-ClaimSetLegacyPrefix -Prefix '  ') -Because 'a white-space prefix has no legacy form'
+
+Write-Host ""
 Write-Host ("{0} passed, {1} failed." -f $script:Passed, $script:Failed) -ForegroundColor $(if ($script:Failed) { 'Red' } else { 'Green' })
 if ($script:Failed) { exit 1 }
 exit 0
