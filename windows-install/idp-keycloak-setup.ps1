@@ -834,17 +834,39 @@ foreach ($restrictedPath in @($keystorePath, $kcConfPath)) {
 
 # A Keycloak that is already running only reads keycloak.conf at startup. Restart it
 # when the HTTPS settings changed or it is not serving HTTPS yet (for example one
-# started by an earlier version of these scripts). Matched by command line, the same
-# way uninstall-keycloak.ps1 finds it (WET).
+# started by an earlier version of these scripts). Only the java.exe of THIS install
+# is stopped: kc.bat passes its own folder on the command line (as
+# -Djboss.server.config.dir=<root>\bin\..\conf and -Dkc.home.dir=<root>/bin/..).
 $httpPort = ([Uri]$KeycloakBaseUrl).Port
+$kcBinPattern = '(?i)' + [regex]::Escape("$kcRoot\bin\") + '|' + [regex]::Escape(($kcRoot -replace '\\', '/') + '/bin/')
+$keycloakProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match $kcBinPattern })
+$keycloakProcessIds = @($keycloakProcesses | ForEach-Object { [int]$_.ProcessId })
+
+# Returns 'name (process ID n)' for each process listening on Port, or nothing.
+function Get-PortOwner {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    foreach ($processId in @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)) {
+        $owner = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        [pscustomobject]@{ ProcessId = [int]$processId; Text = "$(if ($owner) { $owner.ProcessName } else { 'unknown' }) (process ID $processId)" }
+    }
+}
+
+# Fail before stopping anything when another program holds the HTTPS port: Keycloak
+# could not bind it, and stopping a working Keycloak would only take sign-in down.
+$foreignHttpsOwners = @(Get-PortOwner -Port $KeycloakHttpsPort | Where-Object { $keycloakProcessIds -notcontains $_.ProcessId })
+if ($foreignHttpsOwners.Count -gt 0) {
+    throw "Port $KeycloakHttpsPort, which the Keycloak HTTPS listener needs, is in use by $(($foreignHttpsOwners | ForEach-Object { $_.Text }) -join ', '). Stop that program or free the port, then re-run."
+}
+
 $httpListening = [bool](Get-NetTCPConnection -LocalPort $httpPort -State Listen -ErrorAction SilentlyContinue)
 $httpsListening = [bool](Get-NetTCPConnection -LocalPort $KeycloakHttpsPort -State Listen -ErrorAction SilentlyContinue)
 if ($httpListening -and ($httpsConfigChanged -or -not $httpsListening)) {
     Write-Host "Restarting Keycloak so it serves HTTPS on port $KeycloakHttpsPort..."
-    $keycloakProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'kc\.bat|keycloak|quarkus' })
     if ($keycloakProcesses.Count -eq 0) {
-        throw "Port $httpPort is in use, but no Keycloak java.exe process was found to restart. Stop whatever holds port $httpPort, then re-run."
+        $httpOwners = @(Get-PortOwner -Port $httpPort | ForEach-Object { $_.Text })
+        throw "Port $httpPort is in use by $(if ($httpOwners) { $httpOwners -join ', ' } else { 'another program' }), not by the Keycloak in $kcRoot. Stop whatever holds port $httpPort, then re-run."
     }
     foreach ($keycloakProcess in $keycloakProcesses) {
         Stop-Process -Id $keycloakProcess.ProcessId -Force -ErrorAction SilentlyContinue
@@ -852,6 +874,10 @@ if ($httpListening -and ($httpsConfigChanged -or -not $httpsListening)) {
     $stopDeadline = (Get-Date).AddSeconds(30)
     while ((Get-NetTCPConnection -LocalPort $httpPort -State Listen -ErrorAction SilentlyContinue) -and (Get-Date) -lt $stopDeadline) {
         Start-Sleep -Seconds 1
+    }
+    if (Get-NetTCPConnection -LocalPort $httpPort -State Listen -ErrorAction SilentlyContinue) {
+        $httpOwners = @(Get-PortOwner -Port $httpPort | ForEach-Object { $_.Text })
+        throw "Keycloak was stopped for the restart, but port $httpPort is still in use after 30 seconds (by $($httpOwners -join ', ')). Stop that process, then re-run."
     }
 }
 
@@ -880,7 +906,7 @@ for ($attempt = 0; $attempt -lt 12; $attempt++) {
     Start-Sleep -Seconds 5
 }
 if ($httpsStatus -ne '200') {
-    throw "Keycloak answers on $KeycloakBaseUrl but not on HTTPS port $KeycloakHttpsPort (last status '$httpsStatus'). Check the managed block in $kcConfPath and the Keycloak log."
+    throw "Keycloak answers on $KeycloakBaseUrl but not on HTTPS port $KeycloakHttpsPort (last status '$httpsStatus'). Check that no other program uses port $KeycloakHttpsPort, the managed block in $kcConfPath, and the startup log at $(Join-Path $KeycloakInstallPath 'keycloak-startup.log')."
 }
 Write-Host "Keycloak HTTPS listener ready at https://localhost:$KeycloakHttpsPort" -ForegroundColor Green
 
