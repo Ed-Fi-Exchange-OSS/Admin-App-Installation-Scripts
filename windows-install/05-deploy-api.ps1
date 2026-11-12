@@ -178,6 +178,7 @@ param(
     # already-deployed non-default key, or generate a fresh one on a clean box.
     # Delivered through the App Pool's NODE_CONFIG. Losing or changing this key
     # makes previously-encrypted environment secrets unrecoverable.
+    [ValidatePattern('^([0-9a-fA-F]{64})?$')]
     [string]$DbEncryptionKey = "",
 
     # Escape hatch for the key-rotation guard: proceed even when a freshly
@@ -213,7 +214,9 @@ param(
     [switch]$DisableSslVerification,
 
     # PEM file set as NODE_EXTRA_CA_CERTS on the App Pool. install-all.ps1 passes the
-    # local Keycloak's self-signed certificate so the API's OIDC discovery trusts it.
+    # local Keycloak's self-signed certificate so the API's OIDC discovery trusts it,
+    # and an empty value for any other identity provider. When this parameter is not
+    # passed at all, the Keycloak certificate or bundle already set is kept.
     [string]$ExtraCaCertificatePath = ""
 )
 
@@ -258,24 +261,9 @@ function Get-AppPoolEnvironmentValue {
     }
 }
 
-# Parses JSON that holds secrets, returning $null when it is not valid JSON. The
-# parse runs in a separate runspace with no host because the ConvertFrom-Json error
-# quotes the JSON: Windows PowerShell 5.1 writes even a caught error to an active
-# transcript (Start-Transcript or system-wide transcription), but a hostless runspace
-# is not transcribed.
-function ConvertFrom-SecretJson {
-    param([Parameter(Mandatory)][string]$JsonText)
-
-    $shell = [powershell]::Create()
-    try {
-        $null = $shell.AddScript('param($text) try { $text | ConvertFrom-Json } catch { }').AddArgument($JsonText)
-        $parsed = @($shell.Invoke())
-        if ($parsed.Count -eq 0) { return $null }
-        return $parsed[0]
-    } finally {
-        $shell.Dispose()
-    }
-}
+# Sample-secret lists, ConvertFrom-SecretJson and New-RandomSecretBytes, shared with
+# install-all.ps1.
+. "$PSScriptRoot\secret-compat.ps1"
 
 # Returns the App Pool's NODE_CONFIG as an object, or $null on a clean box (no pool or
 # no variable yet). A NODE_CONFIG that exists but cannot be read or parsed throws:
@@ -285,7 +273,8 @@ function ConvertFrom-SecretJson {
 function Get-AppPoolNodeConfig {
     param([Parameter(Mandatory)][string]$AppPoolName)
 
-    $recovery = "It holds the data-encryption key of this install, and a new key would make the stored ODS/API environment secrets unreadable. Fix NODE_CONFIG on the App Pool in IIS Manager (Configuration Editor, system.applicationHost/applicationPools), or run 05-deploy-api.ps1 with -DbEncryptionKey set to the key in install-summary.txt."
+    $summaryPath = Join-Path (Split-Path $SourcePath -Parent) 'install-summary.txt'
+    $recovery = "It holds the data-encryption key of this install, and a new key would make the stored ODS/API environment secrets unreadable. Fix NODE_CONFIG on the App Pool in IIS Manager (Configuration Editor, system.applicationHost/applicationPools), or re-run install-all.ps1 with the same parameters plus -DbEncryptionKey set to the key in $summaryPath. The key then appears in this console's history; clear it afterwards."
     try {
         $nodeConfigText = Get-AppPoolEnvironmentValue -AppPoolName $AppPoolName -VariableName 'NODE_CONFIG'
     } catch {
@@ -320,6 +309,9 @@ if ($DbEngine -eq 'pgsql' -and -not $PgDbPassword) {
 if ($DbEngine -ne 'mssql' -and $SqlServerHost -ne 'localhost') {
     throw "-SqlServerHost only applies when -DbEngine is 'mssql'."
 }
+if ($DbEngine -eq 'pgsql' -and $PostgresContainerName -and -not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    throw "-PostgresContainerName '$PostgresContainerName' was given, but docker is not on PATH."
+}
 
 # The Admin App builds its database connection string as a URL and interpolates the database
 # credentials WITHOUT URL-encoding them (packages/api/config/default.js). Characters
@@ -328,7 +320,8 @@ if ($DbEngine -ne 'mssql' -and $SqlServerHost -ne 'localhost') {
 # App URL-encodes its credentials (the real fix), restrict the database password to characters
 # that are safe unencoded in a URL. This does NOT weaken the password: SQL's CHECK_POLICY
 # needs 3 of 4 categories and upper+lower+digit alone satisfies it (symbols stay optional).
-# Example passwords such as 'YourStrong!Passw0rd' and 'EdFi-App-Local!2026' remain valid.
+# A password such as 'EdFi-App-Local!2026' passes this check. Sample values such as
+# 'YourStrong!Passw0rd' pass it too, but Admin App 4.1 rejects them (see below).
 function Test-DbPasswordUrlSafe {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
@@ -361,6 +354,22 @@ if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbPasswordPlain
 if ($DbEngine -eq 'mssql') { Test-DbPasswordUrlSafe -Password $AppDbUsername -Label "Admin App DB username (-AppDbUsername)" }
 if ($DbEngine -eq 'pgsql') { Test-DbPasswordUrlSafe -Password $PgDbUsername   -Label "Postgres app username (-PgDbUsername)" }
 
+# Admin App 4.1 refuses to start in production when the database password or the OIDC
+# client secret is a known sample value or a placeholder, and the install would
+# otherwise finish with an API that never comes up. 4.0 has no such check, so its
+# installs are not held to it.
+if (Test-AdminAppChecksProductionSecrets -SourcePath $SourcePath) {
+    if ($DbEngine -eq 'mssql') { Assert-NotSampleSecret -Value $AppDbPasswordPlain -Label "Admin App DB login password (-AppDbPassword)" }
+    if ($DbEngine -eq 'pgsql') { Assert-NotSampleSecret -Value $PgDbPasswordPlain  -Label "Postgres app user password (-PgDbPassword)" }
+    Assert-NotSampleSecret -Value $OidcClientSecretPlain -Label "OIDC client secret (-OidcClientSecret)"
+}
+
+# The parameter's ValidatePattern already rejects a malformed key. A sample key is
+# publicly known, so it would not protect the stored ODS/API secrets (and 4.1 refuses it).
+if ($DbEncryptionKey -and (Test-IsSampleEncryptionKey -Key $DbEncryptionKey)) {
+    throw "-DbEncryptionKey is a publicly known sample key from the Admin App repository. Pass the key of this install (from install-summary.txt), or omit -DbEncryptionKey."
+}
+
 # Remote/Azure SQL target (mssql only). A non-loopback -SqlServerHost switches to
 # remote mode: the app validates the server certificate (DB_TRUST_CERTIFICATE=false)
 # and the installer's sqlcmd calls encrypt and validate too (-N), unless
@@ -381,10 +390,10 @@ if (-not (Test-Path "$apiBuildDir\main.js")) {
 # Reusing the encryption key keeps previously-encrypted ODS/API environment secrets
 # decryptable; reusing the session secret keeps signed-in users signed in.
 #   1. The App Pool's NODE_CONFIG, where this script delivers both secrets.
-#   2. A non-default KEY in the deployed production.js, where earlier versions of
+#   2. A non-sample KEY in the deployed production.js, where earlier versions of
 #      this script wrote the encryption key (no session secret existed then).
-$defaultKey = 'bbeadc2d4d15f5c9cfc2239b682cca392b233ee6979b6b9578d256aa01a7c565'
 $existingDeployedKey = ''
+$existingKeyFromProductionJs = $false
 $existingSessionSecret = @()
 try {
     $existingNodeConfig = Get-AppPoolNodeConfig -AppPoolName $AppPoolName
@@ -396,7 +405,7 @@ try {
 }
 if ($existingNodeConfig) {
     $existingEncryption = $existingNodeConfig.DB_ENCRYPTION_SECRET_VALUE
-    if ($existingEncryption -and "$($existingEncryption.KEY)" -match '^[0-9a-f]{64}$' -and $existingEncryption.KEY -ne $defaultKey) {
+    if ($existingEncryption -and "$($existingEncryption.KEY)" -match '^[0-9a-fA-F]{64}$' -and -not (Test-IsSampleEncryptionKey -Key $existingEncryption.KEY)) {
         $existingDeployedKey = $existingEncryption.KEY
     }
     $candidateSessionSecret = @($existingNodeConfig.SESSION_SECRET_VALUE | Where-Object { $_ -is [string] -and $_.Trim() })
@@ -406,8 +415,39 @@ if ($existingNodeConfig) {
 }
 $deployedProdJs = "$DestPath\packages\api\config\production.js"
 if (-not $existingDeployedKey -and (Test-Path $deployedProdJs)) {
-    if ((Get-Content $deployedProdJs -Raw) -match "KEY: '([0-9a-f]{64})'" -and $Matches[1] -ne $defaultKey) {
+    if ((Get-Content $deployedProdJs -Raw) -match "KEY: '([0-9a-fA-F]{64})'" -and -not (Test-IsSampleEncryptionKey -Key $Matches[1])) {
         $existingDeployedKey = $Matches[1]
+        $existingKeyFromProductionJs = $true
+    }
+}
+
+# A key found only in the deployed production.js has no other copy, and the copy
+# phase below overwrites that file. If a later step failed, the next run would find
+# no key and generate a new one, and the stored ODS/API secrets would become
+# unreadable (PostgreSQL has no guard against that). So write it to the App Pool's
+# NODE_CONFIG first; the full NODE_CONFIG replaces it at the end of this script.
+if ($existingKeyFromProductionJs) {
+    $keyOnlyNodeConfig = @{ DB_ENCRYPTION_SECRET_VALUE = @{ KEY = $existingDeployedKey } } | ConvertTo-Json -Depth 3 -Compress
+    $keyManager = $null
+    try {
+        $keyManager = New-IisServerManager
+        $keyPool = $keyManager.ApplicationPools[$AppPoolName]
+        if ($keyPool) {
+            $keyVariables = $keyPool.GetCollection('environmentVariables')
+            foreach ($stale in @($keyVariables | Where-Object { $_.GetAttributeValue('name') -eq 'NODE_CONFIG' })) {
+                $keyVariables.Remove($stale)
+            }
+            $keyVariable = $keyVariables.CreateElement('add')
+            $keyVariable.SetAttributeValue('name', 'NODE_CONFIG')
+            $keyVariable.SetAttributeValue('value', [string]$keyOnlyNodeConfig)
+            $keyVariables.Add($keyVariable) | Out-Null
+            $keyManager.CommitChanges()
+            Write-Host "Saved the existing data-encryption key to the App Pool's NODE_CONFIG before replacing production.js."
+        }
+    } catch {
+        throw "Could not save the existing data-encryption key to the NODE_CONFIG of App Pool '$AppPoolName' before replacing production.js, so nothing was changed. Original: $($_.Exception.Message)"
+    } finally {
+        if ($keyManager) { $keyManager.Dispose() }
     }
 }
 
@@ -436,7 +476,7 @@ if ($LASTEXITCODE -ge 8) { throw "Failed to copy api/config from $SourcePath\pac
 # robocopy on its default of a million 30-second retries.
 Write-Host "Copying node_modules (this takes a minute)..."
 & robocopy "$SourcePath\node_modules" "$DestPath\node_modules" /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "Failed to copy node_modules from $SourcePath\node_modules to $DestPath\node_modules (robocopy exit $LASTEXITCODE). Check free disk space." }
+if ($LASTEXITCODE -ge 8) { throw "Failed to copy node_modules from $SourcePath\node_modules to $DestPath\node_modules (robocopy exit $LASTEXITCODE). Check free disk space, and that no file is locked by the running App Pool: stop the '$AppPoolName' App Pool in IIS Manager and re-run." }
 
 # App Pool. The collection indexer returns $null for a name that does not exist.
 $appPoolManager = $null
@@ -713,16 +753,10 @@ if (-not $DbEncryptionKey -and $existingDeployedKey) {
     Write-Host "Reusing the existing per-install data-encryption key."
 }
 if (-not $DbEncryptionKey) {
-    $keyBytes = [byte[]]::new(32)
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($keyBytes)
+    $keyBytes = New-RandomSecretBytes -Count 32
     $DbEncryptionKey = ($keyBytes | ForEach-Object { $_.ToString('x2') }) -join ''
     $freshKeyGenerated = $true
     Write-Host "Generated a per-install data-encryption key."
-}
-# Admin App 4.1 refuses to start unless the key is exactly 64 hex characters, so
-# reject a malformed -DbEncryptionKey here, before anything is deployed.
-if ($DbEncryptionKey -notmatch '^[0-9a-fA-F]{64}$') {
-    throw "-DbEncryptionKey must be 64 hexadecimal characters (32 bytes), for example the output of: openssl rand -hex 32"
 }
 
 # Resolve the session-signing secret. Admin App 4.1 refuses to start without one;
@@ -734,8 +768,7 @@ if ($existingSessionSecret.Count -gt 0) {
     $sessionSecret = $existingSessionSecret
     Write-Host "Reusing the existing session-signing secret."
 } else {
-    $sessionBytes = [byte[]]::new(32)
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($sessionBytes)
+    $sessionBytes = New-RandomSecretBytes -Count 32
     $sessionSecret = @([Convert]::ToBase64String($sessionBytes))
     Write-Host "Generated a session-signing secret."
 }
@@ -905,9 +938,9 @@ if (Test-Path $prodJs) {
     foreach ($pattern in $sampleSecretPatterns) {
         $c = [regex]::Replace($c, $pattern, '${1}' + $scrubMarker + '${2}')
     }
-    # The sample encryption key is the one default worth a format-independent check:
-    # it is publicly known and protects stored ODS/API credentials.
-    if ($c -match $defaultKey) {
+    # The sample encryption keys are the one default worth a format-independent check:
+    # they are publicly known and protect stored ODS/API credentials.
+    if (@($script:AdminAppSampleEncryptionKeys | Where-Object { $c -match $_ }).Count -gt 0) {
         throw "The sample DB_ENCRYPTION_SECRET_VALUE.KEY is still present in $prodJs after scrubbing. The template (production.js-edfi) formatting likely changed. Refusing to deploy with the well-known sample key on disk."
     }
 
@@ -969,11 +1002,19 @@ try {
     Write-Warning "Could not read the existing NODE_EXTRA_CA_CERTS of App Pool '$AppPoolName'; a value set by hand is not kept. Original: $($_.Exception.Message)"
 }
 
+# A run of this script on its own (for example to recover a NODE_CONFIG) does not pass
+# -ExtraCaCertificatePath, but the API still needs the Keycloak certificate, so an
+# existing Keycloak certificate or bundle is kept. install-all.ps1 always passes the
+# parameter: the Keycloak certificate, or an empty value to drop it (another identity
+# provider).
+$keepExistingKeycloakTrust = -not $PSBoundParameters.ContainsKey('ExtraCaCertificatePath')
+$existingKeycloakTrust = $null
 $administratorCaPath = $null
 if ($existingExtraCa) {
     $existingLeaf = Split-Path $existingExtraCa -Leaf
     if ($existingLeaf -eq $caBundleFileName) {
         if (Test-Path -LiteralPath $existingExtraCa -PathType Leaf) {
+            $existingKeycloakTrust = $existingExtraCa
             $sourceLine = Get-Content -LiteralPath $existingExtraCa -TotalCount 1
             if ($sourceLine -and $sourceLine.StartsWith($caBundleSourcePrefix)) {
                 $administratorCaPath = $sourceLine.Substring($caBundleSourcePrefix.Length)
@@ -981,7 +1022,11 @@ if ($existingExtraCa) {
         } else {
             Write-Warning "NODE_EXTRA_CA_CERTS pointed at the CA bundle '$existingExtraCa', which no longer exists (Keycloak was uninstalled?). It is cleared; set it again if the API needs your own CA file."
         }
-    } elseif ($existingLeaf -ne $keycloakCaFileName) {
+    } elseif ($existingLeaf -eq $keycloakCaFileName) {
+        if (Test-Path -LiteralPath $existingExtraCa -PathType Leaf) {
+            $existingKeycloakTrust = $existingExtraCa
+        }
+    } else {
         $administratorCaPath = $existingExtraCa
     }
 }
@@ -992,7 +1037,13 @@ if ($ExtraCaCertificatePath) {
         throw "-ExtraCaCertificatePath '$ExtraCaCertificatePath' does not exist. For the local Keycloak, re-run idp-keycloak-setup.ps1, which writes it."
     }
     & icacls $ExtraCaCertificatePath /grant "${appPoolIdentity}:(R)" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to let '$appPoolIdentity' read $ExtraCaCertificatePath (icacls exit $LASTEXITCODE). Without it the API cannot reach the identity provider." }
     $extraCaValue = [string](Resolve-Path -LiteralPath $ExtraCaCertificatePath).ProviderPath
+    # The same file set by hand earlier is not a second CA file: bundling it would
+    # only duplicate it.
+    if ($administratorCaPath -and [System.IO.Path]::GetFullPath($administratorCaPath) -ieq $extraCaValue) {
+        $administratorCaPath = $null
+    }
     if ($administratorCaPath -and (Test-Path -LiteralPath $administratorCaPath -PathType Leaf)) {
         $caBundlePath = Join-Path (Split-Path $extraCaValue -Parent) $caBundleFileName
         $caBundleText = "$caBundleSourcePrefix$administratorCaPath`n" +
@@ -1009,9 +1060,16 @@ if ($ExtraCaCertificatePath) {
     } elseif ($administratorCaPath) {
         Write-Warning "NODE_EXTRA_CA_CERTS pointed at '$administratorCaPath', which no longer exists. It is replaced by '$ExtraCaCertificatePath'."
     }
-} elseif ($administratorCaPath) {
+} elseif ($keepExistingKeycloakTrust -and $existingKeycloakTrust) {
+    $extraCaValue = $existingKeycloakTrust
+    Write-Host "Kept the existing NODE_EXTRA_CA_CERTS file '$existingKeycloakTrust' (-ExtraCaCertificatePath was not passed)."
+} elseif ($administratorCaPath -and (Test-Path -LiteralPath $administratorCaPath -PathType Leaf)) {
     $extraCaValue = $administratorCaPath
     Write-Host "Kept the existing NODE_EXTRA_CA_CERTS file '$administratorCaPath'."
+} elseif ($administratorCaPath) {
+    Write-Warning "NODE_EXTRA_CA_CERTS pointed at '$administratorCaPath', which no longer exists. It is cleared; set it again if the API needs your own CA file."
+} elseif ($existingKeycloakTrust) {
+    Write-Host "Removed NODE_EXTRA_CA_CERTS '$existingKeycloakTrust': the identity provider is not the local Keycloak."
 }
 
 # NODE_CONFIG carries the structured app configuration (database credentials, the
@@ -1153,9 +1211,6 @@ END
         # command line.
         $invokePsql = $null
         if ($PostgresContainerName) {
-            if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-                throw "-PostgresContainerName '$PostgresContainerName' was given, but docker is not on PATH."
-            }
             $invokePsql = {
                 param([string]$Sql, [string[]]$PsqlArguments)
                 # Local scope only: Windows PowerShell 5.1 turns native stderr into a

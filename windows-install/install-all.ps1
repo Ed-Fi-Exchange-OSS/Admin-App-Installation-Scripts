@@ -130,7 +130,15 @@ at a checkout you manage yourself.
 .PARAMETER AdminAppRef
 Git ref to clone when auto-fetching the Admin App source. Default 'latest'
 resolves the newest stable (non-prerelease) GitHub release; pass a specific tag
-(e.g. v4.0.1) or branch to pin. Ignored when a checkout already exists.
+(e.g. v4.0.1) or branch to pin. Not applied to a checkout that already exists:
+the install then prints the checkout's version and warns when it differs from
+-AdminAppRef. To upgrade, check out the new tag in that folder first.
+
+.PARAMETER DbEncryptionKey
+The data-encryption key of this install (64 hex characters), passed through to
+05-deploy-api.ps1. Only needed to recover an install whose App Pool NODE_CONFIG
+cannot be read; the key is in install-summary.txt. Omit it otherwise: the key is
+reused from the App Pool, or generated on a clean box.
 
 .PARAMETER AdminAppRepoUrl
 Admin App Git repository to clone from. Defaults to the official
@@ -317,6 +325,8 @@ param(
     [string]$SourcePath,
     [string]$AdminAppRef = 'latest',
     [string]$AdminAppRepoUrl = 'https://github.com/Ed-Fi-Alliance-OSS/Ed-Fi-AdminApp.git',
+    [ValidatePattern('^([0-9a-fA-F]{64})?$')]
+    [string]$DbEncryptionKey = "",
     [string]$DatabaseName = "sbaa",
     [string]$AdminUsername = "admin@example.com",
     [string]$JdkDownloadUrl,
@@ -401,7 +411,9 @@ function Test-SqlPasswordComplexity {
 # App URL-encodes its credentials (the real fix), restrict the database password to characters
 # that are safe unencoded in a URL. This does NOT weaken the password: CHECK_POLICY needs
 # 3 of 4 categories and upper+lower+digit alone satisfies it (symbols stay optional).
-# Example passwords such as 'YourStrong!Passw0rd' and 'EdFi-App-Local!2026' remain valid.
+# A password such as 'EdFi-App-Local!2026' passes this check. Sample values such as
+# 'YourStrong!Passw0rd' pass it too, but Admin App 4.1 rejects them (checked once the
+# source is resolved).
 function Test-DbPasswordUrlSafe {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Password,
@@ -416,6 +428,10 @@ function Test-DbPasswordUrlSafe {
 # Test-DbPasswordNotUsername). A remote target is provisioned as the SQL admin and
 # validates the server certificate.
 . "$PSScriptRoot\sql-compat.ps1"
+
+# Shared secret helpers (Assert-NotSampleSecret, Test-IsSampleEncryptionKey,
+# ConvertFrom-SecretJson), the same ones 05-deploy-api.ps1 uses.
+. "$PSScriptRoot\secret-compat.ps1"
 
 # $script:SqlSecurityArgs is appended to the post-boot sqlcmd calls (user-table probe,
 # admin-user upsert, OIDC-id read) so they trust a loopback (or opt-in) and encrypt +
@@ -611,8 +627,44 @@ if (-not $SourcePath) {
     }
 }
 
+# Returns the tag (or commit) the checkout is at, or '' when git cannot tell. Both
+# 4.0 and 4.1 report version 4.0.0 in package.json, so the tag is the only reliable
+# version. Windows PowerShell 5.1 turns native stderr into a terminating error under
+# 'Stop', even when redirected, hence the local 'Continue'.
+function Get-AdminAppCheckoutRef {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return '' }
+    $ErrorActionPreference = 'Continue'
+    $ref = & git -C $Path describe --tags --always 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $ref) { return '' }
+    return "$ref".Trim()
+}
+
+# Is the checkout at the commit Ref names? $false when git is missing or the ref is
+# unknown in the checkout (for example a tag that was never fetched).
+function Test-AdminAppCheckoutAtRef {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Ref
+    )
+
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $false }
+    $ErrorActionPreference = 'Continue'
+    $headCommit = & git -C $Path rev-parse --verify --quiet 'HEAD^{commit}' 2>$null
+    $refCommit = & git -C $Path rev-parse --verify --quiet "$Ref^{commit}" 2>$null
+    return [bool]($headCommit -and $refCommit -and "$headCommit".Trim() -eq "$refCommit".Trim())
+}
+
 if (Test-Path "$SourcePath\package.json") {
-    Write-Host "Admin App source found at $SourcePath."
+    $checkoutRef = Get-AdminAppCheckoutRef -Path $SourcePath
+    Write-Host "Admin App source found at $SourcePath$(if ($checkoutRef) { " ($checkoutRef)" })."
+    # An existing checkout is used as it is, so an explicit -AdminAppRef that differs
+    # from it would otherwise redeploy the old version without a word (for example a
+    # 4.0.1 checkout re-run with -AdminAppRef v4.1.0).
+    if ($PSBoundParameters.ContainsKey('AdminAppRef') -and $AdminAppRef -ne 'latest' -and -not (Test-AdminAppCheckoutAtRef -Path $SourcePath -Ref $AdminAppRef)) {
+        Write-Warning "-AdminAppRef '$AdminAppRef' is not applied: the existing checkout at $SourcePath is at '$(if ($checkoutRef) { $checkoutRef } else { 'an unknown version' })', and that is what will be built. To install '$AdminAppRef', stop now (Ctrl+C) and run: git -C `"$SourcePath`" fetch --tags; git -C `"$SourcePath`" checkout $AdminAppRef"
+    }
 } elseif (Test-Path $SourcePath) {
     throw "'$SourcePath' exists but has no package.json, so it is not an Admin App checkout. Remove it or pass -SourcePath to an existing Admin App repository."
 } else {
@@ -627,6 +679,18 @@ if (Test-Path "$SourcePath\package.json") {
         throw "Failed to clone the Admin App source ($AdminAppRepoUrl at $resolvedRef) into '$SourcePath'. Check network access and that the ref exists."
     }
     Write-Host "Admin App source ready at $SourcePath."
+}
+
+# Admin App 4.1 refuses to start with a sample database password or OIDC client
+# secret. Check them now, before the install runs, instead of finishing with an API
+# that never comes up. 05-deploy-api.ps1 repeats this for a run on its own.
+if (Test-AdminAppChecksProductionSecrets -SourcePath $SourcePath) {
+    if ($DbEngine -eq 'mssql') { Assert-NotSampleSecret -Value $AppDbPasswordPlain -Label "Admin App DB login password (-AppDbPassword)" }
+    if ($DbEngine -eq 'pgsql') { Assert-NotSampleSecret -Value $PostgresAppPasswordPlain -Label "Postgres app user password (-PostgresAppPassword)" }
+    Assert-NotSampleSecret -Value ([System.Net.NetworkCredential]::new('', $OidcClientSecret).Password) -Label "OIDC client secret (-OidcClientSecret)"
+}
+if ($DbEncryptionKey -and (Test-IsSampleEncryptionKey -Key $DbEncryptionKey)) {
+    throw "-DbEncryptionKey is a publicly known sample key from the Admin App repository. Pass the key of this install (from install-summary.txt), or omit -DbEncryptionKey."
 }
 
 # Node runtime: install Node (or remediate a too-old version via nvm) and set the
@@ -898,6 +962,7 @@ if ($idpIsKeycloak) {
 
 Write-Phase "Phase 3.2: Deploy API (05-deploy-api.ps1)"
 $apiDestPath = "C:\inetpub\EdFi-AdminApp-API"
+$apiAppPoolName = 'EdFi-AdminApp-API'
 $apiArgs = @{
     SourcePath           = $SourcePath
     DestPath             = $apiDestPath
@@ -928,7 +993,11 @@ if ($CertificatePfxPath)    { $apiArgs.CertificatePfxPath    = $CertificatePfxPa
 if ($CertificatePassword)   { $apiArgs.CertificatePassword   = $CertificatePassword }
 if ($SkipSelfSignedTrust)   { $apiArgs.SkipSelfSignedTrust   = $true }
 if ($DisableSslVerification) { $apiArgs.DisableSslVerification = $true }
-if ($idpIsKeycloak) { $apiArgs.ExtraCaCertificatePath = $keycloakCaCertificatePath }
+# Always passed: an empty value tells 05 to drop the Keycloak certificate (another
+# identity provider). A run of 05 on its own, without the parameter, keeps it.
+$apiArgs.ExtraCaCertificatePath = $(if ($idpIsKeycloak) { $keycloakCaCertificatePath } else { '' })
+if ($DbEncryptionKey) { $apiArgs.DbEncryptionKey = $DbEncryptionKey }
+$apiArgs.AppPoolName = $apiAppPoolName
 if ($DbEngine -eq 'mssql') {
     $apiArgs.AppDbUsername = $AppDbUsername
     $apiArgs.AppDbPassword = $AppDbPassword
@@ -946,31 +1015,35 @@ if ($DbEngine -eq 'mssql') {
 
 # Read back the resolved per-install encryption key (05 preserves an existing one
 # or generates a fresh one) so the summary can record it for backup. 05 delivers it
-# in the API App Pool's NODE_CONFIG (05's default -AppPoolName, which is not
-# overridden here), read through the same ServerManager assembly 05 uses.
-$DbEncryptionKey = ''
+# in the API App Pool's NODE_CONFIG, read through the same ServerManager assembly 05
+# uses. ConvertFrom-SecretJson parses it, so a parse error cannot write NODE_CONFIG
+# to a transcript.
+$summaryEncryptionKey = ''
 $summaryManager = $null
 try {
     if (-not ('Microsoft.Web.Administration.ServerManager' -as [type])) {
         Add-Type -Path "$env:SystemRoot\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
     }
     $summaryManager = New-Object Microsoft.Web.Administration.ServerManager
-    $apiPool = $summaryManager.ApplicationPools['EdFi-AdminApp-API']
+    $apiPool = $summaryManager.ApplicationPools[$apiAppPoolName]
     if ($apiPool) {
         $nodeConfigVariable = @($apiPool.GetCollection('environmentVariables') | Where-Object { $_.GetAttributeValue('name') -eq 'NODE_CONFIG' }) | Select-Object -First 1
         if ($nodeConfigVariable) {
-            $deployedKey = "$((([string]$nodeConfigVariable.GetAttributeValue('value')) | ConvertFrom-Json).DB_ENCRYPTION_SECRET_VALUE.KEY)"
-            if ($deployedKey -match '^[0-9a-fA-F]{64}$') { $DbEncryptionKey = $deployedKey }
+            $deployedNodeConfig = ConvertFrom-SecretJson -JsonText ([string]$nodeConfigVariable.GetAttributeValue('value'))
+            if ($deployedNodeConfig -and $deployedNodeConfig.DB_ENCRYPTION_SECRET_VALUE) {
+                $deployedKey = "$($deployedNodeConfig.DB_ENCRYPTION_SECRET_VALUE.KEY)"
+                if ($deployedKey -match '^[0-9a-fA-F]{64}$') { $summaryEncryptionKey = $deployedKey }
+            }
         }
     }
 } catch {
-    # Not shown: a JSON parse message can quote part of NODE_CONFIG, which holds secrets.
-    Write-Warning "Could not read the encryption key back from the App Pool's NODE_CONFIG, so the install summary will not include it."
+    # The IIS read failed; the single warning below covers it.
+    $summaryEncryptionKey = ''
 } finally {
     if ($summaryManager) { $summaryManager.Dispose() }
 }
-if (-not $DbEncryptionKey) {
-    Write-Warning "The install summary will not include the data-encryption key. It is still configured on the App Pool 'EdFi-AdminApp-API' (NODE_CONFIG, DB_ENCRYPTION_SECRET_VALUE.KEY); back it up from there."
+if (-not $summaryEncryptionKey) {
+    Write-Warning "Could not read the data-encryption key back from the NODE_CONFIG of App Pool '$apiAppPoolName', so the install summary will not include it. It is still configured there (DB_ENCRYPTION_SECRET_VALUE.KEY); back it up from IIS Manager."
 }
 
 Write-Phase "Phase 3.3: Deploy the web application (06-deploy-fe.ps1)"
@@ -1290,7 +1363,7 @@ Identity Provider (external: $IdpProvider)
 $encryptionSummary = @"
 
 Data encryption key (aes-256-cbc, ODS/API environment secrets)
-  Key:                $DbEncryptionKey
+  Key:                $summaryEncryptionKey
   IMPORTANT: Back this up. Losing or changing it makes every ODS/API
   environment secret stored in the Admin App permanently unrecoverable.
 "@
@@ -1326,8 +1399,8 @@ Notes
 # default) so the user can recover the generated key later. Lives outside the
 # scripts folder because it's an install artifact, not a script. The console copy
 # redacts the generated key (the file is the access control list-protected place it lives).
-$summaryConsole = if ($DbEncryptionKey) {
-    $summary.Replace($DbEncryptionKey, "(written to the protected install-summary.txt -- Administrators only)")
+$summaryConsole = if ($summaryEncryptionKey) {
+    $summary.Replace($summaryEncryptionKey, "(written to the protected install-summary.txt -- Administrators only)")
 } else {
     $summary
 }
