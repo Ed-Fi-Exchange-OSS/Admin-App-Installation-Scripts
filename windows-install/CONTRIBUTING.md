@@ -125,7 +125,8 @@ MSI is left in place on uninstall, switching may require removing the current ha
 | 3333 / **3443** | API HTTP → redirects to HTTPS |
 | 4200 / **4443** | Web application HTTP → redirects to HTTPS |
 | 5432 | PostgreSQL (loopback-bound by default) |
-| 8080 | Keycloak (local dev) |
+| 8080 | Keycloak HTTP (local dev; provisioning and health checks) |
+| 8443 | Keycloak HTTPS (the OIDC issuer Admin App 4.1 accepts) |
 
 Use `curl.exe` for HTTPS smoke checks — `Invoke-WebRequest` on PS 5.1 cannot handshake the
 self-signed binding:
