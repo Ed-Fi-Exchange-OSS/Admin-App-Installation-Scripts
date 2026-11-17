@@ -72,9 +72,11 @@ $AdminPasswordPlain = [System.Net.NetworkCredential]::new('', $AdminPassword).Pa
 # M1 (PR #234 security review): this script runs Keycloak in dev mode. Surface the
 # posture prominently on every launch so it is never mistaken for production-ready.
 Write-Warning @"
-Keycloak will run in 'start-dev' mode: HTTP only, embedded H2 database, hostname
-strictness disabled. This is for LOCAL DEVELOPMENT ONLY. For anything beyond local
-dev, run 'kc.bat start' with --hostname, a real database (e.g. PostgreSQL), and TLS.
+Keycloak will run in 'start-dev' mode: embedded H2 database, hostname strictness
+disabled, and HTTPS only if idp-keycloak-setup.ps1 configured it (with a self-signed
+certificate). This is for LOCAL DEVELOPMENT ONLY. For anything beyond local dev, run
+'kc.bat start' with --hostname, a real database (e.g. PostgreSQL), and a trusted
+TLS certificate.
 "@
 
 $startupLog = Join-Path $KeycloakInstallPath "keycloak-startup.log"

@@ -7,9 +7,10 @@ orgs (with their type and hierarchy) to a CSV, and an import script that loads
 the CSV into the Admin App's `edorg` table under an existing tenant/ODS
 registration.
 
-This is a temporary bridge for deployments whose ODS already contains
-education organizations: Admin App v4.1 is slated to sync ed orgs natively,
-after which these scripts are unnecessary.
+This is a bridge for Admin App v4.0 deployments whose ODS already contains
+education organizations. Admin App v4.1 syncs ed orgs itself: syncing an
+environment asks the Admin API to refresh them from the ODS (checked with
+Admin API 2.4.0), so these scripts are not needed there.
 
 Full walkthrough (prerequisites, verification, troubleshooting):
 [Education Organization Sync on docs.ed-fi.org](https://docs.ed-fi.org/reference/admin-app/user-guide/edorg-synchronization).

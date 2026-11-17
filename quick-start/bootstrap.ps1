@@ -118,7 +118,7 @@ param(
     [ValidateSet('keycloak', 'microsoft', 'entra', 'auth0')][string]$Provider = 'keycloak',
 
     # --- Keycloak provisioning (only used when -Provider keycloak) -------------
-    [string]$KeycloakBaseUrl = "http://localhost:8080",
+    [string]$KeycloakBaseUrl = "https://localhost:8443",
     [string]$AdminUser = "admin",
     [string]$AdminPassword,                      # required for -Provider keycloak
     [string]$RealmName = "edfi",

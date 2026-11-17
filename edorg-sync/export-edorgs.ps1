@@ -28,8 +28,8 @@
   reported here and skipped later by import-edorgs.ps1. Read-only: the script
   never writes to the ODS.
 
-  This is a temporary bridge for Admin App v4.0 deployments whose ed orgs
-  predate the Admin App; Admin App v4.1 is slated to sync ed orgs natively.
+  This is a bridge for Admin App v4.0 deployments whose ed orgs predate the
+  Admin App. Admin App v4.1 syncs ed orgs itself when an environment is synced.
 
 .PARAMETER OdsDatabaseName
   The ODS database to export from (e.g. EdFi_Ods_2026,

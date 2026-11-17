@@ -125,7 +125,7 @@ Numbered scripts map to the official guide's section order. The **generic path**
 | `02-prereqs-sql.ps1` | SQL Server config: Mixed Mode + TCP/IP + creates the `sbaa` database + provisions a dedicated least-privilege app login (`edfi_adminapp`, `db_owner` on `sbaa` only, not a server sysadmin) that the app connects as. All server-level work runs under Windows authentication; the `sa` login is never touched. For a managed **Azure SQL** target, pass `-SqlServerHost` (see [SQL Server target](#sql-server-target-local-instance-or-managed-azure-sql)): it skips the local-instance steps and provisions a contained user as the SQL admin. |
 | `03-prereqs-node.ps1` | Node.js install (if missing) and nvm-windows remediation of a too-old version. No Java, no Keycloak. |
 | `04-build.ps1` | `npm ci --legacy-peer-deps`, then `build:api` and `build:fe`. Seeds `packages\fe\.env` (VITE_*) before building. Skips if artifacts are current (override with `-Force`). |
-| `05-deploy-api.ps1` | Deploys the API to the standalone site `EdFi-AdminApp-API` (HTTPS `3443`; HTTP `3333` redirects to it). Seeds/patches `production.js`, writes `web.config`, configures the App Pool, and sets `NPM_CONFIG_CACHE` on the App Pool. |
+| `05-deploy-api.ps1` | Deploys the API to the standalone site `EdFi-AdminApp-API` (HTTPS `3443`; HTTP `3333` redirects to it). Seeds/patches `production.js`, writes `web.config`, configures the App Pool, and sets `NODE_CONFIG` (configuration plus the per-install encryption key and session secret, both reused on re-runs) and `NPM_CONFIG_CACHE` on the App Pool. |
 | `06-deploy-fe.ps1` | Deploys the web application to the standalone site `EdFi-AdminApp-FE` (HTTPS `4443`; HTTP `4200` redirects to it) with a SPA-fallback `web.config`. |
 
 ### Local identity provider example (optional — Keycloak)
@@ -189,7 +189,7 @@ The Admin App's authentication engine is provider-agnostic (generic OIDC discove
 - **You register the OIDC client yourself** in the provider's portal (no script provisions the Google or Auth0 client; for Entra, the optional `idp-entra-setup.ps1` can script the App Registration). `install-all` validates the issuer's discovery endpoint and, at the end of the install, prints the exact URIs to register. The redirect URI is `https://localhost:3443/api/auth/callback/<id>`, where `<id>` is the `oidc` database row id `install-all` resolves and prints ("OIDC redirect callback id resolved to `<id>`") — register `callback/<that id>`, not a hardcoded `callback/1`. Post-logout is `https://localhost:3443/api/auth/post-logout` and the allowed origin is `https://localhost:4443`.
 - A user must exist in the provider whose **email/username claim equals `-AdminUsername`** — the script seeds that user in the `[user]` table with the admin role, but the identity lives in your identity provider. For Entra specifically, the app registration must emit an `email` claim; see [Entra: "Invalid email from IdP" after sign-in](#entra-invalid-email-from-idp-after-sign-in).
 
-You can also drive the per-section scripts manually (`00`→`06`), passing `-Oidc*` to `05-deploy-api.ps1` and `-ViteIdpAccountUrl` to `04-build.ps1`. When you do, the OIDC **client secret, issuer, client id, and admin username must match** between the identity-provider step (`idp-keycloak-setup.ps1` or your external provider) and `05-deploy-api.ps1` — a mismatch surfaces as a login failure, not an install error. Open a **fresh** elevated PowerShell after `03-prereqs-node.ps1` installs Node, so the updated `PATH` is in effect before `04-build.ps1` runs.
+You can also drive the per-section scripts manually (`00`→`06`), passing `-Oidc*` to `05-deploy-api.ps1`, `-ViteIdpAccountUrl` to `04-build.ps1`, and `-OidcIssuer` to `06-deploy-fe.ps1` (its sign-out CSP allows that origin; the default is the local Keycloak). With the local Keycloak, also pass `-ExtraCaCertificatePath C:\keycloak\edfi-adminapp-https.pem` to `05-deploy-api.ps1` on the first deploy; a later run of `05-deploy-api.ps1` without it keeps the certificate already set, and `-ExtraCaCertificatePath ''` removes it. When you do, the OIDC **client secret, issuer, client id, and admin username must match** between the identity-provider step (`idp-keycloak-setup.ps1` or your external provider) and `05-deploy-api.ps1` — a mismatch surfaces as a login failure, not an install error. Open a **fresh** elevated PowerShell after `03-prereqs-node.ps1` installs Node, so the updated `PATH` is in effect before `04-build.ps1` runs.
 
 ### Auth0
 
@@ -241,6 +241,18 @@ Re-running on a working install is mostly a no-op — most steps detect existing
 - `-SkipPreflightCheck` — skip `00-check-prereqs`
 - `-AcceptRisks` — bypass the y/N confirmation on `[RISK]` items (non-interactive)
 - `-AutoUpgradeNode` — when `03-prereqs-node.ps1` finds a too-old Node, skip its y/N prompt and remediate via nvm-windows automatically
+- `-DbEncryptionKey <64 hex>` — only to recover an install whose App Pool `NODE_CONFIG` cannot be read (the run stops and says so). Pass the key from `install-summary.txt`; it then appears in the console history, so clear it afterwards.
+
+### Upgrading from Admin App 4.0.x
+
+Re-run `install-all.ps1` with your usual parameters. The encryption key, the session secret and the existing data are kept, and the local Keycloak gets its HTTPS listener. An existing Admin App checkout is used as it is, whatever `-AdminAppRef` says (the run prints the checkout's version and warns when it differs), so check out the new release in it first:
+
+```powershell
+git -C C:\Ed-Fi\Ed-Fi-AdminApp fetch --tags
+git -C C:\Ed-Fi\Ed-Fi-AdminApp checkout v4.1.0
+```
+
+Admin App 4.1 refuses to start with a sample database password or OIDC client secret (such as `YourStrong!Passw0rd` or `big-secret-123`), so the run stops before installing anything if one is used. Pass a different value: the run updates the database login and the local Keycloak client; with another identity provider, change the client secret there first.
 
 ### Advanced flags
 
@@ -256,7 +268,9 @@ Re-running on a working install is mostly a no-op — most steps detect existing
 - **Admin App (web application)**: `https://localhost:4443/` (HTTP `http://localhost:4200/` redirects here)
 - **API**: `https://localhost:3443/` (HTTP `http://localhost:3333/` redirects here)
 - **Keycloak admin console**: `http://localhost:8080/admin/`
-- **Keycloak `edfi` realm**: `http://localhost:8080/realms/edfi/`
+- **Keycloak `edfi` realm (the Admin App's OIDC issuer)**: `https://localhost:8443/realms/edfi/`
+
+The local Keycloak listens on both ports. Admin App 4.1 only accepts an HTTPS issuer, so `idp-keycloak-setup.ps1` adds an HTTPS listener on `8443` with a self-signed `localhost` certificate (FriendlyName `Ed-Fi Admin App Keycloak self-signed`), configured in `C:\keycloak\conf\keycloak.conf`. The certificate is trusted in `LocalMachine\Root` unless `-SkipSelfSignedTrust` is passed; with that switch, browsers warn on the Keycloak sign-in page as well as on the two sites. The API trusts it through `NODE_EXTRA_CA_CERTS` on its App Pool, pointing at `C:\keycloak\edfi-adminapp-https.pem` (or at a bundle that also holds a CA file you had already set there), because Node does not read the Windows certificate store. The HTTP port `8080` stays on for the scripts' provisioning calls and health checks.
 
 ---
 
@@ -268,7 +282,7 @@ Both IIS sites are served over HTTPS by default — API on `3443`, web applicati
 
 1. `-CertificateThumbprint` — bind an existing certificate already in `LocalMachine\My`.
 2. `-CertificatePfxPath` + `-CertificatePassword` — import and bind a PFX you supply.
-3. None supplied → a **self-signed** certificate (CN/SAN `localhost` + the machine name) is generated, bound, and added to `LocalMachine\Root` so local browsers trust it. Opt out of the trust step with `-SkipSelfSignedTrust`.
+3. None supplied → a **self-signed** certificate (CN/SAN `localhost` + the machine name) is generated, bound, and added to `LocalMachine\Root` so local browsers trust it. Opt out of the trust step with `-SkipSelfSignedTrust`; browsers then warn on both sites (and, with the local Keycloak, on its sign-in page).
 
 On `install-all.ps1` the ports are `-HttpsApiPort` (default `3443`) and `-HttpsFePort` (default `4443`); the standalone `05-deploy-api.ps1` and `06-deploy-fe.ps1` each take a single `-HttpsPort` (default `3443` and `4443` respectively). The certificate parameters above are shared across all three.
 
@@ -313,7 +327,7 @@ See the [Admin App User's Guide](https://docs.ed-fi.org/reference/admin-app/) fo
 Keycloak runs as an ordinary background process, so it does not come back on its own after a reboot — and a stopped Keycloak breaks login in a way that is easy to misread. The Admin App API registers its OIDC strategies **once, when it starts, with no retry**. If the API starts before Keycloak is reachable, every login returns a 404 and the API log (`C:\inetpub\EdFi-AdminApp-API\logs\node-stdout*.log`) shows:
 
 ```
-ERROR Error registering OIDC provider http://localhost:8080/realms/edfi: AggregateError
+ERROR Error registering OIDC provider https://localhost:8443/realms/edfi: AggregateError
 ERROR Error: Unknown authentication strategy "oidc-1"
 ```
 
@@ -373,9 +387,9 @@ Restart-WebAppPool -Name "EdFi-AdminApp-API"
 
 ### What these scripts don't do
 
-- **Upstream TLS verification (adding an Environment)** — the API verifies the TLS certificate of the ODS/API and Admin API it connects to (`SSL_VERIFICATION` is on by default). If those use a self-signed or dev certificate — common for a local ODS/API — adding an Environment fails with a certificate error (`DEPTH_ZERO_SELF_SIGNED_CERT`) in the API log (`logs\node-stdout*.log`). For a local/dev install, either pass `-DisableSslVerification` to `install-all.ps1` / `05-deploy-api.ps1` (turns verification off — local dev only), or keep it on and make Node trust the upstream certificate via `NODE_EXTRA_CA_CERTS` (the certificate's `.pem` path) or `--use-system-ca` (Node 22.15+, honors the Windows certificate store). Leave verification on (no flag) for production, where upstreams should present trusted certificates.
+- **Upstream TLS verification (adding an Environment)** — the API verifies the TLS certificate of the ODS/API and Admin API it connects to (`SSL_VERIFICATION` is on by default). If those use a self-signed or dev certificate — common for a local ODS/API — adding an Environment fails with a certificate error (`DEPTH_ZERO_SELF_SIGNED_CERT`) in the API log (`logs\node-stdout*.log`). For a local/dev install, either pass `-DisableSslVerification` to `install-all.ps1` / `05-deploy-api.ps1` (turns verification off — local dev only), or keep it on and make Node trust the upstream certificate via `NODE_EXTRA_CA_CERTS` on the API App Pool (the certificate's `.pem` path). Re-runs keep that value; with the local Keycloak, `05-deploy-api.ps1` combines it with the Keycloak certificate in `C:\keycloak\edfi-adminapp-node-ca-bundle.pem`. Leave verification on (no flag) for production, where upstreams should present trusted certificates.
 - **Production hardening** — real certificates, secrets management, log rotation, etc. The optional dockerized Yopass runs HTTP-only behind localhost and is not production-hardened.
-- **Keycloak in production mode** — the example identity provider runs in `start-dev` (HTTP, embedded H2 database, hostname strictness off) and is for local development only. For anything beyond local dev, run `kc.bat start` with `--hostname`, a real database (e.g. PostgreSQL), and TLS.
+- **Keycloak in production mode** — the example identity provider runs in `start-dev` (embedded H2 database, hostname strictness off, HTTPS on a self-signed certificate) and is for local development only. For anything beyond local dev, run `kc.bat start` with `--hostname`, a real database (e.g. PostgreSQL), and TLS.
 - **Keycloak as a Windows service** — Keycloak ships no Windows service wrapper, so reboot survival is handled with a Scheduled Task (see [Surviving a reboot](#surviving-a-reboot-local-keycloak) above) rather than a real service. The task starts Keycloak at boot; it does not restart Keycloak if it stops afterwards.
 - **Secret rotation** — not enabled; the AdminApp has no automation to pick up rotated secrets.
 
